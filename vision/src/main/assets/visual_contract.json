@@ -1,0 +1,133 @@
+{
+  "contract_version": "v6",
+  "coordinate_convention": "half-open [x1,y1,x2,y2]",
+  "canvas": {
+    "width": 1000,
+    "height": 1000
+  },
+  "quiet_zone": {
+    "margin": 60,
+    "description": "Outer white margin. No features outside [60, 60, 940, 940]."
+  },
+  "border": {
+    "bbox": [60, 60, 940, 940],
+    "stroke_width": 10,
+    "color": "BLACK"
+  },
+  "anchors": {
+    "size": 80,
+    "elements": {
+      "TL": {
+        "bbox": [100, 100, 180, 180],
+        "identity_pattern": {
+          "description": "Black outer ring, inner core Top-Left quadrant is BLACK",
+          "core_bbox": [120, 120, 160, 160],
+          "black_quadrants": ["top_left"]
+        }
+      },
+      "TR": {
+        "bbox": [820, 100, 900, 180],
+        "identity_pattern": {
+          "description": "Black outer ring, inner core Top-Right quadrant is BLACK",
+          "core_bbox": [840, 120, 880, 160],
+          "black_quadrants": ["top_right"]
+        }
+      },
+      "BR": {
+        "bbox": [820, 820, 900, 900],
+        "identity_pattern": {
+          "description": "Black outer ring, inner core Bottom-Right quadrant is BLACK",
+          "core_bbox": [840, 840, 880, 880],
+          "black_quadrants": ["bottom_right"]
+        }
+      },
+      "BL": {
+        "bbox": [100, 820, 180, 900],
+        "identity_pattern": {
+          "description": "Black outer ring, inner core Bottom-Left quadrant is BLACK",
+          "core_bbox": [120, 840, 160, 880],
+          "black_quadrants": ["bottom_left"]
+        }
+      }
+    }
+  },
+  "calibration_pilots": {
+    "elements": {
+      "BLACK": {
+        "carrier_bbox": [280, 100, 320, 140],
+        "carrier_color": "WHITE",
+        "core_bbox": [290, 110, 310, 130],
+        "core_color": "BLACK"
+      },
+      "WHITE": {
+        "carrier_bbox": [360, 100, 400, 140],
+        "carrier_color": "BLACK",
+        "core_bbox": [370, 110, 390, 130],
+        "core_color": "WHITE"
+      },
+      "RED": {
+        "carrier_bbox": [600, 100, 640, 140],
+        "carrier_color": "WHITE",
+        "core_bbox": [610, 110, 630, 130],
+        "core_color": "RED"
+      },
+      "BLUE": {
+        "carrier_bbox": [680, 100, 720, 140],
+        "carrier_color": "WHITE",
+        "core_bbox": [690, 110, 710, 130],
+        "core_color": "BLUE"
+      }
+    }
+  },
+  "phase_sync_cells": {
+    "elements": {
+      "SYNC_0": {
+        "bbox": [460, 100, 500, 140],
+        "state_rule": "Alternates BLACK and WHITE each frame, tracks frame parity."
+      },
+      "SYNC_1": {
+        "bbox": [500, 100, 540, 140],
+        "state_rule": "Always inverse of SYNC_0."
+      }
+    }
+  },
+  "border_tracking": {
+    "elements": {
+      "TOP_1": { "bbox": [200, 60, 240, 80], "color": "BLACK" },
+      "TOP_2": { "bbox": [760, 60, 800, 80], "color": "BLACK" },
+      "BOTTOM_1": { "bbox": [200, 920, 240, 940], "color": "BLACK" },
+      "BOTTOM_2": { "bbox": [760, 920, 800, 940], "color": "BLACK" },
+      "LEFT_1": { "bbox": [60, 200, 80, 240], "color": "BLACK" },
+      "LEFT_2": { "bbox": [60, 760, 80, 800], "color": "BLACK" },
+      "RIGHT_1": { "bbox": [920, 200, 940, 240], "color": "BLACK" },
+      "RIGHT_2": { "bbox": [920, 760, 940, 800], "color": "BLACK" }
+    }
+  },
+  "data_grid": {
+    "cols": 20,
+    "rows": 20,
+    "bbox": [200, 200, 800, 800],
+    "cell_size": 30,
+    "ordering": "row-major, top-to-bottom, left-to-right"
+  },
+  "palette": {
+    "indexes": {
+      "0": { "name": "BLACK", "sRGB": "#000000" },
+      "1": { "name": "WHITE", "sRGB": "#FFFFFF" },
+      "2": { "name": "RED",   "sRGB": "#FF0000" },
+      "3": { "name": "BLUE",  "sRGB": "#0000FF" }
+    }
+  },
+  "rendering_rules": {
+    "sender_marker_size": "Largest multiple of 100 pixels that fits the display",
+    "scaling": "Nearest-neighbor rendering with no antialiasing"
+  },
+  "sampling_rules": {
+    "normalized_region": "Central 15% of cell area",
+    "method": "5 median Y/U/V sample positions (center, and 4 midpoints to corners of central region)"
+  },
+  "validation_thresholds": {
+    "reprojection_max_error_ratio": "0.15 of visible cell width",
+    "geometry_max_skew": "0.20 ratio"
+  }
+}
