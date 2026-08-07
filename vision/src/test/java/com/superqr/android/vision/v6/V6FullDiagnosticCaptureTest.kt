@@ -256,4 +256,41 @@ class V6FullDiagnosticCaptureTest {
             frameTrace = frameTrace
         )
     }
+
+    @Test
+    fun testValidTransportFrameIsNotLabeledAsStaticPatternMismatch() {
+        val baseBundle = createDummyBundle(timestamp = 1700000000000L)
+        val transportPayload = baseBundle.payload.copy(
+            transportSessionId = 3,
+            transportFrameId = 0,
+            transportTotalFrames = 2,
+            transportPayloadHex = "0000001F" + "00".repeat(87),
+            transportCrc16Hex = "9E2F",
+            transportError = null
+        )
+        val transportBundle = baseBundle.copy(payload = transportPayload)
+
+        val summary = V6FullDiagnosticExporter.generateSummaryTxt(transportBundle)
+
+        assertTrue(summary.contains("[OK] V6 Transport Frame: VALID"))
+        assertTrue(summary.contains("[OK] CRC16: PASS"))
+        assertTrue(summary.contains("[INFO] Static golden-pattern comparison not applicable to transport frame"))
+        assertFalse(summary.contains("CRITICAL: Pattern CRC mismatch!"))
+        assertTrue(summary.contains("Session ID: 3"))
+        assertTrue(summary.contains("Frame ID: 0 / 2"))
+        assertTrue(summary.contains("Raw Header Prefix: A5060300000002"))
+        assertTrue(summary.contains("Package Length (Frame 0): 31 bytes"))
+    }
+
+    @Test
+    fun testStaticPatternRetainsGoldenEvaluationSemantics() {
+        val baseBundle = createDummyBundle(timestamp = 1700000000000L)
+        val summaryMatch = V6FullDiagnosticExporter.generateSummaryTxt(baseBundle)
+        assertTrue(summaryMatch.contains("[OK] Pattern CRC Match"))
+
+        val mismatchPayload = baseBundle.payload.copy(decodedCrc32 = 0x12345678L)
+        val mismatchBundle = baseBundle.copy(payload = mismatchPayload)
+        val summaryMismatch = V6FullDiagnosticExporter.generateSummaryTxt(mismatchBundle)
+        assertTrue(summaryMismatch.contains("CRITICAL: Pattern CRC mismatch!"))
+    }
 }

@@ -83,7 +83,13 @@ data class V6FrameDiagnosticPayload(
     val contoursConsidered: Int = 0,
     val quadsConsidered: Int = 0,
     val normalizedAnalysisWidth: Int = 0,
-    val normalizedAnalysisHeight: Int = 0
+    val normalizedAnalysisHeight: Int = 0,
+    val transportSessionId: Int? = null,
+    val transportFrameId: Int? = null,
+    val transportTotalFrames: Int? = null,
+    val transportPayloadHex: String? = null,
+    val transportCrc16Hex: String? = null,
+    val transportError: String? = null
 )
 
 data class V6CapturedFrameBundle(

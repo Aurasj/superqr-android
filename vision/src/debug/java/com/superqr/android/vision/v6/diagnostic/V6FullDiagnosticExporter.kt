@@ -69,6 +69,7 @@ object V6FullDiagnosticExporter {
         val decCrcHex = payload.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
         val expCrcHex = String.format("%08X", payload.expectedCrc32)
         val crcMatch = decCrcHex == expCrcHex
+        val isTransportValid = (payload.transportSessionId != null && payload.transportError == null)
 
         val ySuccessTotal = payload.cellDetails.sumOf { it.yReadSuccessCount }
         val uSuccessTotal = payload.cellDetails.sumOf { it.uReadSuccessCount }
@@ -89,7 +90,6 @@ object V6FullDiagnosticExporter {
         }
 
         val bwDist = payload.pairwisePilotDistances["DIST_BLACK_WHITE"] ?: 0.0
-        val brDist = payload.pairwisePilotDistances["DIST_BLACK_RED"] ?: 0.0
         if (bwDist < 5000.0) {
             highlights.add("WARNING: Low BLACK-WHITE pilot separation distance ($bwDist)")
         } else {
@@ -102,13 +102,48 @@ object V6FullDiagnosticExporter {
             highlights.add("[OK] Cell Confidence: Low uncertain cell count (${bundle.uncertainCount}/400).")
         }
 
-        if (crcMatch) {
-            highlights.add("[OK] Pattern CRC Match: Decoded CRC32 matches expected $expCrcHex.")
+        if (isTransportValid) {
+            highlights.add("[OK] V6 Transport Frame: VALID (Session: ${payload.transportSessionId}, Frame: ${payload.transportFrameId}/${payload.transportTotalFrames})")
+            highlights.add("[OK] CRC16: PASS (0x${payload.transportCrc16Hex})")
+            highlights.add("[INFO] Static golden-pattern comparison not applicable to transport frame")
         } else {
-            highlights.add("CRITICAL: Pattern CRC mismatch! Decoded=$decCrcHex, Expected=$expCrcHex")
+            if (crcMatch) {
+                highlights.add("[OK] Pattern CRC Match: Decoded CRC32 matches expected $expCrcHex.")
+            } else {
+                highlights.add("CRITICAL: Pattern CRC mismatch! Decoded=$decCrcHex, Expected=$expCrcHex")
+            }
         }
 
         val quadStr = payload.detectedQuad?.joinToString(", ") { "[%.1f, %.1f]".format(Locale.US, it[0], it[1]) } ?: "N/A"
+
+        val decodingSection = if (isTransportValid) {
+            val prefix = "A506${"%02X".format(payload.transportSessionId)}${"%04X".format(payload.transportFrameId)}${"%04X".format(payload.transportTotalFrames)}"
+            val pkgLenStr = if (payload.transportFrameId == 0 && payload.transportPayloadHex != null && payload.transportPayloadHex.length >= 8) {
+                "Package Length (Frame 0): ${payload.transportPayloadHex.substring(0, 8).toLong(16)} bytes\n"
+            } else ""
+            """
+--- DECODING & CLASSIFICATION ---
+Transport Frame: VALID
+Session ID: ${payload.transportSessionId}
+Frame ID: ${payload.transportFrameId} / ${payload.transportTotalFrames}
+CRC16: PASS (0x${payload.transportCrc16Hex})
+Raw Header Prefix: $prefix
+${pkgLenStr}Static Golden-Pattern Comparison: N/A (Transport Data Grid)
+Classification Source: ${payload.classificationSource}
+""".trimIndent()
+        } else {
+            """
+--- DECODING & CLASSIFICATION ---
+Expected CRC32: $expCrcHex
+Decoded CRC32:  $decCrcHex ${if (crcMatch) "(MATCH)" else "(MISMATCH)"}
+Cell Classification Results:
+  Correct:   ${bundle.correctCount} / 400 (${"%.1f".format(Locale.US, bundle.correctCount * 100.0 / 400.0)}%)
+  Incorrect: ${bundle.incorrectCount} / 400 (${"%.1f".format(Locale.US, bundle.incorrectCount * 100.0 / 400.0)}%)
+  Uncertain: ${bundle.uncertainCount} / 400 (${"%.1f".format(Locale.US, bundle.uncertainCount * 100.0 / 400.0)}%)
+Classification Source: ${payload.classificationSource}
+${if (payload.transportError != null) "Transport Rejection Reason: ${payload.transportError}" else ""}
+""".trimIndent()
+        }
 
         return """
 ===================================================================
@@ -118,14 +153,7 @@ Timestamp: $dateStr
 Contract Hash: ${payload.contractHash}
 Active Pattern: ${payload.patternName} (Seed: ${payload.seed})
 
---- DECODING & CLASSIFICATION ---
-Expected CRC32: $expCrcHex
-Decoded CRC32:  $decCrcHex ${if (crcMatch) "(MATCH)" else "(MISMATCH)"}
-Cell Classification Results:
-  Correct:   ${bundle.correctCount} / 400 (${"%.1f".format(Locale.US, bundle.correctCount * 100.0 / 400.0)}%)
-  Incorrect: ${bundle.incorrectCount} / 400 (${"%.1f".format(Locale.US, bundle.incorrectCount * 100.0 / 400.0)}%)
-  Uncertain: ${bundle.uncertainCount} / 400 (${"%.1f".format(Locale.US, bundle.uncertainCount * 100.0 / 400.0)}%)
-Classification Source: ${payload.classificationSource}
+$decodingSection
 
 --- DETECTOR & TRACKER STATE ---
 Tracking State: ${bundle.trackingState}
@@ -222,6 +250,22 @@ ${highlights.joinToString("\n")}
 
         root.put("expectedCrc32", String.format("%08X", payload.expectedCrc32))
         root.put("decodedCrc32", payload.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A")
+
+        val isTransportValid = (payload.transportSessionId != null && payload.transportError == null)
+        root.put("transportParseAttempted", payload.classificationSource == "FULL_DETECTION")
+        root.put("transportValid", isTransportValid)
+        root.put("transportSessionId", payload.transportSessionId ?: JSONObject.NULL)
+        root.put("transportFrameId", payload.transportFrameId ?: JSONObject.NULL)
+        root.put("transportTotalFrames", payload.transportTotalFrames ?: JSONObject.NULL)
+        root.put("transportCrc16Hex", payload.transportCrc16Hex ?: JSONObject.NULL)
+        root.put("transportError", payload.transportError ?: JSONObject.NULL)
+        if (isTransportValid) {
+            val prefix = "A506${"%02X".format(payload.transportSessionId)}${"%04X".format(payload.transportFrameId)}${"%04X".format(payload.transportTotalFrames)}"
+            root.put("transportHeaderPrefix", prefix)
+            if (payload.transportFrameId == 0 && payload.transportPayloadHex != null && payload.transportPayloadHex.length >= 8) {
+                root.put("transportPackageLength", payload.transportPayloadHex.substring(0, 8).toLong(16))
+            }
+        }
 
         return root.toString(2)
     }

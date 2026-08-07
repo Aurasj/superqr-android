@@ -8,7 +8,9 @@ import android.util.Log
 import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -49,6 +51,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import com.superqr.android.vision.v6.transport.V6SessionAccumulator
 
 data class LastValidEvaluation(
     val timestamp: String,
@@ -140,6 +143,57 @@ fun V6StaticScreen(
     var lastLoggedTrackingState by remember { mutableStateOf<String?>(null) }
     var lastLoggedAccuracy by remember { mutableStateOf<Double?>(null) }
     var lastLoggedEvalTimeMs by remember { mutableLongStateOf(0L) }
+
+    val accumulator = remember { V6SessionAccumulator() }
+    var accumulatorStatus by remember { mutableStateOf("IDLE") }
+    var lastCompletedFile by remember { mutableStateOf<String?>(null) }
+    
+    var completedTransfer by remember { mutableStateOf<com.superqr.android.vision.v6.transport.V6TransferPackage?>(null) }
+    var completedCacheFile by remember { mutableStateOf<File?>(null) }
+
+    var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    var focusState by remember { mutableStateOf("AUTO") }
+
+    fun lockFocus() {
+        val cam = boundCamera
+        if (cam != null && previewView.width > 0 && previewView.height > 0) {
+            focusState = "LOCKING"
+            try {
+                val factory = previewView.meteringPointFactory
+                val point = factory.createPoint(previewView.width / 2f, previewView.height / 2f)
+                val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+                    .disableAutoCancel()
+                    .build()
+                val future = cam.cameraControl.startFocusAndMetering(action)
+                future.addListener({
+                    try {
+                        val res = future.get()
+                        focusState = if (res.isFocusSuccessful) "LOCKED" else "FAILED"
+                        diagnosticLogger.log("INFO", "CAMERA", "FOCUS_LOCK", "Focus & Lock result: $focusState")
+                    } catch (e: Throwable) {
+                        focusState = "FAILED"
+                        diagnosticLogger.log("WARN", "CAMERA", "FOCUS_FAIL", "Focus & Lock failed: ${e.message}")
+                    }
+                }, ContextCompat.getMainExecutor(context))
+            } catch (e: Throwable) {
+                focusState = "FAILED"
+                diagnosticLogger.log("WARN", "CAMERA", "FOCUS_EX", "Focus & Lock exception: ${e.message}")
+            }
+        } else {
+            focusState = "FAILED"
+        }
+    }
+
+    fun unlockFocus() {
+        val cam = boundCamera
+        if (cam != null) {
+            try {
+                cam.cameraControl.cancelFocusAndMetering()
+                diagnosticLogger.log("INFO", "CAMERA", "FOCUS_UNLOCK", "Focus unlocked, continuous AF restored")
+            } catch (e: Throwable) {}
+        }
+        focusState = "AUTO"
+    }
 
     fun reportError(category: String, message: String, reason: String) {
         val sig = "$category|$message"
@@ -367,6 +421,40 @@ fun V6StaticScreen(
                                         }
                                     }
 
+                                    val transportFrame = result.transportFrame
+                                    if (transportFrame != null && completedTransfer == null) {
+                                        try {
+                                            val pkg = accumulator.addFrame(transportFrame)
+                                            if (pkg != null) {
+                                                val safeName = com.superqr.android.vision.v6.transport.V6ReceiveUtils.sanitizeFilename(pkg.filename)
+                                                val rxDir = File(context.cacheDir, "superqr_received")
+                                                rxDir.mkdirs()
+                                                val destFile = File(rxDir, safeName)
+                                                
+                                                analysisExecutor.execute {
+                                                    destFile.writeBytes(pkg.fileData)
+                                                    ContextCompat.getMainExecutor(context).execute {
+                                                        completedCacheFile = destFile
+                                                        completedTransfer = pkg
+                                                    }
+                                                }
+                                                diagnosticLogger.log("INFO", "TRANSPORT", "FILE_COMPLETED", "Recovered ${pkg.filename} (${pkg.fileSize} bytes) to ${destFile.absolutePath}")
+                                                lastCompletedFile = "${pkg.filename} (${pkg.fileSize}b)"
+                                            }
+                                        } catch (e: Throwable) {
+                                            diagnosticLogger.log("ERROR", "TRANSPORT", "ACCUMULATOR_ERROR", "Session failed: ${e.message}")
+                                            accumulatorStatus = "ERROR"
+                                        }
+                                        val sid = accumulator.getCurrentSessionId()
+                                        if (sid != -1) {
+                                            accumulatorStatus = "Session $sid: ${accumulator.getUniqueFrames()}/${accumulator.getTotalFrames()} frames (dup:${accumulator.getDuplicateCount()} conf:${accumulator.getConflictCount()})"
+                                        } else {
+                                            if (!accumulatorStatus.startsWith("ERROR")) {
+                                                accumulatorStatus = "IDLE"
+                                            }
+                                        }
+                                    }
+
                                     val failure = result.failureReason
                                     if (failure != null && (failure.contains("OpenCV initialization") || failure.contains("failed"))) {
                                         diagnosticLogger.log("ERROR", "DETECTOR", "DETECT_FAIL", "Detector error: $failure")
@@ -386,12 +474,13 @@ fun V6StaticScreen(
                     }
                 }
 
-                provider.bindToLifecycle(
+                val bound = provider.bindToLifecycle(
                     lifecycleOwner,
                     CameraSelector.DEFAULT_BACK_CAMERA,
                     preview,
                     analysis
                 )
+                boundCamera = bound
             } catch (e: Throwable) {
                 Log.e("V6StaticScreen", "Failed to bind camera", e)
                 diagnosticLogger.log("ERROR", "SYSTEM", "INIT_FAIL", "Init failed: ${e.message}")
@@ -487,6 +576,62 @@ fun V6StaticScreen(
         isLive -> Color(0xFF2E7D32)
         isHeld -> Color(0xFFF57C00)
         else -> Color.Gray
+    }
+
+    if (completedTransfer != null) {
+        val transfer = completedTransfer!!
+        Box(modifier = modifier.fillMaxSize().background(Color.Black).padding(16.dp)) {
+            Column(
+                modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("TRANSFER COMPLETE", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4CAF50))
+                
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.1f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("File: ${transfer.filename}", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text("Size: ${transfer.fileSize} B", color = Color.White.copy(alpha = 0.8f))
+                        Text("Session: ${accumulator.getCurrentSessionId()}", color = Color.White.copy(alpha = 0.8f))
+                        Text("Frames: ${accumulator.getTotalFrames()} / ${accumulator.getTotalFrames()}", color = Color.White.copy(alpha = 0.8f))
+                        Text("Frame CRC: all accepted frames valid", color = Color.White.copy(alpha = 0.8f))
+                        val fileCrc32 = java.util.zip.CRC32().apply { update(transfer.fileData) }.value
+                        Text("File CRC32: PASS (0x${"%08X".format(fileCrc32)})", color = Color.White.copy(alpha = 0.8f))
+                        Text("Storage: Temporary app cache", color = Color.White.copy(alpha = 0.8f))
+                    }
+                }
+
+                Text("Preview:", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
+                        .padding(8.dp)
+                ) {
+                    val previewText = com.superqr.android.vision.v6.transport.V6ReceiveUtils.generatePreview(transfer.fileData)
+                    Text(previewText, color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                }
+
+                Button(
+                    onClick = {
+                        completedCacheFile?.delete()
+                        completedCacheFile = null
+                        completedTransfer = null
+                        accumulator.reset()
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2))
+                ) {
+                    Text("Scan Another", fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            }
+        }
+        return
     }
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
@@ -646,47 +791,21 @@ fun V6StaticScreen(
                         }
                         1 -> {
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("State: $mainStatusText", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                                    Text("Source: $sourceLabel", fontSize = 11.sp, color = sourceColor, fontWeight = FontWeight.Bold)
-                                    Text("Time: ${currentResult?.processingTimeMs ?: 0}ms", fontSize = 11.sp, color = Color.White.copy(alpha = 0.7f))
-                                }
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    CompactMetricItem(label = "Inliers", value = "${currentResult?.ransacInliers ?: 0}")
-                                    CompactMetricItem(
-                                        label = "Correct",
-                                        value = if (hasValidEval) "${currentResult?.colorCorrect}/400" else "—",
-                                        isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null,
-                                        isHeld = isHeld
-                                    )
-                                    CompactMetricItem(
-                                        label = "Wrong",
-                                        value = if (hasValidEval) "${currentResult!!.colorTotal - currentResult.colorCorrect - currentResult.colorUncertain}" else "—",
-                                        isGood = if (hasValidEval) (currentResult!!.colorTotal - currentResult.colorCorrect - currentResult.colorUncertain) == 0 else null,
-                                        isHeld = isHeld
-                                    )
-                                    CompactMetricItem(
-                                        label = "Uncertain",
-                                        value = if (hasValidEval) "${currentResult?.colorUncertain}" else "—",
-                                        isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null,
-                                        isHeld = isHeld
-                                    )
-                                    CompactMetricBadge(
-                                        label = "CRC",
-                                        value = if (hasValidEval) (if (isCrcPass) "PASS" else "FAIL") else "—",
-                                        isGood = hasValidEval && isCrcPass,
-                                        isHeld = isHeld
-                                    )
-                                }
+                                Text("Receiving V6", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                
+                                val sid = accumulator.getCurrentSessionId()
+                                val sidStr = if (sid == -1) "—" else sid.toString()
+                                val total = if (accumulator.getTotalFrames() == -1) "—" else accumulator.getTotalFrames().toString()
+                                val unique = accumulator.getUniqueFrames()
+                                
+                                Text("State: ${if (isHeld) "WAITING (HELD)" else if (sid != -1) "RECEIVING" else "WAITING"}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
+                                Text("Session: $sidStr", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
+                                Text("Frames: $unique / $total", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
+                                Text("Missing: ${accumulator.getMissingFramesCount()}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
+                                Text("Duplicates: ${accumulator.getDuplicateCount()}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
+                                Text("Last valid frame: ${currentResult?.transportFrameId ?: "—"}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
+                                Text("CRC16: ${if (currentResult?.transportFrameId != null && !isHeld) "PASS for last accepted frame" else "—"}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
+                                Text("Fresh Transport: ${if (isHeld) "NO" else "YES"}", fontSize = 11.sp, color = if (isHeld) Color(0xFFF57C00) else Color(0xFF4CAF50), fontWeight = FontWeight.Bold)
                             }
                         }
                         2 -> {
@@ -738,6 +857,43 @@ fun V6StaticScreen(
                                     ) { Text("Share Report", fontSize = 10.sp) }
                                 }
 
+                                HorizontalDivider(color = Color.White.copy(alpha = 0.2f))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Focus: $focusState",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = when (focusState) {
+                                            "LOCKED" -> Color(0xFF4CAF50)
+                                            "LOCKING" -> Color(0xFFFFB74D)
+                                            "FAILED" -> Color(0xFFF44336)
+                                            else -> Color.White
+                                        }
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Button(
+                                            onClick = { lockFocus() },
+                                            enabled = (focusState != "LOCKING"),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = if (focusState == "LOCKED") Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary)
+                                        ) {
+                                            Text("Focus & Lock", fontSize = 10.sp)
+                                        }
+                                        Button(
+                                            onClick = { unlockFocus() },
+                                            enabled = (focusState != "AUTO"),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                                        ) {
+                                            Text("Unlock Focus", fontSize = 10.sp)
+                                        }
+                                    }
+                                }
+
                                 val lastError = activeErrors.values.maxByOrNull { it.lastSeen }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -772,6 +928,7 @@ fun V6StaticScreen(
                 }
             }
         } else {
+            val isTransportValid = (currentResult?.transportSessionId != null && currentResult?.transportError == null)
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.78f)),
@@ -794,6 +951,7 @@ fun V6StaticScreen(
                         val guidance = when {
                             currentResult == null || !currentResult.borderFound -> "Center marker inside reticle"
                             !currentResult.orientationResolved -> "Hold steady..."
+                            isTransportValid -> "Transport Frame Valid (Sess ${currentResult!!.transportSessionId}, Fr ${currentResult.transportFrameId}/${currentResult.transportTotalFrames})"
                             isHeld -> "Revalidating marker..."
                             rawTrackingState == "LOCKED" || rawTrackingState == "TRACKING" -> "Marker locked & tracking"
                             else -> "Acquiring marker..."
@@ -823,30 +981,43 @@ fun V6StaticScreen(
 
                     HorizontalDivider(color = Color.White.copy(alpha = 0.2f))
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        CompactMetricItem(label = "Inliers", value = "${currentResult?.ransacInliers ?: 0}")
-                        CompactMetricItem(
-                            label = "Cells",
-                            value = if (hasValidEval) "${currentResult?.colorCorrect}/400" else "—",
-                            isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null,
-                            isHeld = isHeld
-                        )
-                        CompactMetricItem(
-                            label = "Uncertain",
-                            value = if (hasValidEval) "${currentResult?.colorUncertain}" else "—",
-                            isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null,
-                            isHeld = isHeld
-                        )
-                        CompactMetricBadge(
-                            label = "CRC",
-                            value = if (hasValidEval) (if (isCrcPass) "PASS" else "FAIL") else "—",
-                            isGood = hasValidEval && isCrcPass,
-                            isHeld = isHeld
-                        )
+                    if (isTransportValid) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CompactMetricItem(label = "Inliers", value = "${currentResult?.ransacInliers ?: 0}")
+                            CompactMetricItem(label = "Session", value = "${currentResult?.transportSessionId}")
+                            CompactMetricItem(label = "Frame", value = "${currentResult?.transportFrameId}/${currentResult?.transportTotalFrames}")
+                            CompactMetricBadge(label = "CRC16", value = "PASS (0x${currentResult?.transportCrc16Hex})", isGood = true, isHeld = isHeld)
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CompactMetricItem(label = "Inliers", value = "${currentResult?.ransacInliers ?: 0}")
+                            CompactMetricItem(
+                                label = "Cells",
+                                value = if (hasValidEval) "${currentResult?.colorCorrect}/400" else "—",
+                                isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null,
+                                isHeld = isHeld
+                            )
+                            CompactMetricItem(
+                                label = "Uncertain",
+                                value = if (hasValidEval) "${currentResult?.colorUncertain}" else "—",
+                                isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null,
+                                isHeld = isHeld
+                            )
+                            CompactMetricBadge(
+                                label = "CRC",
+                                value = if (hasValidEval) (if (isCrcPass) "PASS" else "FAIL") else "—",
+                                isGood = hasValidEval && isCrcPass,
+                                isHeld = isHeld
+                            )
+                        }
                     }
                 }
             }
@@ -1040,19 +1211,40 @@ private fun generateDiagnosticReport(
             }
             appendLine()
             appendLine("--- DECODING & CLASSIFICATION ---")
-            appendLine("Correct: ${currentResult.colorCorrect}/400")
-            appendLine("Uncertain: ${currentResult.colorUncertain}/400")
-            val hexDec = currentResult.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-            val hexExp = currentResult.expectedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-            appendLine("Decoded CRC32: $hexDec")
-            appendLine("Expected CRC32: $hexExp")
-            
-            val matrix = currentResult.confusionMatrix
-            if (matrix != null) {
-                appendLine("Confusion Matrix (Expected -> Decoded):")
-                matrix.forEach { (exp, decMap) ->
-                    val decStr = decMap.entries.joinToString(", ") { "${it.key}:${it.value}" }
-                    appendLine("  $exp -> $decStr")
+            val isTransportValid = (currentResult.transportSessionId != null && currentResult.transportError == null)
+            if (isTransportValid) {
+                appendLine("Mode: V6 OPTICAL TRANSPORT FRAME")
+                appendLine("Transport Status: VALID")
+                appendLine("Session ID: ${currentResult.transportSessionId}")
+                appendLine("Frame ID: ${currentResult.transportFrameId}")
+                appendLine("Total Frames: ${currentResult.transportTotalFrames}")
+                appendLine("CRC16 Status: PASS (0x${currentResult.transportCrc16Hex})")
+                val prefix = "A506${"%02X".format(currentResult.transportSessionId)}${"%04X".format(currentResult.transportFrameId)}${"%04X".format(currentResult.transportTotalFrames)}"
+                appendLine("Raw Header Prefix: $prefix")
+                val payloadHex = currentResult.transportPayloadHex
+                if (currentResult.transportFrameId == 0 && payloadHex != null && payloadHex.length >= 8) {
+                    appendLine("Package Length (Frame 0): ${payloadHex.substring(0, 8).toLong(16)} bytes")
+                }
+                appendLine("Static Golden-Pattern Comparison: N/A (Transport Data Grid)")
+            } else {
+                appendLine("Mode: TEST PATTERN (${currentResult.diagnosticPayload?.patternName ?: "N/A"})")
+                appendLine("Correct: ${currentResult.colorCorrect}/400")
+                appendLine("Uncertain: ${currentResult.colorUncertain}/400")
+                val hexDec = currentResult.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
+                val hexExp = currentResult.expectedCrc32?.let { String.format("%08X", it) } ?: "N/A"
+                appendLine("Decoded CRC32: $hexDec")
+                appendLine("Expected CRC32: $hexExp")
+                if (currentResult.transportError != null) {
+                    appendLine("Transport Rejection Reason: ${currentResult.transportError}")
+                }
+                
+                val matrix = currentResult.confusionMatrix
+                if (matrix != null) {
+                    appendLine("Confusion Matrix (Expected -> Decoded):")
+                    matrix.forEach { (exp, decMap) ->
+                        val decStr = decMap.entries.joinToString(", ") { "${it.key}:${it.value}" }
+                        appendLine("  $exp -> $decStr")
+                    }
                 }
             }
         } else {

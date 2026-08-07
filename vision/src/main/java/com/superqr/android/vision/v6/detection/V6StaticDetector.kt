@@ -6,6 +6,9 @@ import com.superqr.android.vision.v6.contract.V6Contract
 import com.superqr.android.vision.v6.diagnostic.*
 import com.superqr.android.vision.v6.model.*
 import com.superqr.android.vision.v6.tracking.V6TemporalTracker
+import com.superqr.android.vision.v6.transport.V6Transport
+import com.superqr.android.vision.v6.transport.V6TransportError
+import com.superqr.android.vision.v6.transport.V6TransportFrame
 import org.opencv.android.OpenCVLoader
 import org.opencv.core.*
 import org.opencv.geometry.Geometry
@@ -654,6 +657,44 @@ class V6StaticDetector : AutoCloseable {
             val warpedLumaBytes = ByteArray(1000 * 1000)
             warped.get(0, 0, warpedLumaBytes)
 
+            var transportSessionId: Int? = null
+            var transportFrameId: Int? = null
+            var transportTotalFrames: Int? = null
+            var transportPayloadHex: String? = null
+            var transportCrc16Hex: String? = null
+            var transportError: String? = null
+            var transportFrameObj: V6TransportFrame? = null
+
+            if (classificationSource == "FULL_DETECTION") {
+                val indexArray = IntArray(400)
+                var hasUncertain = false
+                for (i in 0 until 400) {
+                    val decoded = decodedBytes[i].toInt()
+                    if (decoded == -1) {
+                        hasUncertain = true
+                        break
+                    }
+                    indexArray[i] = decoded
+                }
+
+                if (!hasUncertain) {
+                    try {
+                        val frameBytes = V6Transport.paletteIndexesToBytes(indexArray)
+                        val frame = V6Transport.parseFrame(frameBytes)
+                        transportFrameObj = frame
+                        transportSessionId = frame.sessionId
+                        transportFrameId = frame.frameId
+                        transportTotalFrames = frame.totalFrames
+                        transportPayloadHex = frame.payload.joinToString("") { "%02X".format(it) }
+                        transportCrc16Hex = "%04X".format(frame.crc16)
+                    } catch (e: Throwable) {
+                        transportError = e.message
+                    }
+                } else {
+                    transportError = "Uncertain cells present"
+                }
+            }
+
             val frameDiagnosticPayload = V6FrameDiagnosticPayload(
                 timestamp = System.currentTimeMillis(),
                 classificationSource = classificationSource,
@@ -674,7 +715,13 @@ class V6StaticDetector : AutoCloseable {
                 contoursConsidered = contoursConsidered,
                 quadsConsidered = quadsConsidered,
                 normalizedAnalysisWidth = width,
-                normalizedAnalysisHeight = height
+                normalizedAnalysisHeight = height,
+                transportSessionId = transportSessionId,
+                transportFrameId = transportFrameId,
+                transportTotalFrames = transportTotalFrames,
+                transportPayloadHex = transportPayloadHex,
+                transportCrc16Hex = transportCrc16Hex,
+                transportError = transportError
             )
 
             val res = V6StaticResult(
@@ -709,7 +756,14 @@ class V6StaticDetector : AutoCloseable {
                 diagnosticPayload = frameDiagnosticPayload,
                 warpedLumaBytes = warpedLumaBytes,
                 contoursConsidered = contoursConsidered,
-                quadsConsidered = quadsConsidered
+                quadsConsidered = quadsConsidered,
+                transportSessionId = transportSessionId,
+                transportFrameId = transportFrameId,
+                transportTotalFrames = transportTotalFrames,
+                transportPayloadHex = transportPayloadHex,
+                transportCrc16Hex = transportCrc16Hex,
+                transportError = transportError,
+                transportFrame = transportFrameObj
             )
             val trackedRes = tracker.processFrame(gray, res, finalInvHArr)
             recordFrameTrace(trackedRes, pilots, correct, incorrectCount, uncertain)
