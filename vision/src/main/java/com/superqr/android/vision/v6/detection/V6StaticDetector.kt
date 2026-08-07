@@ -32,12 +32,18 @@ class V6StaticDetector : AutoCloseable {
                 throw RuntimeException("OpenCV initialization failed")
             }
         } catch (e: Throwable) {
-            // In JVM unit tests, android.util.Log is not mocked and throws an exception.
-            // But OpenCV native library is often loaded manually via System.loadLibrary.
-            try {
-                Core.getVersionString()
-            } catch (e2: Throwable) {
-                throw RuntimeException("The bundled OpenCV Android runtime could not be initialized.", e)
+            // OpenCVLoader.initLocal() is Android-specific and may fail in JVM tests
+            // (android.util.Log is not mocked). Try desktop-native loading strategies.
+            if (!tryLoadDesktopNative()) {
+                // Last resort: System.loadLibrary (works if another test pre-loaded it).
+                try {
+                    System.loadLibrary(Core.NATIVE_LIBRARY_NAME)
+                } catch (_: Throwable) { }
+                try {
+                    Core.getVersionString()
+                } catch (e2: Throwable) {
+                    throw RuntimeException("The bundled OpenCV Android runtime could not be initialized.", e)
+                }
             }
         }
         gray = Mat()
@@ -46,6 +52,41 @@ class V6StaticDetector : AutoCloseable {
         hierarchy = Mat()
         warped = Mat()
         openCvInitialized = true
+    }
+
+    // Tries to load the OpenCV native library from a desktop-native cache.
+    //
+    // Lookup order:
+    // 1. SUPERQR_OPENCV_NATIVE environment variable (manual override)
+    // 2. ~/.gradle/opencv-windows/dlls-<version>/ (Gradle-managed cache)
+    //
+    // Uses System.load(absolutePath) so that the OS loader resolves transitive
+    // DLL dependencies from the same directory.
+    private fun tryLoadDesktopNative(): Boolean {
+        // 1. Environment variable override
+        val envDir = System.getenv("SUPERQR_OPENCV_NATIVE")
+        if (envDir != null && tryLoadFromDir(java.io.File(envDir))) return true
+
+        // 2. Gradle-managed cache
+        val cacheRoot = java.io.File(System.getProperty("user.home"), ".gradle/opencv-windows")
+        if (cacheRoot.isDirectory) {
+            cacheRoot.listFiles { f -> f.isDirectory && f.name.startsWith("dlls-") }
+                ?.sortedByDescending { it.name }
+                ?.forEach { if (tryLoadFromDir(it)) return true }
+        }
+        return false
+    }
+
+    private fun tryLoadFromDir(dir: java.io.File): Boolean {
+        val libName = System.mapLibraryName(Core.NATIVE_LIBRARY_NAME)
+        val libFile = java.io.File(dir, libName)
+        if (!libFile.exists()) return false
+        try {
+            System.load(libFile.absolutePath)
+            return true
+        } catch (_: Throwable) {
+            return false
+        }
     }
 
     override fun close() {

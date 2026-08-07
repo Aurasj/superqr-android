@@ -1,5 +1,6 @@
 package com.superqr.android.vision.v6.benchmark
 
+import com.superqr.android.vision.v6.contract.V6Contract
 import com.superqr.android.vision.v6.replay.*
 import org.junit.Test
 import java.io.File
@@ -21,6 +22,10 @@ class V6OfflineReplayBenchmarkTest {
         }
 
         println("[V6OfflineReplayBenchmarkTest] Running V6 offline benchmark on dataset: ${datasetDir.absolutePath}")
+
+        // Load the visual contract (required by V6StaticDetector).
+        val contractFile = File("src/main/assets/visual_contract.json")
+        V6Contract.loadAndVerifyBytes(contractFile.readBytes())
 
         val manifestFile = File(datasetDir, "manifest.json")
         val results = mutableListOf<V6ReplayResult>()
