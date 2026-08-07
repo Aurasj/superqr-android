@@ -13,8 +13,10 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.camera.view.transform.ImageProxyTransformFactory
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -35,14 +37,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.view.doOnLayout
 import androidx.lifecycle.LifecycleOwner
 import com.superqr.android.camera.ChromaSampleBuffers
 import com.superqr.android.camera.ImageProxyChromaSampler
 import com.superqr.android.camera.LumaFrameBuffer
 import com.superqr.android.vision.v6.contract.V6Contract
 import com.superqr.android.vision.v6.detection.V6StaticDetector
-import com.superqr.android.vision.v6.diagnostic.*
-import com.superqr.android.vision.v6.model.*
+import com.superqr.android.vision.v6.diagnostic.V6CapturedFrameBundle
+import com.superqr.android.vision.v6.diagnostic.V6FullDiagnosticExporter
+import com.superqr.android.vision.v6.model.V6StaticResult
+import com.superqr.android.vision.v6.transport.V6ReceiveUtils
+import com.superqr.android.vision.v6.transport.V6SessionAccumulator
+import com.superqr.android.vision.v6.transport.V6TransferPackage
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -51,27 +58,12 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import com.superqr.android.vision.v6.transport.V6SessionAccumulator
 
-data class LastValidEvaluation(
-    val timestamp: String,
-    val pattern: String,
-    val colorCorrect: Int,
-    val colorUncertain: Int,
-    val decodedCrc32: Long?,
-    val expectedCrc32: Long?,
-    val reprojectionError: Double
-)
-
-data class PersistentErrorState(
-    val signature: String,
-    val category: String,
-    val timestamp: String,
-    val message: String,
-    val exactReason: String,
-    var count: Int = 1,
-    val firstSeen: String,
-    var lastSeen: String
+private data class CompletedUiTransfer(
+    val pkg: V6TransferPackage,
+    val sessionId: Int,
+    val totalFrames: Int,
+    val fileCrc32: Long,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -81,1262 +73,776 @@ fun V6StaticScreen(
     lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
     modifier: Modifier = Modifier,
     onBack: (() -> Unit)? = null,
-    diagnosticLogger: V6DiagnosticLogger = remember { V6DiagnosticLogger() }
+    diagnosticLogger: V6DiagnosticLogger = remember { V6DiagnosticLogger() },
 ) {
     val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
+    val clipboard = LocalClipboardManager.current
+    val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
 
-    val previewView = remember { PreviewView(context) }
+    // FILL_CENTER is intentional. Preview and ImageAnalysis are bound through the
+    // same CameraX ViewPort below, so the visible preview and analyzed sensor area
+    // are the same WYSIWYG crop.
+    val previewView = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        }
+    }
 
     var hasCameraPermission by remember {
         mutableStateOf(
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
         )
     }
-
     val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        hasCameraPermission = isGranted
-        if (!isGranted) {
-            diagnosticLogger.log("WARN", "PERMISSION", "CAMERA_DENIED", "Camera permission denied by user")
-        }
-    }
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> hasCameraPermission = granted }
 
     LaunchedEffect(Unit) {
-        if (!hasCameraPermission) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
-        }
+        if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    var staticResult by remember { mutableStateOf<V6StaticResult?>(null) }
-    var lastValidEvaluation by remember { mutableStateOf<LastValidEvaluation?>(null) }
-    var frozenSnapshot by remember { mutableStateOf<V6StaticResult?>(null) }
+    var currentResult by remember { mutableStateOf<V6StaticResult?>(null) }
+    var previewGeometry by remember { mutableStateOf<V6PreviewOverlayGeometry?>(null) }
+    var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    var focusState by remember { mutableStateOf("AUTO") }
+    var cameraBindingState by remember { mutableStateOf("WAITING") }
 
-    val activeErrors = remember { mutableStateMapOf<String, PersistentErrorState>() }
+    val accumulator = remember { V6SessionAccumulator() }
+    var completedTransfer by remember { mutableStateOf<CompletedUiTransfer?>(null) }
+    var completedCacheFile by remember { mutableStateOf<File?>(null) }
 
-    var canonicalHash by remember { mutableStateOf("") }
-    var rawHash by remember { mutableStateOf("") }
-    var assetByteLength by remember { mutableStateOf(0) }
-    var contractMatch by remember { mutableStateOf<Boolean?>(null) }
-
+    var showLab by remember { mutableStateOf(false) }
+    var labTab by remember { mutableIntStateOf(0) }
     var selectedTestMode by remember { mutableStateOf("deterministic_random") }
     val selectedTestModeState = rememberUpdatedState(selectedTestMode)
 
-    var showLabPanel by remember { mutableStateOf(false) }
-    var labTab by remember { mutableIntStateOf(0) } // 0: TEST, 1: LIVE, 2: TOOLS
-
-    val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
-    val freezeRequested = remember { AtomicBoolean(false) }
-
     val fullDiagnosticArmed = remember { AtomicBoolean(false) }
-    val armedTimestamp = remember { AtomicLong(0L) }
-    var isDiagnosticArmed by remember { mutableStateOf(false) }
-    var captureStatusMessage by remember { mutableStateOf<String?>(null) }
-    var capturedZipFile by remember { mutableStateOf<File?>(null) }
-
-    var lastLoggedBorder by remember { mutableStateOf<Boolean?>(null) }
-    var lastLoggedOrientation by remember { mutableStateOf<Boolean?>(null) }
-    var lastLoggedTrackingState by remember { mutableStateOf<String?>(null) }
-    var lastLoggedAccuracy by remember { mutableStateOf<Double?>(null) }
-    var lastLoggedEvalTimeMs by remember { mutableLongStateOf(0L) }
-
-    val accumulator = remember { V6SessionAccumulator() }
-    var accumulatorStatus by remember { mutableStateOf("IDLE") }
-    var lastCompletedFile by remember { mutableStateOf<String?>(null) }
-    
-    var completedTransfer by remember { mutableStateOf<com.superqr.android.vision.v6.transport.V6TransferPackage?>(null) }
-    var completedCacheFile by remember { mutableStateOf<File?>(null) }
-
-    var boundCamera by remember { mutableStateOf<Camera?>(null) }
-    var focusState by remember { mutableStateOf("AUTO") }
+    val diagnosticArmedAt = remember { AtomicLong(0L) }
+    var diagnosticState by remember { mutableStateOf("IDLE") }
+    var capturedZip by remember { mutableStateOf<File?>(null) }
 
     fun lockFocus() {
-        val cam = boundCamera
-        if (cam != null && previewView.width > 0 && previewView.height > 0) {
-            focusState = "LOCKING"
-            try {
-                val factory = previewView.meteringPointFactory
-                val point = factory.createPoint(previewView.width / 2f, previewView.height / 2f)
-                val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
-                    .disableAutoCancel()
-                    .build()
-                val future = cam.cameraControl.startFocusAndMetering(action)
-                future.addListener({
-                    try {
-                        val res = future.get()
-                        focusState = if (res.isFocusSuccessful) "LOCKED" else "FAILED"
-                        diagnosticLogger.log("INFO", "CAMERA", "FOCUS_LOCK", "Focus & Lock result: $focusState")
-                    } catch (e: Throwable) {
-                        focusState = "FAILED"
-                        diagnosticLogger.log("WARN", "CAMERA", "FOCUS_FAIL", "Focus & Lock failed: ${e.message}")
-                    }
-                }, ContextCompat.getMainExecutor(context))
-            } catch (e: Throwable) {
-                focusState = "FAILED"
-                diagnosticLogger.log("WARN", "CAMERA", "FOCUS_EX", "Focus & Lock exception: ${e.message}")
-            }
-        } else {
+        val camera = boundCamera ?: return
+        if (previewView.width <= 0 || previewView.height <= 0) return
+        focusState = "LOCKING"
+        try {
+            val point = previewView.meteringPointFactory.createPoint(
+                previewView.width / 2f,
+                previewView.height / 2f,
+            )
+            val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+                .disableAutoCancel()
+                .build()
+            val future = camera.cameraControl.startFocusAndMetering(action)
+            future.addListener({
+                focusState = try {
+                    if (future.get().isFocusSuccessful) "LOCKED" else "FAILED"
+                } catch (_: Throwable) {
+                    "FAILED"
+                }
+                diagnosticLogger.log("INFO", "CAMERA", "FOCUS", "Focus state: $focusState")
+            }, mainExecutor)
+        } catch (_: Throwable) {
             focusState = "FAILED"
         }
     }
 
     fun unlockFocus() {
-        val cam = boundCamera
-        if (cam != null) {
-            try {
-                cam.cameraControl.cancelFocusAndMetering()
-                diagnosticLogger.log("INFO", "CAMERA", "FOCUS_UNLOCK", "Focus unlocked, continuous AF restored")
-            } catch (e: Throwable) {}
+        try {
+            boundCamera?.cameraControl?.cancelFocusAndMetering()
+        } catch (_: Throwable) {
         }
         focusState = "AUTO"
     }
 
-    fun reportError(category: String, message: String, reason: String) {
-        val sig = "$category|$message"
-        val now = dateFormat.format(Date())
-        val existing = activeErrors[sig]
-        if (existing != null) {
-            existing.count++
-            existing.lastSeen = now
-            activeErrors[sig] = existing.copy()
-        } else {
-            activeErrors[sig] = PersistentErrorState(
-                signature = sig,
-                category = category,
-                timestamp = now,
-                message = message,
-                exactReason = reason,
-                firstSeen = now,
-                lastSeen = now
-            )
-        }
-    }
+    DisposableEffect(hasCameraPermission, lifecycleOwner, previewView) {
+        if (!hasCameraPermission) return@DisposableEffect onDispose {}
 
-    DisposableEffect(hasCameraPermission, lifecycleOwner, context, previewView) {
-        if (!hasCameraPermission) {
-            return@DisposableEffect onDispose {}
-        }
-
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        val providerFuture = ProcessCameraProvider.getInstance(context)
         var detector: V6StaticDetector? = null
+        var disposed = false
 
-        val listener = Runnable {
-            try {
-                V6Contract.loadAndVerify(context)
-                canonicalHash = V6Contract.canonicalHash
-                rawHash = V6Contract.rawFileHash
-                assetByteLength = V6Contract.assetByteLength
-                val matches = (V6Contract.canonicalHash == V6Contract.EXPECTED_HASH)
-                contractMatch = matches
+        val providerListener = Runnable {
+            if (disposed) return@Runnable
+            val provider = try {
+                providerFuture.get()
+            } catch (e: Throwable) {
+                cameraBindingState = "ERROR"
+                diagnosticLogger.log("ERROR", "CAMERA", "PROVIDER", e.message ?: e.toString())
+                return@Runnable
+            }
 
-                if (matches) {
-                    diagnosticLogger.log("INFO", "CONTRACT", "CONTRACT_MATCH", "V6 Visual Contract canonical hash verified match")
-                } else {
-                    diagnosticLogger.log("ERROR", "CONTRACT", "CONTRACT_MISMATCH", "Canonical hash mismatch! Canonical: $canonicalHash")
-                    reportError("CONTRACT", "Contract Hash Mismatch", "Canonical: ${V6Contract.canonicalHash}\nRaw: ${V6Contract.rawFileHash}\nExpected: ${V6Contract.EXPECTED_HASH}")
-                }
+            previewView.doOnLayout {
+                if (disposed) return@doOnLayout
+                try {
+                    provider.unbindAll()
+                    V6Contract.loadAndVerify(context)
 
-                val provider = cameraProviderFuture.get()
-                provider.unbindAll()
+                    val targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
+                    val preview = Preview.Builder()
+                        .setTargetRotation(targetRotation)
+                        .build()
+                        .also { it.surfaceProvider = previewView.surfaceProvider }
 
-                val targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
-                val preview = Preview.Builder()
-                    .setTargetRotation(targetRotation)
-                    .build()
-                    .also { it.surfaceProvider = previewView.surfaceProvider }
+                    val analysis = ImageAnalysis.Builder()
+                        .setTargetRotation(targetRotation)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
 
-                detector = V6StaticDetector()
-                val lumaBuffer = LumaFrameBuffer()
-                val chromaSampleBuffers = ChromaSampleBuffers()
+                    val viewPort = previewView.viewPort
+                    if (viewPort == null) {
+                        cameraBindingState = "ERROR"
+                        diagnosticLogger.log(
+                            "ERROR",
+                            "CAMERA",
+                            "VIEWPORT_NULL",
+                            "PreviewView ViewPort unavailable after layout; refusing non-WYSIWYG binding",
+                        )
+                        return@doOnLayout
+                    }
 
-                diagnosticLogger.log("INFO", "SYSTEM", "CAMERA_INIT", "Camera pipeline initialized and bound")
+                    detector = V6StaticDetector()
+                    val lumaBuffer = LumaFrameBuffer()
+                    val chromaBuffers = ChromaSampleBuffers()
+                    val imageTransformFactory = ImageProxyTransformFactory().apply {
+                        setUsingCropRect(true)
+                        setUsingRotationDegrees(true)
+                    }
 
-                val analysis = ImageAnalysis.Builder()
-                    .setTargetRotation(targetRotation)
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
+                    analysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                        try {
+                            val activeDetector = detector ?: return@setAnalyzer
+                            val lumaOk = lumaBuffer.packFrom(imageProxy)
+                            if (!lumaOk) return@setAnalyzer
 
-                analysis.setAnalyzer(analysisExecutor) { imageProxy ->
-                    try {
-                        val activeDetector = detector
-                        if (activeDetector != null) {
-                            val lumaValid = lumaBuffer.packFrom(imageProxy)
-                            val chromaReader = ImageProxyChromaSampler(imageProxy, chromaSampleBuffers)
+                            val chromaReader = ImageProxyChromaSampler(imageProxy, chromaBuffers)
+                            val result = activeDetector.detect(
+                                luma = lumaBuffer.bytes,
+                                width = lumaBuffer.width,
+                                height = lumaBuffer.height,
+                                mode = selectedTestModeState.value,
+                                chromaReader = chromaReader,
+                            )
 
-                            if (lumaValid) {
-                                val shouldFreeze = freezeRequested.getAndSet(false)
-                                val currentMode = selectedTestModeState.value
-                                val result = activeDetector.detect(
-                                    luma = lumaBuffer.bytes,
-                                    width = lumaBuffer.width,
-                                    height = lumaBuffer.height,
-                                    mode = currentMode,
-                                    chromaReader = chromaReader,
-                                    exportDebugImage = shouldFreeze,
-                                    cacheDir = if (shouldFreeze) context.cacheDir.absolutePath else null
-                                )
+                            // Source transform is captured while ImageProxy is valid. The target
+                            // transform is obtained on the UI thread from the actual PreviewView.
+                            val sourceTransform = try {
+                                imageTransformFactory.getOutputTransform(imageProxy)
+                            } catch (_: Throwable) {
+                                null
+                            }
 
-                                val payload = result.diagnosticPayload
+                            // Capture diagnostics only from a CURRENT full detection. This keeps
+                            // raw YUV, homography, matrix samples and transport metadata from the
+                            // exact same camera frame.
+                            val payload = result.diagnosticPayload
+                            if (fullDiagnosticArmed.get()) {
+                                val expired = System.currentTimeMillis() - diagnosticArmedAt.get() > 5000L
+                                if (expired) {
+                                    fullDiagnosticArmed.set(false)
+                                    mainExecutor.execute { diagnosticState = "TIMEOUT" }
+                                } else if (
+                                    result.borderFound &&
+                                    result.orientationResolved &&
+                                    payload?.classificationSource == "FULL_DETECTION"
+                                ) {
+                                    fullDiagnosticArmed.set(false)
+                                    val yPlane = imageProxy.planes[0]
+                                    val uPlane = imageProxy.planes[1]
+                                    val vPlane = imageProxy.planes[2]
 
-                                // Check Full Diagnostic Arming
-                                if (fullDiagnosticArmed.get()) {
-                                    val now = System.currentTimeMillis()
-                                    if (now - armedTimestamp.get() > 5000L) {
-                                        fullDiagnosticArmed.set(false)
-                                        diagnosticLogger.log("WARN", "DIAGNOSTIC", "TIMEOUT", "Diagnostic capture timed out (no valid LOCKED/TRACKING frame in 5s)")
-                                        ContextCompat.getMainExecutor(context).execute {
-                                            isDiagnosticArmed = false
-                                            captureStatusMessage = "Diagnostic capture timed out (no valid frame in 5s)"
-                                        }
-                                    } else if (result.borderFound && result.orientationResolved && (result.trackingState == "LOCKED" || result.trackingState == "TRACKING") && payload != null) {
-                                        fullDiagnosticArmed.set(false)
-
-                                        val yPlane = imageProxy.planes[0]
-                                        val uPlane = imageProxy.planes[1]
-                                        val vPlane = imageProxy.planes[2]
-
-                                        fun copyBuf(buf: java.nio.ByteBuffer): ByteArray {
-                                            val dup = buf.duplicate()
-                                            val bytes = ByteArray(dup.remaining())
-                                            dup.get(bytes)
-                                            return bytes
-                                        }
-
-                                        val bundle = V6CapturedFrameBundle(
-                                            timestamp = payload.timestamp,
-                                            imageWidth = imageProxy.width,
-                                            imageHeight = imageProxy.height,
-                                            rotationDegrees = imageProxy.imageInfo.rotationDegrees,
-                                            cropRect = android.graphics.Rect(imageProxy.cropRect),
-                                            yRowStride = yPlane.rowStride,
-                                            yPixelStride = yPlane.pixelStride,
-                                            uRowStride = uPlane.rowStride,
-                                            uPixelStride = uPlane.pixelStride,
-                                            vRowStride = vPlane.rowStride,
-                                            vPixelStride = vPlane.pixelStride,
-                                            yPlaneBytes = copyBuf(yPlane.buffer),
-                                            uPlaneBytes = copyBuf(uPlane.buffer),
-                                            vPlaneBytes = copyBuf(vPlane.buffer),
-                                            trackingState = result.trackingState,
-                                            ransacInliers = result.ransacInliers,
-                                            correctCount = result.colorCorrect,
-                                            incorrectCount = result.colorTotal - result.colorCorrect - result.colorUncertain,
-                                            uncertainCount = result.colorUncertain,
-                                            payload = payload,
-                                            warpedLumaBytes = result.warpedLumaBytes,
-                                            frameTrace = activeDetector.getFrameTraceSnapshot()
-                                        )
-
-                                        val cacheDir = context.cacheDir
-                                        analysisExecutor.execute {
-                                            try {
-                                                val zipFile = V6FullDiagnosticExporter.exportToZip(bundle, cacheDir)
-                                                if (zipFile != null) {
-                                                    ContextCompat.getMainExecutor(context).execute {
-                                                        isDiagnosticArmed = false
-                                                        capturedZipFile = zipFile
-                                                        captureStatusMessage = "Diagnostic captured: ${zipFile.name}"
-                                                        diagnosticLogger.log("INFO", "DIAGNOSTIC", "CAPTURED", "Diagnostic captured: ${zipFile.name}")
-                                                    }
-                                                }
-                                            } catch (e: Throwable) {
-                                                Log.e("V6StaticScreen", "Failed to export diagnostic ZIP", e)
-                                                ContextCompat.getMainExecutor(context).execute {
-                                                    isDiagnosticArmed = false
-                                                    captureStatusMessage = "Failed to export diagnostic: ${e.message}"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                ContextCompat.getMainExecutor(context).execute {
-                                    staticResult = result
-
-                                    if (shouldFreeze) {
-                                        frozenSnapshot = result
-                                        diagnosticLogger.log("INFO", "UI", "SNAPSHOT", "Froze frame snapshot")
+                                    fun copyBuffer(buffer: java.nio.ByteBuffer): ByteArray {
+                                        val duplicate = buffer.duplicate()
+                                        val out = ByteArray(duplicate.remaining())
+                                        duplicate.get(out)
+                                        return out
                                     }
 
-                                    // Distinct tracking state transition logs
-                                    if (lastLoggedTrackingState != result.trackingState) {
-                                        val oldState = lastLoggedTrackingState ?: "SEARCHING"
-                                        val newState = result.trackingState
-                                        lastLoggedTrackingState = newState
-                                        if (oldState != newState) {
-                                            diagnosticLogger.log(
-                                                "INFO",
-                                                "TRACKER",
-                                                "TRANSITION_${oldState}_TO_${newState}",
-                                                "Tracking state: $oldState->$newState"
-                                            )
-                                        }
-                                    }
+                                    val bundle = V6CapturedFrameBundle(
+                                        timestamp = payload.timestamp,
+                                        imageWidth = imageProxy.width,
+                                        imageHeight = imageProxy.height,
+                                        rotationDegrees = imageProxy.imageInfo.rotationDegrees,
+                                        cropRect = android.graphics.Rect(imageProxy.cropRect),
+                                        yRowStride = yPlane.rowStride,
+                                        yPixelStride = yPlane.pixelStride,
+                                        uRowStride = uPlane.rowStride,
+                                        uPixelStride = uPlane.pixelStride,
+                                        vRowStride = vPlane.rowStride,
+                                        vPixelStride = vPlane.pixelStride,
+                                        yPlaneBytes = copyBuffer(yPlane.buffer),
+                                        uPlaneBytes = copyBuffer(uPlane.buffer),
+                                        vPlaneBytes = copyBuffer(vPlane.buffer),
+                                        trackingState = result.trackingState,
+                                        ransacInliers = result.ransacInliers,
+                                        correctCount = result.colorCorrect,
+                                        incorrectCount = result.colorTotal - result.colorCorrect - result.colorUncertain,
+                                        uncertainCount = result.colorUncertain,
+                                        payload = payload,
+                                        warpedLumaBytes = result.warpedLumaBytes,
+                                        frameTrace = activeDetector.getFrameTraceSnapshot(),
+                                    )
 
-                                    // Deduplicated transitions
-                                    if (lastLoggedBorder != result.borderFound) {
-                                        lastLoggedBorder = result.borderFound
-                                        if (result.borderFound) {
-                                            diagnosticLogger.log("INFO", "DETECTOR", "BORDER_FOUND", "Outer border detected. Area: ${result.contourArea}")
-                                        } else {
-                                            diagnosticLogger.log("WARN", "DETECTOR", "BORDER_LOST", "Outer border lost. Reason: ${result.failureReason}")
-                                        }
-                                    }
-
-                                    if (result.borderFound && lastLoggedOrientation != result.orientationResolved) {
-                                        lastLoggedOrientation = result.orientationResolved
-                                        if (result.orientationResolved) {
-                                            diagnosticLogger.log("INFO", "ORIENTATION", "ORIENT_VALID", "Orientation resolved")
-                                        } else {
-                                            diagnosticLogger.log("WARN", "ORIENTATION", "ORIENT_INVALID", "Orientation invalid: ${result.failureReason}")
-                                        }
-                                    }
-
-                                    // DO NOT count TRACKED_HOMOGRAPHY frames as fresh classification measurements
-                                    val isFreshEval = (result.borderFound && result.orientationResolved && result.diagnosticPayload?.classificationSource == "FULL_DETECTION")
-                                    if (isFreshEval) {
-                                        val nowMs = System.currentTimeMillis()
-                                        val accuracyChanged = lastLoggedAccuracy == null || kotlin.math.abs(result.cellAccuracy - (lastLoggedAccuracy ?: 0.0)) >= 1.0
-                                        val timeElapsed = (nowMs - lastLoggedEvalTimeMs) >= 2000L
-
-                                        if (accuracyChanged || timeElapsed) {
-                                            lastLoggedAccuracy = result.cellAccuracy
-                                            lastLoggedEvalTimeMs = nowMs
-                                            lastValidEvaluation = LastValidEvaluation(
-                                                timestamp = dateFormat.format(Date()),
-                                                pattern = currentMode,
-                                                colorCorrect = result.colorCorrect,
-                                                colorUncertain = result.colorUncertain,
-                                                decodedCrc32 = result.decodedCrc32,
-                                                expectedCrc32 = result.expectedCrc32,
-                                                reprojectionError = result.reprojectionError
-                                            )
-                                            val hexDec = result.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-                                            val hexExp = result.expectedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-                                            diagnosticLogger.log("INFO", "EVALUATION", "VALID_EVAL", "Correct: ${result.colorCorrect}/400, CRC: $hexDec (Expected $hexExp)")
-                                        }
-                                    }
-
-                                    val transportFrame = result.transportFrame
-                                    if (transportFrame != null && completedTransfer == null) {
+                                    analysisExecutor.execute {
                                         try {
-                                            val pkg = accumulator.addFrame(transportFrame)
-                                            if (pkg != null) {
-                                                val safeName = com.superqr.android.vision.v6.transport.V6ReceiveUtils.sanitizeFilename(pkg.filename)
-                                                val rxDir = File(context.cacheDir, "superqr_received")
-                                                rxDir.mkdirs()
-                                                val destFile = File(rxDir, safeName)
-                                                
-                                                analysisExecutor.execute {
-                                                    destFile.writeBytes(pkg.fileData)
-                                                    ContextCompat.getMainExecutor(context).execute {
-                                                        completedCacheFile = destFile
-                                                        completedTransfer = pkg
-                                                    }
-                                                }
-                                                diagnosticLogger.log("INFO", "TRANSPORT", "FILE_COMPLETED", "Recovered ${pkg.filename} (${pkg.fileSize} bytes) to ${destFile.absolutePath}")
-                                                lastCompletedFile = "${pkg.filename} (${pkg.fileSize}b)"
+                                            val file = V6FullDiagnosticExporter.exportToZip(bundle, context.cacheDir)
+                                            mainExecutor.execute {
+                                                capturedZip = file
+                                                diagnosticState = "CAPTURED"
                                             }
                                         } catch (e: Throwable) {
-                                            diagnosticLogger.log("ERROR", "TRANSPORT", "ACCUMULATOR_ERROR", "Session failed: ${e.message}")
-                                            accumulatorStatus = "ERROR"
+                                            mainExecutor.execute { diagnosticState = "ERROR: ${e.message}" }
                                         }
-                                        val sid = accumulator.getCurrentSessionId()
-                                        if (sid != -1) {
-                                            accumulatorStatus = "Session $sid: ${accumulator.getUniqueFrames()}/${accumulator.getTotalFrames()} frames (dup:${accumulator.getDuplicateCount()} conf:${accumulator.getConflictCount()})"
-                                        } else {
-                                            if (!accumulatorStatus.startsWith("ERROR")) {
-                                                accumulatorStatus = "IDLE"
-                                            }
-                                        }
-                                    }
-
-                                    val failure = result.failureReason
-                                    if (failure != null && (failure.contains("OpenCV initialization") || failure.contains("failed"))) {
-                                        diagnosticLogger.log("ERROR", "DETECTOR", "DETECT_FAIL", "Detector error: $failure")
-                                        reportError("DETECTOR", "Detection Failed", failure)
                                     }
                                 }
                             }
-                        }
-                    } catch (e: Throwable) {
-                        Log.e("V6StaticScreen", "Frame analysis error", e)
-                        ContextCompat.getMainExecutor(context).execute {
-                            diagnosticLogger.log("ERROR", "DETECTOR", "FRAME_EXCEPTION", "Exception: ${e.message}")
-                            reportError("DETECTOR", "Frame Analysis Exception", e.message ?: e.toString())
-                        }
-                    } finally {
-                        imageProxy.close()
-                    }
-                }
 
-                val bound = provider.bindToLifecycle(
-                    lifecycleOwner,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    analysis
-                )
-                boundCamera = bound
-            } catch (e: Throwable) {
-                Log.e("V6StaticScreen", "Failed to bind camera", e)
-                diagnosticLogger.log("ERROR", "SYSTEM", "INIT_FAIL", "Init failed: ${e.message}")
-                reportError("SYSTEM", "Initialization Failed", e.message ?: e.toString())
+                            mainExecutor.execute {
+                                currentResult = result
+
+                                previewGeometry = if (sourceTransform != null) {
+                                    val target = previewView.outputTransform
+                                    if (target != null) {
+                                        V6PreviewOverlayMapper.map(result, sourceTransform, target)
+                                    } else {
+                                        null
+                                    }
+                                } else {
+                                    null
+                                }
+
+                                // Only a fresh, CRC-valid transport frame can enter the receiver.
+                                val frame = result.transportFrame
+                                if (frame != null && completedTransfer == null) {
+                                    try {
+                                        val sessionId = frame.sessionId
+                                        val totalFrames = frame.totalFrames
+                                        val pkg = accumulator.addFrame(frame)
+                                        if (pkg != null) {
+                                            val crc = java.util.zip.CRC32().apply { update(pkg.fileData) }.value
+                                            val safeName = V6ReceiveUtils.sanitizeFilename(pkg.filename)
+                                            val dir = File(context.cacheDir, "superqr_received").apply { mkdirs() }
+                                            val cacheFile = File(dir, safeName)
+                                            cacheFile.writeBytes(pkg.fileData)
+                                            completedCacheFile = cacheFile
+                                            completedTransfer = CompletedUiTransfer(
+                                                pkg = pkg,
+                                                sessionId = sessionId,
+                                                totalFrames = totalFrames,
+                                                fileCrc32 = crc,
+                                            )
+                                        }
+                                    } catch (e: Throwable) {
+                                        diagnosticLogger.log(
+                                            "ERROR",
+                                            "TRANSPORT",
+                                            "ACCUMULATOR",
+                                            e.message ?: e.toString(),
+                                        )
+                                    }
+                                }
+                            }
+                        } catch (e: Throwable) {
+                            Log.e("V6StaticScreen", "Frame analysis error", e)
+                            diagnosticLogger.log("ERROR", "CAMERA", "ANALYSIS", e.message ?: e.toString())
+                        } finally {
+                            imageProxy.close()
+                        }
+                    }
+
+                    // The key WYSIWYG invariant: Preview and ImageAnalysis share one ViewPort.
+                    // CameraX therefore gives both use cases crop rects representing the same
+                    // sensor region shown to the user.
+                    val useCaseGroup = UseCaseGroup.Builder()
+                        .addUseCase(preview)
+                        .addUseCase(analysis)
+                        .setViewPort(viewPort)
+                        .build()
+
+                    boundCamera = provider.bindToLifecycle(
+                        lifecycleOwner,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        useCaseGroup,
+                    )
+                    cameraBindingState = "WYSIWYG"
+                    diagnosticLogger.log(
+                        "INFO",
+                        "CAMERA",
+                        "WYSIWYG_BOUND",
+                        "Preview and ImageAnalysis bound through shared PreviewView ViewPort",
+                    )
+                } catch (e: Throwable) {
+                    cameraBindingState = "ERROR"
+                    diagnosticLogger.log("ERROR", "CAMERA", "BIND", e.message ?: e.toString())
+                }
             }
         }
-        cameraProviderFuture.addListener(listener, ContextCompat.getMainExecutor(context))
+
+        providerFuture.addListener(providerListener, mainExecutor)
 
         onDispose {
+            disposed = true
             try {
                 detector?.close()
-                cameraProviderFuture.get().unbindAll()
-            } catch (e: Exception) {}
+                if (providerFuture.isDone) providerFuture.get().unbindAll()
+            } catch (_: Throwable) {
+            }
         }
     }
 
     if (!hasCameraPermission) {
-        Box(
-            modifier = modifier
-                .fillMaxSize()
-                .background(Color.Black)
-                .padding(24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Text(
-                        text = "Camera Permission Required",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "SuperQR V6 Scanner needs camera access to detect and track visual contracts in real-time.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Button(
-                        onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }
-                    ) {
-                        Text("Grant Camera Permission")
-                    }
-                }
+        Box(modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
+                Text("Grant Camera Permission")
             }
         }
         return
     }
 
-    val currentResult = staticResult
-    val rawTrackingState = currentResult?.trackingState ?: "SEARCHING"
-    val classSource = currentResult?.diagnosticPayload?.classificationSource
-    val isLive = (classSource == "FULL_DETECTION")
-    val isHeld = (classSource == "TRACKED_HOMOGRAPHY")
-
-    val mainStatusText = when {
-        isHeld -> "HELD"
-        else -> rawTrackingState
-    }
-
-    val mainStatusBgColor = when {
-        isHeld -> Color(0xFFF57C00) // Amber/Orange
-        rawTrackingState == "ACQUIRING" || rawTrackingState == "REACQUIRING" -> Color(0xFFF57C00)
-        rawTrackingState == "LOCKED" || rawTrackingState == "TRACKING" -> Color(0xFF2E7D32) // Green
-        else -> Color(0xFF616161) // Gray
-    }
-
-    val reticleColor = when {
-        isLive && (rawTrackingState == "LOCKED" || rawTrackingState == "TRACKING") -> Color(0xFF4CAF50) // Green
-        isHeld -> Color(0xFFF57C00) // Amber/Orange
-        else -> Color.White.copy(alpha = 0.6f)
-    }
-
-    val borderFound = currentResult?.borderFound == true
-    val orientResolved = currentResult?.orientationResolved == true
-    val isTransportValid = (currentResult?.transportSessionId != null && currentResult?.transportError == null)
-    val isAccumulating = (accumulator.getCurrentSessionId() != -1)
-
-    val quadArea = currentResult?.contourArea ?: 0.0
-    val normWidth = currentResult?.diagnosticPayload?.normalizedAnalysisWidth ?: 480
-    val normHeight = currentResult?.diagnosticPayload?.normalizedAnalysisHeight ?: 640
-    val normArea = (normWidth * normHeight).toDouble()
-    val areaRatio = if (normArea > 0) quadArea / normArea else 0.0
-
-    val (guidanceText, alignmentColor) = when {
-        isAccumulating -> "RECEIVING" to Color(0xFF4CAF50)
-        isTransportValid -> "READING" to Color(0xFF4CAF50)
-        !borderFound -> "ALIGN QR" to Color.White.copy(alpha = 0.8f)
-        !orientResolved -> "HOLD STEADY" to Color(0xFFFFB74D)
-        areaRatio > 0.0 && areaRatio < 0.12 -> "MOVE CLOSER" to Color(0xFFFFB74D)
-        areaRatio > 0.60 -> "MOVE FARTHER" to Color(0xFFFFB74D)
-        else -> "GOOD POSITION" to Color(0xFF4CAF50)
-    }
-
-    val hasValidEval = (currentResult != null && currentResult.borderFound && currentResult.orientationResolved)
-
-    val decodedCrc = currentResult?.decodedCrc32
-    val expectedCrc = currentResult?.expectedCrc32
-    val crcMatches = (decodedCrc != null && expectedCrc != null && decodedCrc == expectedCrc)
-    val isCrcPass = hasValidEval && crcMatches && (currentResult?.colorUncertain == 0)
-
-    val sourceLabel = when {
-        isLive -> "LIVE"
-        isHeld -> "HELD"
-        else -> "-"
-    }
-    val sourceColor = when {
-        isLive -> Color(0xFF2E7D32)
-        isHeld -> Color(0xFFF57C00)
-        else -> Color.Gray
-    }
-
-    if (completedTransfer != null) {
-        val transfer = completedTransfer!!
-        Box(modifier = modifier.fillMaxSize().background(Color.Black).padding(16.dp)) {
-            Column(
-                modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("TRANSFER COMPLETE", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4CAF50))
-                
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.1f)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("File: ${transfer.filename}", color = Color.White, fontWeight = FontWeight.Bold)
-                        Text("Size: ${transfer.fileSize} B", color = Color.White.copy(alpha = 0.8f))
-                        Text("Session: ${accumulator.getCurrentSessionId()}", color = Color.White.copy(alpha = 0.8f))
-                        Text("Frames: ${accumulator.getTotalFrames()} / ${accumulator.getTotalFrames()}", color = Color.White.copy(alpha = 0.8f))
-                        Text("Frame CRC: all accepted frames valid", color = Color.White.copy(alpha = 0.8f))
-                        val fileCrc32 = java.util.zip.CRC32().apply { update(transfer.fileData) }.value
-                        Text("File CRC32: PASS (0x${"%08X".format(fileCrc32)})", color = Color.White.copy(alpha = 0.8f))
-                        Text("Storage: Temporary app cache", color = Color.White.copy(alpha = 0.8f))
-                    }
-                }
-
-                Text("Preview:", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
-                        .padding(8.dp)
-                ) {
-                    val previewText = com.superqr.android.vision.v6.transport.V6ReceiveUtils.generatePreview(transfer.fileData)
-                    Text(previewText, color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
-                }
-
-                Button(
-                    onClick = {
-                        completedCacheFile?.delete()
-                        completedCacheFile = null
-                        completedTransfer = null
-                        accumulator.reset()
-                    },
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2))
-                ) {
-                    Text("Scan Another", fontWeight = FontWeight.Bold, color = Color.White)
-                }
-            }
-        }
+    val completed = completedTransfer
+    if (completed != null) {
+        TransferCompleteScreen(
+            completed = completed,
+            onScanAnother = {
+                completedCacheFile?.delete()
+                completedCacheFile = null
+                completedTransfer = null
+                accumulator.reset()
+                previewGeometry = null
+            },
+            modifier = modifier,
+        )
         return
+    }
+
+    val result = currentResult
+    val source = result?.diagnosticPayload?.classificationSource
+    val fresh = source == "FULL_DETECTION"
+    val held = source == "TRACKED_HOMOGRAPHY"
+    val freshTransport = fresh && result?.transportFrame != null
+    val sessionActive = accumulator.getCurrentSessionId() != -1
+
+    val normW = result?.diagnosticPayload?.normalizedAnalysisWidth ?: 0
+    val normH = result?.diagnosticPayload?.normalizedAnalysisHeight ?: 0
+    val normArea = (normW.toLong() * normH.toLong()).toDouble()
+    val areaRatio = if (normArea > 0.0) (result?.contourArea ?: 0.0) / normArea else 0.0
+
+    val guidance = when {
+        cameraBindingState != "WYSIWYG" -> "CAMERA ALIGNING"
+        sessionActive -> "RECEIVING"
+        freshTransport -> "READING"
+        result == null || !result.borderFound -> "CENTER SUPERQR"
+        held -> "HOLD STEADY"
+        !result.orientationResolved -> "ALIGN ALL 4 CORNERS"
+        areaRatio in 0.0001..0.10 -> "MOVE CLOSER"
+        areaRatio > 0.72 -> "MOVE FARTHER"
+        fresh -> "GOOD POSITION"
+        else -> "ALIGN SUPERQR"
+    }
+
+    val guidanceColor = when (guidance) {
+        "RECEIVING", "READING", "GOOD POSITION" -> Color(0xFF4CAF50)
+        "CAMERA ALIGNING" -> Color.LightGray
+        else -> Color(0xFFFFB74D)
     }
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
-        // 1. Dominant edge-to-edge camera preview
-        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-
-        // 2. Framing Guide Overlay
-        FramingGuideOverlay(
+        AndroidView(
+            factory = { previewView },
             modifier = Modifier.fillMaxSize(),
-            reticleColor = reticleColor,
-            guidanceText = guidanceText,
-            guidanceColor = alignmentColor
         )
 
-        // 3. Top Control Bar
+        // This overlay now has two distinct meanings:
+        // 1) white corner brackets = recommended placement only;
+        // 2) green/amber polygon + matrix = EXACT geometry CameraX mapped from
+        //    ImageAnalysis into the visible PreviewView.
+        ScannerOverlay(
+            geometry = previewGeometry,
+            guidance = guidance,
+            guidanceColor = guidanceColor,
+            cameraAligned = cameraBindingState == "WYSIWYG",
+            modifier = Modifier.fillMaxSize(),
+        )
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 14.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (onBack != null) {
-                    IconButton(onClick = onBack) {
-                        Text("<", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    }
+                    TextButton(onClick = onBack) { Text("‹", color = Color.White, fontSize = 28.sp) }
                 }
-                Text(
-                    text = "V6 Scanner",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
+                Text("V6 Scanner", color = Color.White, fontWeight = FontWeight.Bold)
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatusPill(
+                    text = when {
+                        fresh -> "FRESH"
+                        held -> "HELD"
+                        else -> "SEARCH"
+                    },
+                    color = when {
+                        fresh -> Color(0xFF2E7D32)
+                        held -> Color(0xFFE65100)
+                        else -> Color(0xFF616161)
+                    },
+                )
+                Button(
+                    onClick = { showLab = !showLab },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                ) { Text("Lab", fontSize = 11.sp) }
+            }
+        }
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = mainStatusBgColor
-                ) {
-                    Text(
-                        text = mainStatusText,
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+        if (showLab) {
+            ScannerLabPanel(
+                result = result,
+                accumulator = accumulator,
+                selectedMode = selectedTestMode,
+                onModeChanged = { selectedTestMode = it },
+                focusState = focusState,
+                onLockFocus = ::lockFocus,
+                onUnlockFocus = ::unlockFocus,
+                diagnosticState = diagnosticState,
+                hasCapturedZip = capturedZip != null,
+                onDiagnostic = {
+                    val existing = capturedZip
+                    if (existing != null) {
+                        shareZipFile(context, existing)
+                    } else {
+                        fullDiagnosticArmed.set(true)
+                        diagnosticArmedAt.set(System.currentTimeMillis())
+                        diagnosticState = "ARMED - waiting for fresh FULL_DETECTION"
+                    }
+                },
+                onCopyReport = {
+                    clipboard.setText(AnnotatedString(buildCompactDiagnosticReport(result, cameraBindingState, diagnosticLogger)))
+                },
+                selectedTab = labTab,
+                onTabSelected = { labTab = it },
+                onClose = { showLab = false },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(12.dp),
+            )
+        } else {
+            ReceiverSummary(
+                result = result,
+                accumulator = accumulator,
+                cameraBindingState = cameraBindingState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(16.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScannerOverlay(
+    geometry: V6PreviewOverlayGeometry?,
+    guidance: String,
+    guidanceColor: Color,
+    cameraAligned: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier = modifier) {
+        Canvas(Modifier.fillMaxSize()) {
+            // Recommendation guide only. It deliberately does not pretend to be a
+            // detector crop. The detector sees the entire visible PreviewView FOV.
+            val side = size.minDimension * 0.72f
+            val left = (size.width - side) / 2f
+            val top = (size.height - side) / 2f
+            val corner = side * 0.12f
+            val guideColor = Color.White.copy(alpha = 0.42f)
+            val sw = 2.dp.toPx()
+
+            drawLine(guideColor, Offset(left, top), Offset(left + corner, top), sw)
+            drawLine(guideColor, Offset(left, top), Offset(left, top + corner), sw)
+            drawLine(guideColor, Offset(left + side, top), Offset(left + side - corner, top), sw)
+            drawLine(guideColor, Offset(left + side, top), Offset(left + side, top + corner), sw)
+            drawLine(guideColor, Offset(left, top + side), Offset(left + corner, top + side), sw)
+            drawLine(guideColor, Offset(left, top + side), Offset(left, top + side - corner), sw)
+            drawLine(guideColor, Offset(left + side, top + side), Offset(left + side - corner, top + side), sw)
+            drawLine(guideColor, Offset(left + side, top + side), Offset(left + side, top + side - corner), sw)
+
+            val g = geometry
+            if (g != null && g.outerQuad.size == 4) {
+                val exactColor = if (g.isFresh) Color(0xFF00E676) else Color(0xFFFFA726)
+                for (i in 0 until 4) {
+                    drawLine(
+                        exactColor,
+                        g.outerQuad[i],
+                        g.outerQuad[(i + 1) % 4],
+                        3.dp.toPx(),
                     )
                 }
 
-                Button(
-                    onClick = { showLabPanel = !showLabPanel },
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black.copy(alpha = 0.6f))
-                ) {
-                    Text("Lab", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                }
-            }
-        }
-
-        // 4. Compact Live Lab Panel or Bottom Floating Summary Bar
-        if (showLabPanel) {
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.88f)),
-                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(12.dp)
-                    .fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TabRow(
-                            selectedTabIndex = labTab,
-                            containerColor = Color.Transparent,
-                            contentColor = Color.White,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Tab(
-                                selected = labTab == 0,
-                                onClick = { labTab = 0 },
-                                text = { Text("TEST", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                            )
-                            Tab(
-                                selected = labTab == 1,
-                                onClick = { labTab = 1 },
-                                text = { Text("LIVE", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                            )
-                            Tab(
-                                selected = labTab == 2,
-                                onClick = { labTab = 2 },
-                                text = { Text("TOOLS", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                            )
-                        }
-
-                        IconButton(onClick = { showLabPanel = false }) {
-                            Text("X", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        }
+                // 20x20 data matrix projected with the detector's exact canonical
+                // homography, then CameraX's exact ImageAnalysis->Preview transform.
+                if (g.isFresh) {
+                    val gridColor = Color(0xFF00E676).copy(alpha = 0.32f)
+                    for ((a, b) in g.gridSegments) {
+                        drawLine(gridColor, a, b, 0.8.dp.toPx())
                     }
-
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.2f))
-
-                    when (labTab) {
-                        0 -> {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("Pattern:", fontSize = 11.sp, color = Color.White.copy(alpha = 0.7f))
-                                    Surface(
-                                        shape = RoundedCornerShape(4.dp),
-                                        color = if (contractMatch == true) Color(0xFF2E7D32) else Color(0xFFD32F2F)
-                                    ) {
-                                        Text(
-                                            text = if (contractMatch == true) "VERIFIED" else "MISMATCH",
-                                            color = Color.White,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                        )
-                                    }
-                                }
-
-                                val modes = listOf(
-                                    "Random" to "deterministic_random",
-                                    "Checkerboard" to "checkerboard",
-                                    "Black" to "black",
-                                    "White" to "white"
-                                )
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    for ((label, value) in modes) {
-                                        FilterChip(
-                                            selected = (selectedTestMode == value),
-                                            onClick = { selectedTestMode = value },
-                                            label = { Text(label, fontSize = 10.sp, fontWeight = FontWeight.Bold) },
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        1 -> {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("Receiving V6", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                
-                                val sid = accumulator.getCurrentSessionId()
-                                val sidStr = if (sid == -1) "—" else sid.toString()
-                                val total = if (accumulator.getTotalFrames() == -1) "—" else accumulator.getTotalFrames().toString()
-                                val unique = accumulator.getUniqueFrames()
-                                
-                                Text("State: ${if (isHeld) "WAITING (HELD)" else if (sid != -1) "RECEIVING" else "WAITING"}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
-                                Text("Session: $sidStr", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
-                                Text("Frames: $unique / $total", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
-                                Text("Missing: ${accumulator.getMissingFramesCount()}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
-                                Text("Duplicates: ${accumulator.getDuplicateCount()}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
-                                Text("Last valid frame: ${currentResult?.transportFrameId ?: "—"}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
-                                Text("CRC16: ${if (currentResult?.transportFrameId != null && !isHeld) "PASS for last accepted frame" else "—"}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.8f))
-                                Text("Fresh Transport: ${if (isHeld) "NO" else "YES"}", fontSize = 11.sp, color = if (isHeld) Color(0xFFF57C00) else Color(0xFF4CAF50), fontWeight = FontWeight.Bold)
-                            }
-                        }
-                        2 -> {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Button(
-                                        onClick = { freezeRequested.set(true) },
-                                        modifier = Modifier.weight(1f),
-                                        contentPadding = PaddingValues(vertical = 4.dp)
-                                    ) { Text("Freeze", fontSize = 10.sp) }
-
-                                    if (V6FullDiagnosticExporter.IS_SUPPORTED) {
-                                        Button(
-                                            onClick = {
-                                                if (capturedZipFile != null) {
-                                                    shareZipFile(context, capturedZipFile!!)
-                                                } else {
-                                                    fullDiagnosticArmed.set(true)
-                                                    armedTimestamp.set(System.currentTimeMillis())
-                                                    isDiagnosticArmed = true
-                                                    captureStatusMessage = "Armed..."
-                                                }
-                                            },
-                                            modifier = Modifier.weight(1f),
-                                            contentPadding = PaddingValues(vertical = 4.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = if (isDiagnosticArmed) Color(0xFFE65100) else MaterialTheme.colorScheme.primary)
-                                        ) { Text(if (capturedZipFile != null) "Share ZIP" else if (isDiagnosticArmed) "Armed..." else "Capture ZIP", fontSize = 10.sp) }
-                                    }
-
-                                    Button(
-                                        onClick = {
-                                            val report = generateDiagnosticReport(context, currentResult, contractMatch, canonicalHash, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
-                                            clipboardManager.setText(AnnotatedString(report))
-                                        },
-                                        modifier = Modifier.weight(1f),
-                                        contentPadding = PaddingValues(vertical = 4.dp)
-                                    ) { Text("Copy Report", fontSize = 10.sp) }
-
-                                    Button(
-                                        onClick = {
-                                            val report = generateDiagnosticReport(context, currentResult, contractMatch, canonicalHash, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
-                                            shareReportFile(context, report)
-                                        },
-                                        modifier = Modifier.weight(1f),
-                                        contentPadding = PaddingValues(vertical = 4.dp)
-                                    ) { Text("Share Report", fontSize = 10.sp) }
-                                }
-
-                                HorizontalDivider(color = Color.White.copy(alpha = 0.2f))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Focus: $focusState",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = when (focusState) {
-                                            "LOCKED" -> Color(0xFF4CAF50)
-                                            "LOCKING" -> Color(0xFFFFB74D)
-                                            "FAILED" -> Color(0xFFF44336)
-                                            else -> Color.White
-                                        }
-                                    )
-                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Button(
-                                            onClick = { lockFocus() },
-                                            enabled = (focusState != "LOCKING"),
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = if (focusState == "LOCKED") Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary)
-                                        ) {
-                                            Text("Focus & Lock", fontSize = 10.sp)
-                                        }
-                                        Button(
-                                            onClick = { unlockFocus() },
-                                            enabled = (focusState != "AUTO"),
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
-                                        ) {
-                                            Text("Unlock Focus", fontSize = 10.sp)
-                                        }
-                                    }
-                                }
-
-                                val lastError = activeErrors.values.maxByOrNull { it.lastSeen }
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    if (lastError != null) {
-                                        Text(
-                                            text = "Last Error: [${lastError.category}] ${lastError.message}",
-                                            fontSize = 10.sp,
-                                            color = Color(0xFFF44336),
-                                            maxLines = 1,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        TextButton(
-                                            onClick = { activeErrors.clear() },
-                                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                                        ) {
-                                            Text("Clear", fontSize = 10.sp, color = Color.Gray)
-                                        }
-                                    } else {
-                                        Text(
-                                            text = "No active errors",
-                                            fontSize = 10.sp,
-                                            color = Color.Gray
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                    for (pilot in g.pilotPoints) {
+                        drawCircle(Color.Magenta.copy(alpha = 0.9f), 3.dp.toPx(), pilot)
                     }
                 }
             }
-        } else {
-            val isTransportValid = (currentResult?.transportSessionId != null && currentResult?.transportError == null)
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.78f)),
-                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(16.dp)
-                    .fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val guidance = when {
-                            currentResult == null || !currentResult.borderFound -> "Center marker inside reticle"
-                            !currentResult.orientationResolved -> "Hold steady..."
-                            isTransportValid -> "Transport Frame Valid (Sess ${currentResult!!.transportSessionId}, Fr ${currentResult.transportFrameId}/${currentResult.transportTotalFrames})"
-                            isHeld -> "Revalidating marker..."
-                            rawTrackingState == "LOCKED" || rawTrackingState == "TRACKING" -> "Marker locked & tracking"
-                            else -> "Acquiring marker..."
-                        }
-                        Text(
-                            text = guidance,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color.White.copy(alpha = 0.9f)
-                        )
-
-                        if (hasValidEval) {
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = sourceColor.copy(alpha = 0.25f)
-                            ) {
-                                Text(
-                                    text = sourceLabel,
-                                    color = sourceColor,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.2f))
-
-                    if (isTransportValid) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            CompactMetricItem(label = "Inliers", value = "${currentResult?.ransacInliers ?: 0}")
-                            CompactMetricItem(label = "Session", value = "${currentResult?.transportSessionId}")
-                            CompactMetricItem(label = "Frame", value = "${currentResult?.transportFrameId}/${currentResult?.transportTotalFrames}")
-                            CompactMetricBadge(label = "CRC16", value = "PASS (0x${currentResult?.transportCrc16Hex})", isGood = true, isHeld = isHeld)
-                        }
-                    } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            CompactMetricItem(label = "Inliers", value = "${currentResult?.ransacInliers ?: 0}")
-                            CompactMetricItem(
-                                label = "Cells",
-                                value = if (hasValidEval) "${currentResult?.colorCorrect}/400" else "—",
-                                isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null,
-                                isHeld = isHeld
-                            )
-                            CompactMetricItem(
-                                label = "Uncertain",
-                                value = if (hasValidEval) "${currentResult?.colorUncertain}" else "—",
-                                isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null,
-                                isHeld = isHeld
-                            )
-                            CompactMetricBadge(
-                                label = "CRC",
-                                value = if (hasValidEval) (if (isCrcPass) "PASS" else "FAIL") else "—",
-                                isGood = hasValidEval && isCrcPass,
-                                isHeld = isHeld
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun FramingGuideOverlay(
-    modifier: Modifier = Modifier,
-    reticleColor: Color = Color.White.copy(alpha = 0.6f),
-    guidanceText: String = "ALIGN QR",
-    guidanceColor: Color = Color.White.copy(alpha = 0.8f)
-) {
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val side = minOf(size.width, size.height) * 0.70f // 70% of smaller dimension
-            val left = (size.width - side) / 2f
-            val top = (size.height - side) / 2f
-            val cornerLen = side * 0.15f
-            val strokeWidth = 3.dp.toPx()
-
-            // Top-Left
-            drawLine(reticleColor, Offset(left, top), Offset(left + cornerLen, top), strokeWidth)
-            drawLine(reticleColor, Offset(left, top), Offset(left, top + cornerLen), strokeWidth)
-
-            // Top-Right
-            drawLine(reticleColor, Offset(left + side, top), Offset(left + side - cornerLen, top), strokeWidth)
-            drawLine(reticleColor, Offset(left + side, top), Offset(left + side, top + cornerLen), strokeWidth)
-
-            // Bottom-Right
-            drawLine(reticleColor, Offset(left + side, top + side), Offset(left + side - cornerLen, top + side), strokeWidth)
-            drawLine(reticleColor, Offset(left + side, top + side), Offset(left + side, top + side - cornerLen), strokeWidth)
-
-            // Bottom-Left
-            drawLine(reticleColor, Offset(left, top + side), Offset(left + cornerLen, top + side), strokeWidth)
-            drawLine(reticleColor, Offset(left, top + side), Offset(left, top + side - cornerLen), strokeWidth)
-
-            // Center crosshair / dot
-            val cx = size.width / 2f
-            val cy = size.height / 2f
-            val crosshairLen = 10.dp.toPx()
-            drawLine(reticleColor, Offset(cx - crosshairLen, cy), Offset(cx + crosshairLen, cy), 1.5f.dp.toPx())
-            drawLine(reticleColor, Offset(cx, cy - crosshairLen), Offset(cx, cy + crosshairLen), 1.5f.dp.toPx())
         }
 
         Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 58.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp),
-            modifier = Modifier.padding(bottom = 240.dp)
         ) {
             Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = Color.Black.copy(alpha = 0.65f)
+                shape = RoundedCornerShape(20.dp),
+                color = Color.Black.copy(alpha = 0.72f),
             ) {
                 Text(
-                    text = guidanceText,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                    guidance,
                     color = guidanceColor,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
                 )
             }
             Text(
-                text = "Place the entire SuperQR inside the frame",
-                fontSize = 11.sp,
-                color = Color.White.copy(alpha = 0.85f),
-                fontWeight = FontWeight.SemiBold
+                if (cameraAligned) "Green outline + matrix = exactly what SuperQR sees" else "Preparing aligned camera…",
+                color = Color.White.copy(alpha = 0.78f),
+                fontSize = 10.sp,
             )
             Text(
-                text = "Keep all 4 outer corners visible",
+                "Keep the whole outer border visible",
+                color = Color.White.copy(alpha = 0.58f),
                 fontSize = 10.sp,
-                color = Color.White.copy(alpha = 0.65f)
             )
         }
     }
 }
 
 @Composable
-private fun CompactMetricItem(
-    label: String,
-    value: String,
-    isGood: Boolean? = null,
-    isHeld: Boolean = false
+private fun ReceiverSummary(
+    result: V6StaticResult?,
+    accumulator: V6SessionAccumulator,
+    cameraBindingState: String,
+    modifier: Modifier = Modifier,
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = if (isHeld && label != "Inliers") "$label (last)" else label,
-            fontSize = 10.sp,
-            color = Color.White.copy(alpha = 0.6f)
-        )
-        Text(
-            text = value,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-            color = when {
-                isHeld -> Color(0xFFFFB74D) // De-emphasized amber when held
-                isGood == true -> Color(0xFF4CAF50)
-                isGood == false -> Color(0xFFF44336)
-                else -> Color.White
+    val fresh = result?.diagnosticPayload?.classificationSource == "FULL_DETECTION"
+    val validFrame = fresh && result?.transportFrame != null
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.78f)),
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Camera: $cameraBindingState", color = if (cameraBindingState == "WYSIWYG") Color(0xFF4CAF50) else Color.White, fontSize = 11.sp)
+                Text(
+                    if (fresh) "FULL DETECTION" else if (result?.diagnosticPayload?.classificationSource == "TRACKED_HOMOGRAPHY") "HELD" else "SEARCHING",
+                    color = if (fresh) Color(0xFF4CAF50) else Color(0xFFFFB74D),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                )
             }
-        )
-    }
-}
-
-@Composable
-private fun CompactMetricBadge(
-    label: String,
-    value: String,
-    isGood: Boolean,
-    isHeld: Boolean = false
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = if (isHeld) "$label (last)" else label,
-            fontSize = 10.sp,
-            color = Color.White.copy(alpha = 0.6f)
-        )
-        Surface(
-            shape = RoundedCornerShape(4.dp),
-            color = when {
-                isHeld -> Color(0xFFE65100).copy(alpha = 0.85f) // De-emphasized amber/orange when held
-                isGood -> Color(0xFF2E7D32)
-                else -> Color(0xFF616161)
-            }
-        ) {
+            val sid = accumulator.getCurrentSessionId()
+            val total = accumulator.getTotalFrames()
             Text(
-                text = if (isHeld && value != "—") "$value (held)" else value,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
+                if (sid == -1) "Waiting for V6 frames" else "Session $sid • ${accumulator.getUniqueFrames()}/$total frames • missing ${accumulator.getMissingFramesCount()}",
                 color = Color.White,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                fontSize = 12.sp,
+            )
+            Text(
+                if (validFrame) "CRC16 PASS • Frame ${result?.transportFrameId}" else "Last camera frame: ${if (fresh) "fresh, no valid transport frame" else "not fresh"}",
+                color = if (validFrame) Color(0xFF4CAF50) else Color.White.copy(alpha = 0.65f),
+                fontSize = 10.sp,
             )
         }
     }
 }
 
-private fun shareReportFile(context: Context, text: String) {
-    try {
-        val file = File(context.cacheDir, "v6_diagnostic_report.txt")
-        file.writeText(text)
-        
-        val sendIntent = Intent().apply {
-            action = Intent.ACTION_SEND
-            putExtra(Intent.EXTRA_TEXT, text)
-            type = "text/plain"
+@Composable
+private fun ScannerLabPanel(
+    result: V6StaticResult?,
+    accumulator: V6SessionAccumulator,
+    selectedMode: String,
+    onModeChanged: (String) -> Unit,
+    focusState: String,
+    onLockFocus: () -> Unit,
+    onUnlockFocus: () -> Unit,
+    diagnosticState: String,
+    hasCapturedZip: Boolean,
+    onDiagnostic: () -> Unit,
+    onCopyReport: () -> Unit,
+    selectedTab: Int,
+    onTabSelected: (Int) -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.90f)),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TabRow(selectedTabIndex = selectedTab, modifier = Modifier.weight(1f), containerColor = Color.Transparent) {
+                    listOf("TEST", "LIVE", "TOOLS").forEachIndexed { index, title ->
+                        Tab(selected = selectedTab == index, onClick = { onTabSelected(index) }, text = { Text(title, fontSize = 10.sp) })
+                    }
+                }
+                TextButton(onClick = onClose) { Text("X", color = Color.White) }
+            }
+
+            when (selectedTab) {
+                0 -> {
+                    Text("Static test pattern", color = Color.White, fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                        listOf(
+                            "Random" to "deterministic_random",
+                            "Checker" to "checkerboard",
+                            "Black" to "black",
+                            "White" to "white",
+                        ).forEach { (label, mode) ->
+                            FilterChip(
+                                selected = selectedMode == mode,
+                                onClick = { onModeChanged(mode) },
+                                label = { Text(label, fontSize = 9.sp) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+                1 -> {
+                    val source = result?.diagnosticPayload?.classificationSource ?: "—"
+                    val fresh = source == "FULL_DETECTION"
+                    Text("Receiving V6", color = Color.White, fontWeight = FontWeight.Bold)
+                    Text("Source: $source • Fresh: ${if (fresh) "YES" else "NO"}", color = if (fresh) Color(0xFF4CAF50) else Color(0xFFFFB74D), fontSize = 11.sp)
+                    Text("Session: ${accumulator.getCurrentSessionId().takeIf { it != -1 } ?: "—"}", color = Color.White, fontSize = 11.sp)
+                    Text("Frames: ${accumulator.getUniqueFrames()} / ${accumulator.getTotalFrames().takeIf { it != -1 } ?: "—"}", color = Color.White, fontSize = 11.sp)
+                    Text("Duplicates: ${accumulator.getDuplicateCount()} • Conflicts: ${accumulator.getConflictCount()}", color = Color.White.copy(alpha = 0.75f), fontSize = 11.sp)
+                    Text("Transport: ${if (fresh && result?.transportFrame != null) "CRC16 PASS" else "—"}", color = Color.White, fontSize = 11.sp)
+                }
+                else -> {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Button(onClick = onLockFocus, modifier = Modifier.weight(1f)) { Text("Focus & Lock", fontSize = 10.sp) }
+                        Button(onClick = onUnlockFocus, modifier = Modifier.weight(1f)) { Text("Unlock", fontSize = 10.sp) }
+                    }
+                    Text("Focus: $focusState", color = Color.White, fontSize = 11.sp)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Button(onClick = onDiagnostic, modifier = Modifier.weight(1f)) {
+                            Text(if (hasCapturedZip) "Share ZIP" else "Capture ZIP", fontSize = 10.sp)
+                        }
+                        Button(onClick = onCopyReport, modifier = Modifier.weight(1f)) { Text("Copy Report", fontSize = 10.sp) }
+                    }
+                    Text("Diagnostic: $diagnosticState", color = Color.White.copy(alpha = 0.72f), fontSize = 10.sp)
+                }
+            }
         }
-        val shareIntent = Intent.createChooser(sendIntent, "Share V6 Diagnostic Report")
-        context.startActivity(shareIntent)
-    } catch (e: Exception) {
-        Log.e("V6StaticScreen", "Share error", e)
+    }
+}
+
+@Composable
+private fun TransferCompleteScreen(
+    completed: CompletedUiTransfer,
+    onScanAnother: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val pkg = completed.pkg
+    Box(modifier.fillMaxSize().background(Color.Black).padding(18.dp)) {
+        Column(
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("TRANSFER COMPLETE", color = Color(0xFF4CAF50), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Card(colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.09f))) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(pkg.filename, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text("${pkg.fileSize} B", color = Color.White.copy(alpha = 0.8f))
+                    Text("Session ${completed.sessionId}", color = Color.White.copy(alpha = 0.8f))
+                    Text("Frames ${completed.totalFrames}/${completed.totalFrames}", color = Color.White.copy(alpha = 0.8f))
+                    Text("File CRC32 PASS • 0x${"%08X".format(completed.fileCrc32)}", color = Color(0xFF4CAF50))
+                    Text("Temporary app cache", color = Color.White.copy(alpha = 0.65f), fontSize = 11.sp)
+                }
+            }
+            Text("Decoded preview", color = Color.White, fontWeight = FontWeight.Bold)
+            Box(
+                Modifier.weight(1f).fillMaxWidth().background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(10.dp)).padding(10.dp)
+            ) {
+                Text(V6ReceiveUtils.generatePreview(pkg.fileData), color = Color.White.copy(alpha = 0.82f), fontSize = 12.sp)
+            }
+            Button(onClick = onScanAnother, modifier = Modifier.fillMaxWidth()) { Text("Scan Another") }
+        }
+    }
+}
+
+@Composable
+private fun StatusPill(text: String, color: Color) {
+    Surface(shape = CircleShape, color = color) {
+        Text(text, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp))
     }
 }
 
 private fun shareZipFile(context: Context, zipFile: File) {
     try {
-        val uri = androidx.core.content.FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.provider",
-            zipFile
+        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.provider", zipFile)
+        context.startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    type = "application/zip"
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                },
+                "Share V6 Full Diagnostic ZIP",
+            )
         )
-        val shareIntent = Intent().apply {
-            action = Intent.ACTION_SEND
-            putExtra(Intent.EXTRA_STREAM, uri)
-            type = "application/zip"
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        val chooser = Intent.createChooser(shareIntent, "Share V6 Full Diagnostic ZIP")
-        context.startActivity(chooser)
-    } catch (e: Exception) {
-        Log.e("V6StaticScreen", "Share ZIP error", e)
+    } catch (e: Throwable) {
+        Log.e("V6StaticScreen", "Share ZIP failed", e)
     }
 }
 
-private fun generateDiagnosticReport(
-    context: Context,
-    currentResult: V6StaticResult?,
-    contractMatch: Boolean?,
-    canonicalHash: String,
-    rawHash: String,
-    assetByteLength: Int,
-    lastValid: LastValidEvaluation?,
-    errors: List<PersistentErrorState>,
+private fun buildCompactDiagnosticReport(
+    result: V6StaticResult?,
+    cameraBindingState: String,
     logger: V6DiagnosticLogger,
-    frozenSnapshot: V6StaticResult?
-): String {
-    val pm = context.packageManager
-    val pkgName = context.packageName
-    val pInfo = pm.getPackageInfo(pkgName, 0)
-    val appVersion = pInfo.versionName
-    val androidVersion = android.os.Build.VERSION.RELEASE
-    val deviceModel = android.os.Build.MODEL
-
-    return buildString {
-        appendLine("=== V6 DIAGNOSTIC REPORT ===")
-        appendLine("Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}")
-        appendLine("App Version: $appVersion")
-        appendLine("Android OS: $androidVersion")
-        appendLine("Device: $deviceModel")
-        appendLine()
-        appendLine("--- CONTRACT ---")
-        appendLine("Match: $contractMatch")
-        appendLine("Canonical Hash: $canonicalHash")
-        appendLine("Raw Hash: $rawHash")
-        appendLine("Size: $assetByteLength bytes")
-        appendLine()
-        appendLine("--- DETECTOR & TRACKING STATE ---")
-        if (currentResult != null) {
-            appendLine("Tracking State: ${currentResult.trackingState}")
-            appendLine("Classification Source: ${currentResult.diagnosticPayload?.classificationSource ?: "N/A"}")
-            appendLine("RANSAC Inliers: ${currentResult.ransacInliers}")
-            appendLine("Missed Frames: ${currentResult.missedFrameCount}")
-            appendLine("Border: ${currentResult.borderFound}")
-            appendLine("Orient: ${currentResult.orientationResolved}")
-            appendLine("Time: ${currentResult.processingTimeMs}ms")
-            appendLine("Quad: ${currentResult.detectedQuad?.joinToString(" ") { "(${it[0]},${it[1]})" }}")
-            appendLine("Area: ${currentResult.contourArea}")
-            appendLine("Warp Min/Max/Mean: ${if (currentResult.warpCoverage > 0.0) "${currentResult.warpMinLuma}/${currentResult.warpMaxLuma}/${currentResult.warpMeanLuma}" else "N/A"}")
-            appendLine("Warp Coverage: ${if (currentResult.warpCoverage > 0.0) String.format(Locale.US, "%.2f", currentResult.warpCoverage) else "N/A"}")
-            appendLine("Corner IDs: ${currentResult.decodedCornerIds}")
-            appendLine("Corner Bits: ${currentResult.decodedCornerBits}")
-            appendLine("Corner Distances: ${currentResult.decodedCornerDistances}")
-            appendLine("Corner Margins: ${currentResult.decodedCornerMargins}")
-            currentResult.cornerMatches.forEach { (pos, match) ->
-                appendLine("  [$pos] expected=${match.expectedPattern} decoded=${match.decodedPattern} bestMatch=${match.bestMatchId} dist=${match.hammingDistance} margin=${match.secondBestMargin}")
-            }
-            currentResult.bitSamples.forEach { (corner, samples) ->
-                appendLine("  Bits $corner:")
-                samples.forEach { sample ->
-                    appendLine("    [${sample.bitName}] coords=(${String.format(Locale.US, "%.1f", sample.x)},${String.format(Locale.US, "%.1f", sample.y)}) med=${sample.medianLuma} black=${sample.localBlackRef} white=${sample.localWhiteRef} thresh=${sample.threshold} -> ${sample.decodedBit}")
-                }
-            }
-            appendLine()
-            appendLine("--- DECODING & CLASSIFICATION ---")
-            val isTransportValid = (currentResult.transportSessionId != null && currentResult.transportError == null)
-            if (isTransportValid) {
-                appendLine("Mode: V6 OPTICAL TRANSPORT FRAME")
-                appendLine("Transport Status: VALID")
-                appendLine("Session ID: ${currentResult.transportSessionId}")
-                appendLine("Frame ID: ${currentResult.transportFrameId}")
-                appendLine("Total Frames: ${currentResult.transportTotalFrames}")
-                appendLine("CRC16 Status: PASS (0x${currentResult.transportCrc16Hex})")
-                val prefix = "A506${"%02X".format(currentResult.transportSessionId)}${"%04X".format(currentResult.transportFrameId)}${"%04X".format(currentResult.transportTotalFrames)}"
-                appendLine("Raw Header Prefix: $prefix")
-                val payloadHex = currentResult.transportPayloadHex
-                if (currentResult.transportFrameId == 0 && payloadHex != null && payloadHex.length >= 8) {
-                    appendLine("Package Length (Frame 0): ${payloadHex.substring(0, 8).toLong(16)} bytes")
-                }
-                appendLine("Static Golden-Pattern Comparison: N/A (Transport Data Grid)")
-            } else {
-                appendLine("Mode: TEST PATTERN (${currentResult.diagnosticPayload?.patternName ?: "N/A"})")
-                appendLine("Correct: ${currentResult.colorCorrect}/400")
-                appendLine("Uncertain: ${currentResult.colorUncertain}/400")
-                val hexDec = currentResult.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-                val hexExp = currentResult.expectedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-                appendLine("Decoded CRC32: $hexDec")
-                appendLine("Expected CRC32: $hexExp")
-                if (currentResult.transportError != null) {
-                    appendLine("Transport Rejection Reason: ${currentResult.transportError}")
-                }
-                
-                val matrix = currentResult.confusionMatrix
-                if (matrix != null) {
-                    appendLine("Confusion Matrix (Expected -> Decoded):")
-                    matrix.forEach { (exp, decMap) ->
-                        val decStr = decMap.entries.joinToString(", ") { "${it.key}:${it.value}" }
-                        appendLine("  $exp -> $decStr")
-                    }
-                }
-            }
-        } else {
-            appendLine("None")
+): String = buildString {
+    appendLine("=== SUPERQR V6 LIVE REPORT ===")
+    appendLine("Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}")
+    appendLine("Camera binding: $cameraBindingState")
+    if (result == null) {
+        appendLine("Result: none")
+    } else {
+        val source = result.diagnosticPayload?.classificationSource ?: "N/A"
+        appendLine("Tracking: ${result.trackingState}")
+        appendLine("Classification source: $source")
+        appendLine("Fresh: ${source == "FULL_DETECTION"}")
+        appendLine("Border: ${result.borderFound}")
+        appendLine("Orientation: ${result.orientationResolved}")
+        appendLine("Quad: ${result.detectedQuad?.joinToString(" ") { "(${"%.1f".format(it[0])},${"%.1f".format(it[1])})" }}")
+        appendLine("Normalized analysis: ${result.diagnosticPayload?.normalizedAnalysisWidth}x${result.diagnosticPayload?.normalizedAnalysisHeight}")
+        val transportValid = source == "FULL_DETECTION" && result.transportFrame != null
+        appendLine("Fresh transport valid: $transportValid")
+        if (transportValid) {
+            appendLine("Session: ${result.transportSessionId}")
+            appendLine("Frame: ${result.transportFrameId}/${result.transportTotalFrames}")
+            appendLine("CRC16: ${result.transportCrc16Hex}")
         }
-        
-        if (frozenSnapshot != null) {
-            appendLine()
-            appendLine("--- FROZEN SNAPSHOT ---")
-            appendLine("Border: ${frozenSnapshot.borderFound}")
-            appendLine("Orient: ${frozenSnapshot.orientationResolved}")
-            appendLine("Correct: ${frozenSnapshot.colorCorrect}/400")
-            val hexDec = frozenSnapshot.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-            appendLine("Decoded CRC32: $hexDec")
-            appendLine("Debug Image Path: ${frozenSnapshot.debugImagePath ?: "N/A"}")
-        }
-        
-        appendLine()
-        appendLine("--- ERRORS (${errors.size}) ---")
-        errors.forEach { e ->
-            appendLine("[${e.category}] ${e.message} (x${e.count})")
-            appendLine("Reason: ${e.exactReason}")
-            appendLine("Seen: ${e.firstSeen} to ${e.lastSeen}")
-            appendLine()
-        }
-        appendLine("--- LOGS ---")
-        logger.getLogs().forEach { l ->
-            appendLine("[${l.timestamp}] ${l.level}/${l.category} (x${l.count}): ${l.message}")
-        }
+    }
+    appendLine("--- LOGS ---")
+    logger.getLogs().takeLast(40).forEach { log ->
+        appendLine("[${log.timestamp}] ${log.level}/${log.category}: ${log.message}")
     }
 }
