@@ -44,7 +44,8 @@ object V6PreviewOverlayMapper {
         }
         if (mappedQuad.size != 4) return null
 
-        val fresh = result.diagnosticPayload?.classificationSource == "FULL_DETECTION"
+        val src = result.diagnosticPayload?.classificationSource
+        val fresh = src == "FULL_DETECTION" || src == "TRACKED_RESAMPLED"
         val hInv = result.finalInvHomography
 
         val grid = if (fresh && hInv != null && hInv.size == 9) {

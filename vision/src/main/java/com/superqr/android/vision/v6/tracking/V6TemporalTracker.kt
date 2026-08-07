@@ -42,8 +42,6 @@ class V6TemporalTracker {
     private var lastValidStaticResult: V6StaticResult? = null
     private var trackedPoints: MutableList<TrackedPoint> = mutableListOf()
 
-    private val alpha = 0.35
-
     val canonicalReferencePoints: List<Pair<String, Point>> = listOf(
         "CORNER_TL" to Point(60.0, 60.0),
         "CORNER_TR" to Point(940.0, 60.0),
@@ -110,7 +108,7 @@ class V6TemporalTracker {
             (state == TrackingState.LOCKED || state == TrackingState.TRACKING || state == TrackingState.REACQUIRING) &&
             !isDriftCheckDue && prevGray != null && grayMat != null && trackedPoints.isNotEmpty()
         ) {
-            val trackedRes = tryOpticalFlowTracking(prevGray!!, grayMat)
+            val trackedRes = tryOpticalFlowTracking(grayMat)
             if (trackedRes != null) {
                 missedFrameCount = 0
                 newState = TrackingState.TRACKING
@@ -182,15 +180,16 @@ class V6TemporalTracker {
         }
     }
 
-    fun recoverQuad(currMat: Mat): Array<Point>? {
-        if (prevGray == null) return null
-        val tempRansac = ransacInliers
-        val result = tryOpticalFlowTracking(prevGray!!, currMat)
-        ransacInliers = tempRansac
-        return result?.detectedQuad?.map { Point(it[0], it[1]) }?.toTypedArray()
-    }
-
-    private fun tryOpticalFlowTracking(prevMat: Mat, currMat: Mat): V6StaticResult? {
+    // ── shared 16-point optical-flow geometry primitive ─────────────────
+    // Runs optical flow on all 16 canonical tracking points from prevGray
+    // into currMat, stores raw current-frame positions in trackedPoints,
+    // and returns the 4 raw current-frame corner positions.
+    //
+    // Returns null when fewer than 4 points track, any corner point fails
+    // the validity check, the resulting quad is non-convex, or prevGray is
+    // unavailable.
+    private fun trackCurrentQuad(currMat: Mat): Array<Point>? {
+        val prev = prevGray ?: return null
         if (trackedPoints.size < 4) return null
 
         val p0 = MatOfPoint2f()
@@ -201,7 +200,7 @@ class V6TemporalTracker {
         p0.fromList(prevList)
 
         try {
-            Video.calcOpticalFlowPyrLK(prevMat, currMat, p0, p1, status, err)
+            Video.calcOpticalFlowPyrLK(prev, currMat, p0, p1, status, err)
         } catch (_: Throwable) {
             p0.release(); p1.release(); status.release(); err.release()
             return null
@@ -227,25 +226,55 @@ class V6TemporalTracker {
         p0.release(); p1.release(); status.release(); err.release()
         if (validCurr.size < 4) return null
 
+        // Require that all four corner points tracked individually.
+        // CORNER_TL=0, CORNER_TR=1, CORNER_BR=2, CORNER_BL=3 per
+        // canonicalReferencePoints ordering used by updateTrackedPointsFromHomography.
+        if (0 !in validIndices || 1 !in validIndices || 2 !in validIndices || 3 !in validIndices) {
+            return null
+        }
+        val cornerTL = p1List[0]
+        val cornerTR = p1List[1]
+        val cornerBR = p1List[2]
+        val cornerBL = p1List[3]
+
+        if (!isConvexQuad(cornerTL, cornerTR, cornerBR, cornerBL)) return null
+
+        // Store raw current-frame OF positions for every valid tracked point.
+        // No EMA / temporal smoothing — these are the actual feature positions
+        // in the current frame and the seeds for the next optical-flow step.
         ransacInliers = validCurr.size
         for (idx in validIndices.indices) {
             val originalIdx = validIndices[idx]
-            val oldPt = trackedPoints[originalIdx].imagePt
-            val newPt = validCurr[idx]
-            trackedPoints[originalIdx].imagePt = Point(
-                oldPt.x * (1.0 - alpha) + newPt.x * alpha,
-                oldPt.y * (1.0 - alpha) + newPt.y * alpha
-            )
+            trackedPoints[originalIdx].imagePt = validCurr[idx]
         }
 
-        val cornerTL = trackedPoints.find { it.id == "CORNER_TL" }?.imagePt ?: validCurr[0]
-        val cornerTR = trackedPoints.find { it.id == "CORNER_TR" }?.imagePt ?: validCurr[1]
-        val cornerBR = trackedPoints.find { it.id == "CORNER_BR" }?.imagePt ?: validCurr[2]
-        val cornerBL = trackedPoints.find { it.id == "CORNER_BL" }?.imagePt ?: validCurr[3]
-        if (!isConvexQuad(cornerTL, cornerTR, cornerBR, cornerBL)) return null
+        return arrayOf(cornerTL, cornerTR, cornerBR, cornerBL)
+    }
 
-        val quadArray = listOf(cornerTL, cornerTR, cornerBR, cornerBL).map { doubleArrayOf(it.x, it.y) }
-        val area = calculateQuadArea(cornerTL, cornerTR, cornerBR, cornerBL)
+    // ── public proactive-tracking entry point ──────────────────────────
+    // Called by the detector BEFORE contour acquisition when the tracker
+    // is LOCKED/TRACKING and periodic re-detection is not due.
+    // Returns the current corner quad from optical flow, or null.
+    fun tryProactiveTracking(currMat: Mat): Array<Point>? {
+        if (state != TrackingState.LOCKED && state != TrackingState.TRACKING) return null
+        // Sync with processFrame's drift-check cadence: every 45th frame
+        // forces contour-based FULL_DETECTION to prevent slow drift.
+        if ((frameCounter + 1) % 45L == 0L) return null
+        return trackCurrentQuad(currMat)
+    }
+
+    fun recoverQuad(currMat: Mat): Array<Point>? {
+        val tempRansac = ransacInliers
+        val quad = trackCurrentQuad(currMat)
+        ransacInliers = tempRansac
+        return quad
+    }
+
+    // ── held/stale tracking result (geometry current, classification stale) ─
+    private fun tryOpticalFlowTracking(currMat: Mat): V6StaticResult? {
+        val quad = trackCurrentQuad(currMat) ?: return null
+        val quadArray = listOf(quad[0], quad[1], quad[2], quad[3]).map { doubleArrayOf(it.x, it.y) }
+        val area = calculateQuadArea(quad[0], quad[1], quad[2], quad[3])
         val lastValid = lastValidStaticResult
 
         // A tracked result provides current geometry only. Classification and transport

@@ -104,6 +104,7 @@ class V6StaticDetector : AutoCloseable {
 
     fun detect(luma: ByteArray, width: Int, height: Int, mode: String, chromaReader: ChromaPixelReader? = null, exportDebugImage: Boolean = false, cacheDir: String? = null): V6StaticResult {
         val startTime = System.currentTimeMillis()
+        val detectorStartNs = System.nanoTime()
 
         try {
             ensureOpenCvInitialized()
@@ -111,92 +112,109 @@ class V6StaticDetector : AutoCloseable {
             gray.create(height, width, CvType.CV_8UC1)
             gray.put(0, 0, luma)
 
-            Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
-            Imgproc.Canny(blurred, edges, 50.0, 150.0)
-
-            val contours = ArrayList<MatOfPoint>()
-            Imgproc.findContours(edges, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
-
             var bestPts: Array<Point>? = null
             var maxArea = 0.0
-            
+            var classificationSource = "FULL_DETECTION"
             var contoursConsidered = 0
             var quadsConsidered = 0
 
-            class QuadCandidate(val points: Array<Point>, val area: Double, val score: Double)
-            val candidates = mutableListOf<QuadCandidate>()
-
-            val cvContour2f = MatOfPoint2f()
-            val approxCurve = MatOfPoint2f()
-            val hull = org.opencv.core.MatOfInt()
-
-            for (contour in contours) {
-                val area = Geometry.contourArea(contour)
-                if (area < 10000) continue
-                contoursConsidered++
-
-                contour.convertTo(cvContour2f, CvType.CV_32F)
-                val perimeter = Geometry.arcLength(cvContour2f, true)
-                Geometry.approxPolyDP(cvContour2f, approxCurve, 0.02 * perimeter, true)
-
-                var pts = approxCurve.toArray()
-                if (pts.size != 4) {
-                    Geometry.convexHull(contour, hull)
-                    val hullPoints = arrayOfNulls<Point>(hull.rows())
-                    val contourPts = contour.toArray()
-                    for (i in 0 until hull.rows()) {
-                        hullPoints[i] = contourPts[hull.get(i, 0)[0].toInt()]
-                    }
-                    val hullMat2f = MatOfPoint2f(*hullPoints.map { it!! }.toTypedArray())
-                    val hullPerimeter = Geometry.arcLength(hullMat2f, true)
-                    Geometry.approxPolyDP(hullMat2f, approxCurve, 0.04 * hullPerimeter, true)
-                    pts = approxCurve.toArray()
-                    hullMat2f.release()
-                }
-
-                if (pts.size == 4) {
-                    val ptsMatOfPoint = MatOfPoint(*pts)
-                    val isConvex = Geometry.isContourConvex(ptsMatOfPoint)
-                    ptsMatOfPoint.release()
-                    if (isConvex) {
-                        quadsConsidered++
-                        candidates.add(QuadCandidate(pts, area, area))
-                    }
-                } else {
-                    val box = Geometry.minAreaRect(cvContour2f)
-                    val boxArea = box.size.width * box.size.height
-                    if (boxArea > 0 && area / boxArea > 0.75) {
-                        val cvPoints = arrayOfNulls<Point>(4)
-                        box.points(cvPoints)
-                        quadsConsidered++
-                        candidates.add(QuadCandidate(cvPoints.map { it!! }.toTypedArray(), area, area * 0.9))
-                    }
-                }
+            // ── TRACKED_RESAMPLED proactive gate ──────────────────────
+            // If the tracker is locked and periodic re-detection is not
+            // due, try optical-flow quad tracking FIRST. A successful quad
+            // skips the expensive contour acquisition entirely.
+            val trackedQuad = tracker.tryProactiveTracking(gray)
+            if (trackedQuad != null) {
+                bestPts = trackedQuad
+                maxArea = Geometry.contourArea(MatOfPoint(*bestPts))
+                classificationSource = "TRACKED_RESAMPLED"
             }
 
-            cvContour2f.release()
-            approxCurve.release()
-            hull.release()
-            
-            val bestCandidate = candidates.maxByOrNull { it.score }
-            if (bestCandidate != null) {
-                bestPts = bestCandidate.points
-                maxArea = bestCandidate.area
-            }
-
-            contours.forEach { it.release() }
-            contours.clear()
-
-            var usedTrackerFallback = false
+            // ── FULL_DETECTION contour-based acquisition ──────────────
             if (bestPts == null) {
-                bestPts = tracker.recoverQuad(gray)
-                if (bestPts != null) {
-                    maxArea = Geometry.contourArea(MatOfPoint(*bestPts))
-                    usedTrackerFallback = true
+                classificationSource = "FULL_DETECTION"
+
+                Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
+                Imgproc.Canny(blurred, edges, 50.0, 150.0)
+
+                val contours = ArrayList<MatOfPoint>()
+                Imgproc.findContours(edges, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+
+                class QuadCandidate(val points: Array<Point>, val area: Double, val score: Double)
+                val candidates = mutableListOf<QuadCandidate>()
+
+                val cvContour2f = MatOfPoint2f()
+                val approxCurve = MatOfPoint2f()
+                val hull = org.opencv.core.MatOfInt()
+
+                for (contour in contours) {
+                    val area = Geometry.contourArea(contour)
+                    if (area < 10000) continue
+                    contoursConsidered++
+
+                    contour.convertTo(cvContour2f, CvType.CV_32F)
+                    val perimeter = Geometry.arcLength(cvContour2f, true)
+                    Geometry.approxPolyDP(cvContour2f, approxCurve, 0.02 * perimeter, true)
+
+                    var pts = approxCurve.toArray()
+                    if (pts.size != 4) {
+                        Geometry.convexHull(contour, hull)
+                        val hullPoints = arrayOfNulls<Point>(hull.rows())
+                        val contourPts = contour.toArray()
+                        for (i in 0 until hull.rows()) {
+                            hullPoints[i] = contourPts[hull.get(i, 0)[0].toInt()]
+                        }
+                        val hullMat2f = MatOfPoint2f(*hullPoints.map { it!! }.toTypedArray())
+                        val hullPerimeter = Geometry.arcLength(hullMat2f, true)
+                        Geometry.approxPolyDP(hullMat2f, approxCurve, 0.04 * hullPerimeter, true)
+                        pts = approxCurve.toArray()
+                        hullMat2f.release()
+                    }
+
+                    if (pts.size == 4) {
+                        val ptsMatOfPoint = MatOfPoint(*pts)
+                        val isConvex = Geometry.isContourConvex(ptsMatOfPoint)
+                        ptsMatOfPoint.release()
+                        if (isConvex) {
+                            quadsConsidered++
+                            candidates.add(QuadCandidate(pts, area, area))
+                        }
+                    } else {
+                        val box = Geometry.minAreaRect(cvContour2f)
+                        val boxArea = box.size.width * box.size.height
+                        if (boxArea > 0 && area / boxArea > 0.75) {
+                            val cvPoints = arrayOfNulls<Point>(4)
+                            box.points(cvPoints)
+                            quadsConsidered++
+                            candidates.add(QuadCandidate(cvPoints.map { it!! }.toTypedArray(), area, area * 0.9))
+                        }
+                    }
+                }
+
+                cvContour2f.release()
+                approxCurve.release()
+                hull.release()
+
+                val bestCandidate = candidates.maxByOrNull { it.score }
+                if (bestCandidate != null) {
+                    bestPts = bestCandidate.points
+                    maxArea = bestCandidate.area
+                }
+
+                contours.forEach { it.release() }
+                contours.clear()
+
+                // ── Reactive tracking fallback ────────────────────────
+                // If contour acquisition failed, try optical-flow recovery.
+                // The quad is tracked but classification is fresh — label it
+                // TRACKED_RESAMPLED, not TRACKED_HOMOGRAPHY.
+                if (bestPts == null) {
+                    bestPts = tracker.recoverQuad(gray)
+                    if (bestPts != null) {
+                        maxArea = Geometry.contourArea(MatOfPoint(*bestPts))
+                        classificationSource = "TRACKED_RESAMPLED"
+                    }
                 }
             }
-
-            val classificationSource = if (usedTrackerFallback) "TRACKED_HOMOGRAPHY" else "FULL_DETECTION"
 
             if (bestPts == null) {
                 val res = V6StaticResult(false, null, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Outer border not found: max valid area was ${maxArea.roundToInt()}", null, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
@@ -706,7 +724,7 @@ class V6StaticDetector : AutoCloseable {
             var transportError: String? = null
             var transportFrameObj: V6TransportFrame? = null
 
-            if (classificationSource == "FULL_DETECTION") {
+            if (classificationSource == "FULL_DETECTION" || classificationSource == "TRACKED_RESAMPLED") {
                 val indexArray = IntArray(400)
                 var hasUncertain = false
                 for (i in 0 until 400) {
@@ -806,7 +824,11 @@ class V6StaticDetector : AutoCloseable {
                 transportError = transportError,
                 transportFrame = transportFrameObj
             )
-            val trackedRes = tracker.processFrame(gray, res, finalInvHArr)
+            val timedRes = res.copy(
+                detectorStartNs = detectorStartNs,
+                detectorEndNs = System.nanoTime()
+            )
+            val trackedRes = tracker.processFrame(gray, timedRes, finalInvHArr)
             recordFrameTrace(trackedRes, pilots, correct, incorrectCount, uncertain)
             return trackedRes
 
@@ -834,7 +856,9 @@ class V6StaticDetector : AutoCloseable {
                 confusionMatrix = null,
                 processingTimeMs = System.currentTimeMillis() - startTime,
                 failureReason = "OpenCV initialization/detection failed: ${e.message}",
-                debugImagePath = null
+                debugImagePath = null,
+                detectorStartNs = detectorStartNs,
+                detectorEndNs = System.nanoTime()
             )
         }
     }

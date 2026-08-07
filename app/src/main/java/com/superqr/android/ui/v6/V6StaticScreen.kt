@@ -213,18 +213,20 @@ fun V6StaticScreen(
 
                     analysis.setAnalyzer(analysisExecutor) { imageProxy ->
                         try {
+                            val analyzerArrivalNs = System.nanoTime()
                             val activeDetector = detector ?: return@setAnalyzer
                             val lumaOk = lumaBuffer.packFrom(imageProxy)
                             if (!lumaOk) return@setAnalyzer
 
                             val chromaReader = ImageProxyChromaSampler(imageProxy, chromaBuffers)
-                            val result = activeDetector.detect(
+                            val rawResult = activeDetector.detect(
                                 luma = lumaBuffer.bytes,
                                 width = lumaBuffer.width,
                                 height = lumaBuffer.height,
                                 mode = selectedTestModeState.value,
                                 chromaReader = chromaReader,
                             )
+                            val result = rawResult.copy(analyzerArrivalNs = analyzerArrivalNs)
 
                             // Source transform is captured while ImageProxy is valid. The target
                             // transform is obtained on the UI thread from the actual PreviewView.
@@ -300,7 +302,8 @@ fun V6StaticScreen(
                             }
 
                             mainExecutor.execute {
-                                currentResult = result
+                                val uiDeliveryNs = System.nanoTime()
+                                currentResult = result.copy(uiDeliveryNs = uiDeliveryNs)
 
                                 previewGeometry = if (sourceTransform != null) {
                                     val target = previewView.outputTransform
@@ -419,7 +422,7 @@ fun V6StaticScreen(
 
     val result = currentResult
     val source = result?.diagnosticPayload?.classificationSource
-    val fresh = source == "FULL_DETECTION"
+    val fresh = source == "FULL_DETECTION" || source == "TRACKED_RESAMPLED"
     val held = source == "TRACKED_HOMOGRAPHY"
     val freshTransport = fresh && result?.transportFrame != null
     val sessionActive = accumulator.getCurrentSessionId() != -1
@@ -641,7 +644,7 @@ private fun ReceiverSummary(
     cameraBindingState: String,
     modifier: Modifier = Modifier,
 ) {
-    val fresh = result?.diagnosticPayload?.classificationSource == "FULL_DETECTION"
+    val fresh = result?.diagnosticPayload?.classificationSource?.let { it == "FULL_DETECTION" || it == "TRACKED_RESAMPLED" } == true
     val validFrame = fresh && result?.transportFrame != null
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -652,7 +655,7 @@ private fun ReceiverSummary(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("Camera: $cameraBindingState", color = if (cameraBindingState == "WYSIWYG") Color(0xFF4CAF50) else Color.White, fontSize = 11.sp)
                 Text(
-                    if (fresh) "FULL DETECTION" else if (result?.diagnosticPayload?.classificationSource == "TRACKED_HOMOGRAPHY") "HELD" else "SEARCHING",
+                    result?.diagnosticPayload?.classificationSource?.replace("_", " ") ?: "SEARCHING",
                     color = if (fresh) Color(0xFF4CAF50) else Color(0xFFFFB74D),
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
@@ -728,7 +731,7 @@ private fun ScannerLabPanel(
                 }
                 1 -> {
                     val source = result?.diagnosticPayload?.classificationSource ?: "—"
-                    val fresh = source == "FULL_DETECTION"
+                    val fresh = source == "FULL_DETECTION" || source == "TRACKED_RESAMPLED"
                     Text("Receiving V6", color = Color.White, fontWeight = FontWeight.Bold)
                     Text("Source: $source • Fresh: ${if (fresh) "YES" else "NO"}", color = if (fresh) Color(0xFF4CAF50) else Color(0xFFFFB74D), fontSize = 11.sp)
                     Text("Session: ${accumulator.getCurrentSessionId().takeIf { it != -1 } ?: "—"}", color = Color.White, fontSize = 11.sp)
@@ -828,12 +831,12 @@ private fun buildCompactDiagnosticReport(
         val source = result.diagnosticPayload?.classificationSource ?: "N/A"
         appendLine("Tracking: ${result.trackingState}")
         appendLine("Classification source: $source")
-        appendLine("Fresh: ${source == "FULL_DETECTION"}")
+        appendLine("Fresh: ${source == "FULL_DETECTION" || source == "TRACKED_RESAMPLED"}")
         appendLine("Border: ${result.borderFound}")
         appendLine("Orientation: ${result.orientationResolved}")
         appendLine("Quad: ${result.detectedQuad?.joinToString(" ") { "(${"%.1f".format(it[0])},${"%.1f".format(it[1])})" }}")
         appendLine("Normalized analysis: ${result.diagnosticPayload?.normalizedAnalysisWidth}x${result.diagnosticPayload?.normalizedAnalysisHeight}")
-        val transportValid = source == "FULL_DETECTION" && result.transportFrame != null
+        val transportValid = (source == "FULL_DETECTION" || source == "TRACKED_RESAMPLED") && result.transportFrame != null
         appendLine("Fresh transport valid: $transportValid")
         if (transportValid) {
             appendLine("Session: ${result.transportSessionId}")
