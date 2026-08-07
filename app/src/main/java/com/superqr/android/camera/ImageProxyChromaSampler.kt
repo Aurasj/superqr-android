@@ -16,6 +16,9 @@ class ImageProxyChromaSampler(
 ) : ChromaPixelReader {
     private val cropLeft = imageProxy.cropRect.left
     private val cropTop = imageProxy.cropRect.top
+    private val rawWidth = imageProxy.cropRect.width()
+    private val rawHeight = imageProxy.cropRect.height()
+    private val rotation = imageProxy.imageInfo.rotationDegrees
     private val uPlane = PlaneReader(imageProxy.planes[1])
     private val vPlane = PlaneReader(imageProxy.planes[2])
 
@@ -25,8 +28,13 @@ class ImageProxyChromaSampler(
         destination: IntArray,
     ): Boolean {
         require(destination.size >= 2)
-        val chromaX = ((cropLeft + imageX) / 2.0).toInt()
-        val chromaY = ((cropTop + imageY) / 2.0).toInt()
+        val nx = imageX.toInt()
+        val ny = imageY.toInt()
+
+        val (rx, ry) = FrameRotationHelper.mapNormalizedToRaw(nx, ny, rawWidth, rawHeight, rotation)
+
+        val chromaX = (cropLeft + rx) / 2
+        val chromaY = (cropTop + ry) / 2
         val u = uPlane.get(chromaX, chromaY) ?: return false
         val v = vPlane.get(chromaX, chromaY) ?: return false
         destination[0] = u

@@ -81,7 +81,9 @@ data class V6FrameDiagnosticPayload(
     val pilotDetails: List<V6PilotDiagnosticDetail>,
     val pairwisePilotDistances: Map<String, Double>,
     val contoursConsidered: Int = 0,
-    val quadsConsidered: Int = 0
+    val quadsConsidered: Int = 0,
+    val normalizedAnalysisWidth: Int = 0,
+    val normalizedAnalysisHeight: Int = 0
 )
 
 data class V6CapturedFrameBundle(

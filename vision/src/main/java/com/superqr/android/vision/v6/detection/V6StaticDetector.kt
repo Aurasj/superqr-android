@@ -672,7 +672,9 @@ class V6StaticDetector : AutoCloseable {
                 pilotDetails = pilotDetailsList,
                 pairwisePilotDistances = pairwisePilotDistances,
                 contoursConsidered = contoursConsidered,
-                quadsConsidered = quadsConsidered
+                quadsConsidered = quadsConsidered,
+                normalizedAnalysisWidth = width,
+                normalizedAnalysisHeight = height
             )
 
             val res = V6StaticResult(

@@ -15,6 +15,8 @@ class LumaFrameBuffer {
     var height: Int = 0
         private set
 
+    private var rowBuffer: ByteArray = ByteArray(0)
+
     fun packFrom(imageProxy: ImageProxy): Boolean {
         val crop = imageProxy.cropRect
         val w = crop.width()
@@ -26,30 +28,35 @@ class LumaFrameBuffer {
         val pixelStride = plane.pixelStride
         if (rowStride <= 0 || pixelStride <= 0) return false
 
-        val required = w * h
+        val rotation = imageProxy.imageInfo.rotationDegrees
+        val (nw, nh) = FrameRotationHelper.getNormalizedDimensions(w, h, rotation)
+
+        val required = nw * nh
         if (bytes.size != required) {
             bytes = ByteArray(required)
         }
-        width = w
-        height = h
+        width = nw
+        height = nh
+
+        val requiredRowBuffer = w * pixelStride
+        if (rowBuffer.size < requiredRowBuffer) {
+            rowBuffer = ByteArray(requiredRowBuffer)
+        }
 
         val buffer = plane.buffer.duplicate()
 
-        for (row in 0 until h) {
-            val sourceRowStart = (crop.top + row) * rowStride + crop.left * pixelStride
+        for (ry in 0 until h) {
+            val sourceRowStart = (crop.top + ry) * rowStride + crop.left * pixelStride
             val sourceRowEnd = sourceRowStart + (w - 1) * pixelStride
             if (sourceRowStart < 0 || sourceRowEnd >= buffer.limit()) return false
-            val destinationStart = row * w
 
-            if (pixelStride == 1) {
-                val rowBuffer = buffer.duplicate()
-                rowBuffer.position(sourceRowStart)
-                rowBuffer.get(bytes, destinationStart, w)
-            } else {
-                for (column in 0 until w) {
-                    bytes[destinationStart + column] =
-                        buffer.get(sourceRowStart + column * pixelStride)
-                }
+            buffer.position(sourceRowStart)
+            buffer.get(rowBuffer, 0, w * pixelStride)
+
+            for (rx in 0 until w) {
+                val v = rowBuffer[rx * pixelStride]
+                val (nx, ny) = FrameRotationHelper.mapRawToNormalized(rx, ry, w, h, rotation)
+                bytes[ny * nw + nx] = v
             }
         }
         return true
