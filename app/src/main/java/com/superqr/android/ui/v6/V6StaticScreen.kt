@@ -88,6 +88,7 @@ fun V6StaticScreen(
 
     val activeErrors = remember { mutableStateMapOf<String, PersistentErrorState>() }
 
+    var canonicalHash by remember { mutableStateOf("") }
     var rawHash by remember { mutableStateOf("") }
     var assetByteLength by remember { mutableStateOf(0) }
     var contractMatch by remember { mutableStateOf<Boolean?>(null) }
@@ -138,16 +139,17 @@ fun V6StaticScreen(
         val listener = Runnable {
             try {
                 V6Contract.loadAndVerify(context)
+                canonicalHash = V6Contract.canonicalHash
                 rawHash = V6Contract.rawFileHash
                 assetByteLength = V6Contract.assetByteLength
-                val matches = (V6Contract.rawFileHash == V6Contract.EXPECTED_HASH)
+                val matches = (V6Contract.canonicalHash == V6Contract.EXPECTED_HASH)
                 contractMatch = matches
 
                 if (matches) {
-                    diagnosticLogger.log("INFO", "CONTRACT", "CONTRACT_MATCH", "V6 Visual Contract hash verified match")
+                    diagnosticLogger.log("INFO", "CONTRACT", "CONTRACT_MATCH", "V6 Visual Contract canonical hash verified match")
                 } else {
-                    diagnosticLogger.log("ERROR", "CONTRACT", "CONTRACT_MISMATCH", "Hash mismatch! Raw: $rawHash")
-                    reportError("CONTRACT", "Contract Hash Mismatch", "Raw: ${V6Contract.rawFileHash}\nExpected: ${V6Contract.EXPECTED_HASH}")
+                    diagnosticLogger.log("ERROR", "CONTRACT", "CONTRACT_MISMATCH", "Canonical hash mismatch! Canonical: $canonicalHash")
+                    reportError("CONTRACT", "Contract Hash Mismatch", "Canonical: ${V6Contract.canonicalHash}\nRaw: ${V6Contract.rawFileHash}\nExpected: ${V6Contract.EXPECTED_HASH}")
                 }
 
                 val provider = cameraProviderFuture.get()
@@ -458,7 +460,7 @@ fun V6StaticScreen(
                     }
                     Button(
                         onClick = {
-                            val report = generateDiagnosticReport(context, currentResult, contractMatch, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
+                            val report = generateDiagnosticReport(context, currentResult, contractMatch, canonicalHash, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
                             clipboardManager.setText(AnnotatedString(report))
                         },
                         modifier = Modifier.weight(1f),
@@ -468,7 +470,7 @@ fun V6StaticScreen(
                     }
                     Button(
                         onClick = {
-                            val report = generateDiagnosticReport(context, currentResult, contractMatch, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
+                            val report = generateDiagnosticReport(context, currentResult, contractMatch, canonicalHash, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
                             shareReportFile(context, report)
                         },
                         modifier = Modifier.weight(1f),
@@ -631,6 +633,7 @@ fun V6StaticScreen(
                 
                 Text("Contract Hashes", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                 Text("Match: $contractMatch")
+                Text("Canonical Hash: $canonicalHash")
                 Text("Raw Hash: $rawHash")
                 Text("Asset Length: $assetByteLength bytes")
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -800,6 +803,7 @@ private fun generateDiagnosticReport(
     context: Context,
     currentResult: V6StaticResult?,
     contractMatch: Boolean?,
+    canonicalHash: String,
     rawHash: String,
     assetByteLength: Int,
     lastValid: LastValidEvaluation?,
@@ -823,7 +827,8 @@ private fun generateDiagnosticReport(
         appendLine()
         appendLine("--- CONTRACT ---")
         appendLine("Match: $contractMatch")
-        appendLine("Hash: $rawHash")
+        appendLine("Canonical Hash: $canonicalHash")
+        appendLine("Raw Hash: $rawHash")
         appendLine("Size: $assetByteLength bytes")
         appendLine()
         appendLine("--- DETECTOR & TRACKING STATE ---")

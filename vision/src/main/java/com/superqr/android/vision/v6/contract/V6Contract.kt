@@ -9,6 +9,7 @@ import java.security.MessageDigest
 object V6Contract {
     lateinit var json: JSONObject
     var rawFileHash: String = ""
+    var canonicalHash: String = ""
     var assetByteLength: Int = 0
     const val EXPECTED_HASH: String = "4b3e90a0a24106795066eabfbbddf6bdafa9b14584709c2ebb0614a12d07d757"
 
@@ -21,24 +22,62 @@ object V6Contract {
         assetByteLength = bytes.size
         val md = MessageDigest.getInstance("SHA-256")
         rawFileHash = md.digest(bytes).joinToString("") { "%02x".format(it) }
-        
+
+        val jsonString = String(bytes, Charsets.UTF_8)
+        val parsedJson = JSONObject(jsonString)
+        require(parsedJson.optString("contract_version") == "v6") { "Invalid contract version" }
+
+        json = parsedJson
+        canonicalHash = computeCanonicalHash(parsedJson)
+
         try {
-            android.util.Log.i("V6Contract", "Asset Byte Length: $assetByteLength, Raw Hash: $rawFileHash, Expected Hash: $EXPECTED_HASH")
+            android.util.Log.i(
+                "V6Contract",
+                "Asset Byte Length: $assetByteLength, Raw Hash: $rawFileHash, Canonical Hash: $canonicalHash, Expected Hash: $EXPECTED_HASH"
+            )
         } catch (e: Throwable) {
-            println("[V6Contract] Asset Byte Length: $assetByteLength, Raw Hash: $rawFileHash, Expected Hash: $EXPECTED_HASH")
+            println("[V6Contract] Asset Byte Length: $assetByteLength, Raw Hash: $rawFileHash, Canonical Hash: $canonicalHash, Expected Hash: $EXPECTED_HASH")
         }
-        
-        if (rawFileHash != EXPECTED_HASH) {
-            try {
-                android.util.Log.e("V6Contract", "Hash mismatch! Expected $EXPECTED_HASH, got $rawFileHash")
-            } catch (e: Throwable) {
-                println("[V6Contract] Hash mismatch! Expected $EXPECTED_HASH, got $rawFileHash")
+
+        require(canonicalHash == EXPECTED_HASH) {
+            "Contract canonical hash mismatch! Expected $EXPECTED_HASH, got $canonicalHash"
+        }
+    }
+
+    fun computeCanonicalHash(jsonString: String): String {
+        return computeCanonicalHash(JSONObject(jsonString))
+    }
+
+    fun computeCanonicalHash(jsonObject: JSONObject): String {
+        val canonicalStr = canonicalizeJson(jsonObject)
+        val md = MessageDigest.getInstance("SHA-256")
+        return md.digest(canonicalStr.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+    }
+
+    fun canonicalizeJson(obj: Any?): String = when (obj) {
+        null, JSONObject.NULL -> "null"
+        is JSONObject -> {
+            val keys = mutableListOf<String>()
+            val iterator = obj.keys()
+            while (iterator.hasNext()) {
+                keys.add(iterator.next())
+            }
+            keys.sort()
+            keys.joinToString(separator = ",", prefix = "{", postfix = "}") { key ->
+                JSONObject.quote(key) + ":" + canonicalizeJson(obj.get(key))
             }
         }
-        
-        val jsonString = String(bytes, Charsets.UTF_8)
-        json = JSONObject(jsonString)
-        require(json.optString("contract_version") == "v6") { "Invalid contract version" }
+        is JSONArray -> {
+            val list = mutableListOf<String>()
+            for (i in 0 until obj.length()) {
+                list.add(canonicalizeJson(obj.get(i)))
+            }
+            list.joinToString(separator = ",", prefix = "[", postfix = "]")
+        }
+        is String -> JSONObject.quote(obj)
+        is Boolean -> obj.toString()
+        is Number -> obj.toString()
+        else -> obj.toString()
     }
 
     private fun parseBBox(array: JSONArray): V6BBox {

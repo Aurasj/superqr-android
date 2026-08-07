@@ -616,7 +616,7 @@ class V6StaticDetector : AutoCloseable {
                 canonicalToImageHomography = finalInvHArr,
                 detectedQuad = detectedQuadArray,
                 trackedQuad = detectedQuadArray,
-                contractHash = V6Contract.rawFileHash,
+                contractHash = V6Contract.canonicalHash,
                 patternName = "deterministic random",
                 seed = 42,
                 first20Expected = expectedBytes.take(20).map { it.toInt() },
