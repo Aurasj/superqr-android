@@ -54,6 +54,30 @@ object V6Contract {
         return md.digest(canonicalStr.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
     }
 
+    private fun quoteString(s: String): String = buildString {
+        append('"')
+        for (i in 0 until s.length) {
+            val ch = s[i]
+            when (ch) {
+                '"' -> append("\\\"")
+                '\\' -> append("\\\\")
+                '\b' -> append("\\b")
+                '\u000C' -> append("\\f")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> {
+                    if (ch.code in 0x00..0x1F) {
+                        append(String.format(java.util.Locale.US, "\\u%04x", ch.code))
+                    } else {
+                        append(ch)
+                    }
+                }
+            }
+        }
+        append('"')
+    }
+
     fun canonicalizeJson(obj: Any?): String = when (obj) {
         null, JSONObject.NULL -> "null"
         is JSONObject -> {
@@ -64,7 +88,7 @@ object V6Contract {
             }
             keys.sort()
             keys.joinToString(separator = ",", prefix = "{", postfix = "}") { key ->
-                JSONObject.quote(key) + ":" + canonicalizeJson(obj.get(key))
+                quoteString(key) + ":" + canonicalizeJson(obj.get(key))
             }
         }
         is JSONArray -> {
@@ -74,7 +98,7 @@ object V6Contract {
             }
             list.joinToString(separator = ",", prefix = "[", postfix = "]")
         }
-        is String -> JSONObject.quote(obj)
+        is String -> quoteString(obj)
         is Boolean -> obj.toString()
         is Number -> obj.toString()
         else -> obj.toString()

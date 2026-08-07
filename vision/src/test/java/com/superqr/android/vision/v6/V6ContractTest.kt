@@ -64,6 +64,27 @@ class V6ContractTest {
     }
 
     @Test
+    fun testForwardSlashAndStringEscapingInvariance() {
+        val testJson = """
+            {
+                "path": "half-open [x1,y1,x2,y2]",
+                "slash": "a/b/c",
+                "escapes": "line1\nline2\ttab\"quote\\backslash"
+            }
+        """.trimIndent()
+
+        val parsed = org.json.JSONObject(testJson)
+        val canonicalStr = V6Contract.canonicalizeJson(parsed)
+
+        assertTrue("Canonical JSON must not escape forward slashes", canonicalStr.contains("\"slash\":\"a/b/c\""))
+        assertTrue("Canonical JSON must contain unescaped slashes in path", canonicalStr.contains("\"path\":\"half-open [x1,y1,x2,y2]\""))
+        assertTrue("Canonical JSON must correctly escape control characters", canonicalStr.contains("\\n"))
+        assertTrue("Canonical JSON must correctly escape tabs", canonicalStr.contains("\\t"))
+        assertTrue("Canonical JSON must correctly escape quotes", canonicalStr.contains("\\\""))
+        assertTrue("Canonical JSON must correctly escape backslashes", canonicalStr.contains("\\\\"))
+    }
+
+    @Test
     fun testContractGeometry() {
         val contractFile = File("src/main/assets/visual_contract.json")
         assertTrue("Contract file should exist", contractFile.exists())

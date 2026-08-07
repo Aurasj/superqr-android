@@ -503,9 +503,10 @@ class V6StaticDetector : AutoCloseable {
                     }
                     
                     val expectedIdx = when (mode) {
-                        "all-black" -> 0
-                        "all-white" -> 1
+                        "black", "all-black" -> 0
+                        "white", "all-white" -> 1
                         "checkerboard" -> (r + c) % 4
+                        "deterministic_random", "deterministic random" -> (prng.nextInt() ushr 16) and 3
                         else -> (prng.nextInt() ushr 16) and 3
                     }
                     
@@ -617,7 +618,7 @@ class V6StaticDetector : AutoCloseable {
                 detectedQuad = detectedQuadArray,
                 trackedQuad = detectedQuadArray,
                 contractHash = V6Contract.canonicalHash,
-                patternName = "deterministic random",
+                patternName = mode,
                 seed = 42,
                 first20Expected = expectedBytes.take(20).map { it.toInt() },
                 first20Decoded = decodedBytes.take(20).map { it.toInt() },

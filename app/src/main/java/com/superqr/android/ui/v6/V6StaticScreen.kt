@@ -1,30 +1,33 @@
 package com.superqr.android.ui.v6
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.util.Log
 import android.view.Surface
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -82,6 +85,30 @@ fun V6StaticScreen(
 
     val previewView = remember { PreviewView(context) }
 
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        hasCameraPermission = isGranted
+        if (!isGranted) {
+            diagnosticLogger.log("WARN", "PERMISSION", "CAMERA_DENIED", "Camera permission denied by user")
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasCameraPermission) {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
     var staticResult by remember { mutableStateOf<V6StaticResult?>(null) }
     var lastValidEvaluation by remember { mutableStateOf<LastValidEvaluation?>(null) }
     var frozenSnapshot by remember { mutableStateOf<V6StaticResult?>(null) }
@@ -93,8 +120,11 @@ fun V6StaticScreen(
     var assetByteLength by remember { mutableStateOf(0) }
     var contractMatch by remember { mutableStateOf<Boolean?>(null) }
 
-    var showErrorsSheet by remember { mutableStateOf(false) }
-    var showDebugSheet by remember { mutableStateOf(false) }
+    var selectedTestMode by remember { mutableStateOf("deterministic_random") }
+    val selectedTestModeState = rememberUpdatedState(selectedTestMode)
+
+    var showLabPanel by remember { mutableStateOf(false) }
+    var labTab by remember { mutableIntStateOf(0) } // 0: TEST, 1: LIVE, 2: TOOLS
 
     val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
     val freezeRequested = remember { AtomicBoolean(false) }
@@ -132,7 +162,11 @@ fun V6StaticScreen(
         }
     }
 
-    DisposableEffect(lifecycleOwner, context, previewView) {
+    DisposableEffect(hasCameraPermission, lifecycleOwner, context, previewView) {
+        if (!hasCameraPermission) {
+            return@DisposableEffect onDispose {}
+        }
+
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         var detector: V6StaticDetector? = null
 
@@ -181,11 +215,12 @@ fun V6StaticScreen(
 
                             if (lumaValid) {
                                 val shouldFreeze = freezeRequested.getAndSet(false)
+                                val currentMode = selectedTestModeState.value
                                 val result = activeDetector.detect(
                                     luma = lumaBuffer.bytes,
                                     width = lumaBuffer.width,
                                     height = lumaBuffer.height,
-                                    mode = "deterministic random",
+                                    mode = currentMode,
                                     chromaReader = chromaReader,
                                     exportDebugImage = shouldFreeze,
                                     cacheDir = if (shouldFreeze) context.cacheDir.absolutePath else null
@@ -317,7 +352,7 @@ fun V6StaticScreen(
                                             lastLoggedEvalTimeMs = nowMs
                                             lastValidEvaluation = LastValidEvaluation(
                                                 timestamp = dateFormat.format(Date()),
-                                                pattern = "V6_DATA",
+                                                pattern = currentMode,
                                                 colorCorrect = result.colorCorrect,
                                                 colorUncertain = result.colorUncertain,
                                                 decodedCrc32 = result.decodedCrc32,
@@ -371,394 +406,497 @@ fun V6StaticScreen(
         }
     }
 
-    val currentResult = staticResult
-    val statusText: String
-    val statusBgColor: Color
-
-    when {
-        activeErrors.isNotEmpty() -> {
-            statusText = "ERROR"
-            statusBgColor = Color(0xFFD32F2F)
-        }
-        currentResult == null -> {
-            statusText = "SEARCHING"
-            statusBgColor = Color(0xFF616161)
-        }
-        else -> {
-            statusText = currentResult.trackingState
-            statusBgColor = when (currentResult.trackingState) {
-                "SEARCHING" -> Color(0xFF616161)
-                "ACQUIRING" -> Color(0xFFF57C00)
-                "LOCKED" -> Color(0xFF388E3C)
-                "TRACKING" -> Color(0xFF388E3C)
-                "REACQUIRING" -> Color(0xFFF57C00)
-                else -> Color(0xFF616161)
-            }
-        }
-    }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth().padding(end = 8.dp)
-                    ) {
-                        Text("V6 Static", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                        Surface(shape = CircleShape, color = statusBgColor) {
-                            Text(
-                                text = statusText,
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                },
-                navigationIcon = {
-                    if (onBack != null) {
-                        IconButton(onClick = onBack) {
-                            Text("<", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            )
-        },
-        bottomBar = {
-            BottomAppBar(
-                containerColor = MaterialTheme.colorScheme.surface,
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Button(
-                        onClick = { showErrorsSheet = true },
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 8.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (activeErrors.isNotEmpty()) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary
-                        )
-                    ) {
-                        Text(
-                            text = if (activeErrors.isEmpty()) "Errors" else "Errors (${activeErrors.size})",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1
-                        )
-                    }
-                    Button(
-                        onClick = { showDebugSheet = true },
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 8.dp)
-                    ) {
-                        Text(text = "Debug", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                    }
-                    Button(
-                        onClick = {
-                            val report = generateDiagnosticReport(context, currentResult, contractMatch, canonicalHash, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
-                            clipboardManager.setText(AnnotatedString(report))
-                        },
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 8.dp)
-                    ) {
-                        Text(text = "Copy Report", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                    }
-                    Button(
-                        onClick = {
-                            val report = generateDiagnosticReport(context, currentResult, contractMatch, canonicalHash, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
-                            shareReportFile(context, report)
-                        },
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 8.dp)
-                    ) {
-                        Text(text = "Share Report", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                    }
-                }
-            }
-        },
-        modifier = modifier
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
+    if (!hasCameraPermission) {
+        Box(
+            modifier = modifier
                 .fillMaxSize()
-                .padding(innerPadding)
+                .background(Color.Black)
+                .padding(24.dp),
+            contentAlignment = Alignment.Center
         ) {
-            // FIXED Camera Preview Card (Large, unobstructed)
             Card(
                 shape = RoundedCornerShape(16.dp),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .weight(1f)
-            ) {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-                }
-            }
-
-            // Compact Status Card (Below camera preview)
-            Card(
-                shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Text(
+                        text = "Camera Permission Required",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "SuperQR V6 Scanner needs camera access to detect and track visual contracts in real-time.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Button(
+                        onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }
+                    ) {
+                        Text("Grant Camera Permission")
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    val currentResult = staticResult
+    val trackingState = currentResult?.trackingState ?: "SEARCHING"
+    val statusText = trackingState
+    val statusBgColor = when (trackingState) {
+        "SEARCHING" -> Color(0xFF616161)
+        "ACQUIRING", "REACQUIRING" -> Color(0xFFF57C00)
+        "LOCKED", "TRACKING" -> Color(0xFF2E7D32)
+        else -> Color(0xFF616161)
+    }
+
+    val hasValidEval = (currentResult != null && currentResult.borderFound && currentResult.orientationResolved)
+
+    val decodedCrc = currentResult?.decodedCrc32
+    val expectedCrc = currentResult?.expectedCrc32
+    val crcMatches = (decodedCrc != null && expectedCrc != null && decodedCrc == expectedCrc)
+    val isCrcPass = hasValidEval && crcMatches && (currentResult?.colorUncertain == 0)
+
+    val classSource = currentResult?.diagnosticPayload?.classificationSource
+    val isLive = (classSource == "FULL_DETECTION")
+    val isHeld = (classSource == "TRACKED_HOMOGRAPHY")
+    val sourceLabel = when {
+        isLive -> "LIVE"
+        isHeld -> "HELD"
+        else -> "-"
+    }
+    val sourceColor = when {
+        isLive -> Color(0xFF2E7D32)
+        isHeld -> Color(0xFFF57C00)
+        else -> Color.Gray
+    }
+
+    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+        // 1. Dominant edge-to-edge camera preview
+        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+
+        // 2. Framing Guide Overlay
+        FramingGuideOverlay(
+            modifier = Modifier.fillMaxSize(),
+            isLockedOrTracking = (trackingState == "LOCKED" || trackingState == "TRACKING")
+        )
+
+        // 3. Top Control Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (onBack != null) {
+                    IconButton(onClick = onBack) {
+                        Text("<", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                }
+                Text(
+                    text = "V6 Scanner",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = statusBgColor
+                ) {
+                    Text(
+                        text = statusText,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+
+                Button(
+                    onClick = { showLabPanel = !showLabPanel },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Black.copy(alpha = 0.6f))
+                ) {
+                    Text("Lab", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            }
+        }
+
+        // 4. Compact Live Lab Panel or Bottom Floating Summary Bar
+        if (showLabPanel) {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.88f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(12.dp)
+                    .fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        StatusPair(label = "Contract", value = if (contractMatch == true) "MATCH" else "MISMATCH", isGood = contractMatch == true)
-                        StatusPair(label = "Border", value = if (currentResult?.borderFound == true) "FOUND" else "NOT FOUND", isGood = currentResult?.borderFound == true)
-                        StatusPair(label = "Orientation", value = if (currentResult?.orientationResolved == true) "VALID" else "INVALID", isGood = currentResult?.orientationResolved == true)
-                        StatusPair(label = "Time", value = "${currentResult?.processingTimeMs ?: 0} ms", isGood = true)
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f))
-
-                    if (currentResult?.borderFound == true && currentResult.orientationResolved) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                        TabRow(
+                            selectedTabIndex = labTab,
+                            containerColor = Color.Transparent,
+                            contentColor = Color.White,
+                            modifier = Modifier.weight(1f)
                         ) {
-                            Column(horizontalAlignment = Alignment.Start) {
-                                val hexDec = currentResult.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-                                val hexExp = currentResult.expectedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-                                val match = hexDec == hexExp && hexExp != "N/A"
-                                Text(
-                                    text = "Cells: ${currentResult.colorCorrect}/400 Correct",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (currentResult.colorCorrect > 390) Color(0xFF2E7D32) else Color(0xFFE65100)
-                                )
-                                Text(
-                                    text = "CRC32: $hexDec ${if(match) "✓" else "✗"}",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (match) Color(0xFF2E7D32) else Color(0xFFD32F2F)
-                                )
-                            }
-                            Column(horizontalAlignment = Alignment.End) {
-                                Text(
-                                    text = "Uncertain: ${currentResult.colorUncertain}",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
+                            Tab(
+                                selected = labTab == 0,
+                                onClick = { labTab = 0 },
+                                text = { Text("TEST", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                            )
+                            Tab(
+                                selected = labTab == 1,
+                                onClick = { labTab = 1 },
+                                text = { Text("LIVE", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                            )
+                            Tab(
+                                selected = labTab == 2,
+                                onClick = { labTab = 2 },
+                                text = { Text("TOOLS", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                            )
                         }
-                    } else {
-                        val guidance = when {
-                            currentResult == null || !currentResult.borderFound -> "Center the full marker"
-                            !currentResult.orientationResolved -> "Hold steady"
-                            else -> "Ready"
-                        }
-                        Text(
-                            text = guidance,
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-    }
 
-    // ERRORS SCREEN (Modal Sheet)
-    if (showErrorsSheet) {
-        ModalBottomSheet(onDismissRequest = { showErrorsSheet = false }) {
-            Column(modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Errors & Warnings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Button(onClick = { activeErrors.clear() }) {
-                        Text("Clear All")
+                        IconButton(onClick = { showLabPanel = false }) {
+                            Text("X", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
                     }
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                if (activeErrors.isEmpty()) {
-                    Text("No active errors.", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
-                } else {
-                    for (error in activeErrors.values.sortedByDescending { it.lastSeen }) {
-                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("[${error.category}] ${error.message}", fontWeight = FontWeight.Bold, color = Color(0xFFD32F2F))
-                                Text("Reason: ${error.exactReason}", style = MaterialTheme.typography.bodySmall)
-                                Text("Occurrence count: ${error.count}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                                Text("First seen: ${error.firstSeen} | Last seen: ${error.lastSeen}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.2f))
+
+                    when (labTab) {
+                        0 -> {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    TextButton(onClick = {
-                                        val errText = "[${error.category}] ${error.message}\nReason: ${error.exactReason}\nCount: ${error.count}\nFirst: ${error.firstSeen}\nLast: ${error.lastSeen}"
-                                        clipboardManager.setText(AnnotatedString(errText))
-                                    }) { Text("Copy") }
-                                    TextButton(onClick = {
-                                        val errText = "[${error.category}] ${error.message}\nReason: ${error.exactReason}\nCount: ${error.count}\nFirst: ${error.firstSeen}\nLast: ${error.lastSeen}"
-                                        shareReportFile(context, errText)
-                                    }) { Text("Share") }
-                                    TextButton(onClick = { activeErrors.remove(error.signature) }) { Text("Clear") }
+                                    Text("Pattern:", fontSize = 11.sp, color = Color.White.copy(alpha = 0.7f))
+                                    Surface(
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = if (contractMatch == true) Color(0xFF2E7D32) else Color(0xFFD32F2F)
+                                    ) {
+                                        Text(
+                                            text = if (contractMatch == true) "VERIFIED" else "MISMATCH",
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+
+                                val modes = listOf(
+                                    "Random" to "deterministic_random",
+                                    "Checkerboard" to "checkerboard",
+                                    "Black" to "black",
+                                    "White" to "white"
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    for ((label, value) in modes) {
+                                        FilterChip(
+                                            selected = (selectedTestMode == value),
+                                            onClick = { selectedTestMode = value },
+                                            label = { Text(label, fontSize = 10.sp, fontWeight = FontWeight.Bold) },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        1 -> {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("State: $trackingState", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                    Text("Source: $sourceLabel", fontSize = 11.sp, color = sourceColor, fontWeight = FontWeight.Bold)
+                                    Text("Time: ${currentResult?.processingTimeMs ?: 0}ms", fontSize = 11.sp, color = Color.White.copy(alpha = 0.7f))
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CompactMetricItem(label = "Inliers", value = "${currentResult?.ransacInliers ?: 0}")
+                                    CompactMetricItem(
+                                        label = "Correct",
+                                        value = if (hasValidEval) "${currentResult?.colorCorrect}/400" else "—",
+                                        isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null
+                                    )
+                                    CompactMetricItem(
+                                        label = "Wrong",
+                                        value = if (hasValidEval) "${currentResult!!.colorTotal - currentResult.colorCorrect - currentResult.colorUncertain}" else "—",
+                                        isGood = if (hasValidEval) (currentResult!!.colorTotal - currentResult.colorCorrect - currentResult.colorUncertain) == 0 else null
+                                    )
+                                    CompactMetricItem(
+                                        label = "Uncertain",
+                                        value = if (hasValidEval) "${currentResult?.colorUncertain}" else "—",
+                                        isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null
+                                    )
+                                    CompactMetricBadge(
+                                        label = "CRC",
+                                        value = if (hasValidEval) (if (isCrcPass) "PASS" else "FAIL") else "—",
+                                        isGood = hasValidEval && isCrcPass
+                                    )
+                                }
+                            }
+                        }
+                        2 -> {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Button(
+                                        onClick = { freezeRequested.set(true) },
+                                        modifier = Modifier.weight(1f),
+                                        contentPadding = PaddingValues(vertical = 4.dp)
+                                    ) { Text("Freeze", fontSize = 10.sp) }
+
+                                    if (V6FullDiagnosticExporter.IS_SUPPORTED) {
+                                        Button(
+                                            onClick = {
+                                                if (capturedZipFile != null) {
+                                                    shareZipFile(context, capturedZipFile!!)
+                                                } else {
+                                                    fullDiagnosticArmed.set(true)
+                                                    armedTimestamp.set(System.currentTimeMillis())
+                                                    isDiagnosticArmed = true
+                                                    captureStatusMessage = "Armed..."
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                            contentPadding = PaddingValues(vertical = 4.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = if (isDiagnosticArmed) Color(0xFFE65100) else MaterialTheme.colorScheme.primary)
+                                        ) { Text(if (capturedZipFile != null) "Share ZIP" else if (isDiagnosticArmed) "Armed..." else "Capture ZIP", fontSize = 10.sp) }
+                                    }
+
+                                    Button(
+                                        onClick = {
+                                            val report = generateDiagnosticReport(context, currentResult, contractMatch, canonicalHash, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
+                                            clipboardManager.setText(AnnotatedString(report))
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        contentPadding = PaddingValues(vertical = 4.dp)
+                                    ) { Text("Copy Report", fontSize = 10.sp) }
+
+                                    Button(
+                                        onClick = {
+                                            val report = generateDiagnosticReport(context, currentResult, contractMatch, canonicalHash, rawHash, assetByteLength, lastValidEvaluation, activeErrors.values.toList(), diagnosticLogger, frozenSnapshot)
+                                            shareReportFile(context, report)
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        contentPadding = PaddingValues(vertical = 4.dp)
+                                    ) { Text("Share Report", fontSize = 10.sp) }
+                                }
+
+                                val lastError = activeErrors.values.maxByOrNull { it.lastSeen }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (lastError != null) {
+                                        Text(
+                                            text = "Last Error: [${lastError.category}] ${lastError.message}",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFFF44336),
+                                            maxLines = 1,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        TextButton(
+                                            onClick = { activeErrors.clear() },
+                                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                                        ) {
+                                            Text("Clear", fontSize = 10.sp, color = Color.Gray)
+                                        }
+                                    } else {
+                                        Text(
+                                            text = "No active errors",
+                                            fontSize = 10.sp,
+                                            color = Color.Gray
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(48.dp))
             }
-        }
-    }
-
-    // DEBUG SCREEN (Modal Sheet)
-    if (showDebugSheet) {
-        ModalBottomSheet(onDismissRequest = { showDebugSheet = false }) {
-            Column(modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-                Text("Debug Details", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Text("Contract Hashes", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                Text("Match: $contractMatch")
-                Text("Canonical Hash: $canonicalHash")
-                Text("Raw Hash: $rawHash")
-                Text("Asset Length: $assetByteLength bytes")
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                Text("Detector & Tracking State", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                Text("Tracking State: ${currentResult?.trackingState}")
-                Text("RANSAC Inliers: ${currentResult?.ransacInliers ?: 0}")
-                Text("Missed Frames: ${currentResult?.missedFrameCount ?: 0}")
-                Text("Border Found: ${currentResult?.borderFound}")
-                Text("Orientation Resolved: ${currentResult?.orientationResolved}")
-                Text("Processing Time: ${currentResult?.processingTimeMs ?: 0} ms")
-                Text("Contour Area: ${currentResult?.contourArea ?: 0.0}")
-                Text("Reprojection Error: ${if (currentResult?.orientationResolved == true) currentResult?.reprojectionError else "N/A"}")
-                Text("Warp Min/Max/Mean: ${if (currentResult != null && currentResult.warpCoverage > 0.0) "${currentResult.warpMinLuma} / ${currentResult.warpMaxLuma} / ${currentResult.warpMeanLuma}" else "N/A"}")
-                Text("Warp Coverage: ${if (currentResult != null && currentResult.warpCoverage > 0.0) String.format(Locale.US, "%.2f%%", currentResult.warpCoverage * 100) else "N/A"}")
-                Text("Tracking Points Count: ${currentResult?.trackingPoints?.size ?: 0}")
-                Text("Failure Reason: ${currentResult?.failureReason ?: "None"}")
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                Text("Corner Decoding", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                Text("Decoded IDs: ${currentResult?.decodedCornerIds}")
-                Text("Decoded Bits: ${currentResult?.decodedCornerBits}")
-                Text("Hamming Distances: ${currentResult?.decodedCornerDistances}")
-                Text("Margins: ${currentResult?.decodedCornerMargins}")
-                currentResult?.cornerMatches?.forEach { (pos, match) ->
-                    Text("  [$pos] expected=${match.expectedPattern} decoded=${match.decodedPattern} bestId=${match.bestMatchId} dist=${match.hammingDistance} margin=${match.secondBestMargin}", fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                }
-                currentResult?.bitSamples?.forEach { (corner, samples) ->
-                    Text("  Bits for $corner:", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    samples.forEach { sample ->
-                        Text("    [${sample.bitName}] (${String.format(Locale.US, "%.1f", sample.x)}, ${String.format(Locale.US, "%.1f", sample.y)}) med=${sample.medianLuma} black=${sample.localBlackRef} white=${sample.localWhiteRef} thresh=${sample.threshold} -> ${sample.decodedBit}", fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-                    }
-                }
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                Text("Pilots (YUV)", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                Text("Pilots: ${currentResult?.pilotYUVs?.mapValues { it.value.joinToString(",") }}")
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                // FULL DIAGNOSTIC CAPTURE IN DEBUG SHEET
-                Text("Full Diagnostic Capture", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+        } else {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.78f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(16.dp)
+                    .fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    if (V6FullDiagnosticExporter.IS_SUPPORTED) {
-                        Button(
-                            onClick = {
-                                fullDiagnosticArmed.set(true)
-                                armedTimestamp.set(System.currentTimeMillis())
-                                isDiagnosticArmed = true
-                                captureStatusMessage = "Armed: Waiting for LOCKED/TRACKING frame (5s window)..."
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isDiagnosticArmed) Color(0xFFE65100) else MaterialTheme.colorScheme.primary
-                            )
-                        ) {
-                            Text(if (isDiagnosticArmed) "Armed (Waiting...)" else "Full Diagnostic")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val guidance = when {
+                            currentResult == null || !currentResult.borderFound -> "Center marker inside reticle"
+                            !currentResult.orientationResolved -> "Hold steady..."
+                            trackingState == "LOCKED" || trackingState == "TRACKING" -> "Marker locked & tracking"
+                            else -> "Acquiring marker..."
                         }
+                        Text(
+                            text = guidance,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White.copy(alpha = 0.9f)
+                        )
 
-                        if (capturedZipFile != null) {
-                            Button(onClick = {
-                                shareZipFile(context, capturedZipFile!!)
-                            }) {
-                                Text("Share ZIP")
+                        if (hasValidEval) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = sourceColor.copy(alpha = 0.25f)
+                            ) {
+                                Text(
+                                    text = sourceLabel,
+                                    color = sourceColor,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
                             }
                         }
                     }
-                }
-                if (captureStatusMessage != null) {
-                    Text(text = captureStatusMessage!!, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = if (isDiagnosticArmed) Color(0xFFE65100) else Color(0xFF2E7D32))
-                }
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                // FROZEN SNAPSHOT IN DEBUG
-                Text("Frozen Snapshot", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(onClick = { freezeRequested.set(true) }) { Text("Freeze") }
-                    if (frozenSnapshot != null) {
-                        Button(onClick = {
-                            val hexDec = frozenSnapshot?.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-                            val snapText = "Snapshot Correct: ${frozenSnapshot?.colorCorrect}/400 CRC: $hexDec\nImage Path: ${frozenSnapshot?.debugImagePath}"
-                            clipboardManager.setText(AnnotatedString(snapText))
-                        }) { Text("Copy") }
-                        Button(onClick = {
-                            val hexDec = frozenSnapshot?.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-                            val snapText = "Snapshot Correct: ${frozenSnapshot?.colorCorrect}/400 CRC: $hexDec\nImage Path: ${frozenSnapshot?.debugImagePath}"
-                            shareReportFile(context, snapText)
-                        }) { Text("Share") }
-                        Button(onClick = { frozenSnapshot = null }) { Text("Clear") }
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.2f))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CompactMetricItem(label = "Inliers", value = "${currentResult?.ransacInliers ?: 0}")
+                        CompactMetricItem(
+                            label = "Cells",
+                            value = if (hasValidEval) "${currentResult?.colorCorrect}/400" else "—",
+                            isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null
+                        )
+                        CompactMetricItem(
+                            label = "Uncertain",
+                            value = if (hasValidEval) "${currentResult?.colorUncertain}" else "—",
+                            isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null
+                        )
+                        CompactMetricBadge(
+                            label = "CRC",
+                            value = if (hasValidEval) (if (isCrcPass) "PASS" else "FAIL") else "—",
+                            isGood = hasValidEval && isCrcPass
+                        )
                     }
                 }
-                if (frozenSnapshot != null) {
-                    val hexDec = frozenSnapshot?.decodedCrc32?.let { String.format("%08X", it) } ?: "N/A"
-                    Text("Snapshot Correct: ${frozenSnapshot?.colorCorrect}/400 CRC: $hexDec")
-                    Text("Snapshot Image: ${frozenSnapshot?.debugImagePath ?: "None"}")
-                } else {
-                    Text("No frozen snapshot captured.", color = Color.Gray)
-                }
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                Text("Deduplicated Logs (${diagnosticLogger.getLogs().size})", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                for (log in diagnosticLogger.getLogs().reversed()) {
-                    Text("[${log.timestamp}] ${log.level}/${log.category} (x${log.count}): ${log.message}", fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                }
-                Spacer(modifier = Modifier.height(48.dp))
             }
         }
     }
 }
 
 @Composable
-private fun StatusPair(label: String, value: String, isGood: Boolean) {
-    Column {
-        Text(text = label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun FramingGuideOverlay(
+    modifier: Modifier = Modifier,
+    isLockedOrTracking: Boolean = false
+) {
+    val borderColor = if (isLockedOrTracking) Color(0xFF4CAF50) else Color.White.copy(alpha = 0.6f)
+    Canvas(modifier = modifier) {
+        val side = size.minDimension * 0.65f
+        val left = (size.width - side) / 2f
+        val top = (size.height - side) / 2f
+        val cornerLen = side * 0.15f
+        val strokeWidth = 3.dp.toPx()
+
+        // Top-Left
+        drawLine(borderColor, Offset(left, top), Offset(left + cornerLen, top), strokeWidth)
+        drawLine(borderColor, Offset(left, top), Offset(left, top + cornerLen), strokeWidth)
+
+        // Top-Right
+        drawLine(borderColor, Offset(left + side, top), Offset(left + side - cornerLen, top), strokeWidth)
+        drawLine(borderColor, Offset(left + side, top), Offset(left + side, top + cornerLen), strokeWidth)
+
+        // Bottom-Right
+        drawLine(borderColor, Offset(left + side, top + side), Offset(left + side - cornerLen, top + side), strokeWidth)
+        drawLine(borderColor, Offset(left + side, top + side), Offset(left + side, top + side - cornerLen), strokeWidth)
+
+        // Bottom-Left
+        drawLine(borderColor, Offset(left, top + side), Offset(left + cornerLen, top + side), strokeWidth)
+        drawLine(borderColor, Offset(left, top + side), Offset(left, top + side - cornerLen), strokeWidth)
+    }
+}
+
+@Composable
+private fun CompactMetricItem(label: String, value: String, isGood: Boolean? = null) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(text = label, fontSize = 10.sp, color = Color.White.copy(alpha = 0.6f))
         Text(
             text = value,
-            style = MaterialTheme.typography.bodyMedium,
+            fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
-            color = if (isGood) Color(0xFF2E7D32) else Color(0xFFD32F2F)
+            color = when (isGood) {
+                true -> Color(0xFF4CAF50)
+                false -> Color(0xFFF44336)
+                null -> Color.White
+            }
         )
+    }
+}
+
+@Composable
+private fun CompactMetricBadge(label: String, value: String, isGood: Boolean) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(text = label, fontSize = 10.sp, color = Color.White.copy(alpha = 0.6f))
+        Surface(
+            shape = RoundedCornerShape(4.dp),
+            color = if (isGood) Color(0xFF2E7D32) else Color(0xFF616161)
+        ) {
+            Text(
+                text = value,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+        }
     }
 }
 
@@ -834,6 +972,7 @@ private fun generateDiagnosticReport(
         appendLine("--- DETECTOR & TRACKING STATE ---")
         if (currentResult != null) {
             appendLine("Tracking State: ${currentResult.trackingState}")
+            appendLine("Classification Source: ${currentResult.diagnosticPayload?.classificationSource ?: "N/A"}")
             appendLine("RANSAC Inliers: ${currentResult.ransacInliers}")
             appendLine("Missed Frames: ${currentResult.missedFrameCount}")
             appendLine("Border: ${currentResult.borderFound}")
