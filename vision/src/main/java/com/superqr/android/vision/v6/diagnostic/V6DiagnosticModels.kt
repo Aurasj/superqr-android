@@ -79,7 +79,9 @@ data class V6FrameDiagnosticPayload(
     val decodedCrc32: Long?,
     val cellDetails: List<V6CellDiagnosticDetail>,
     val pilotDetails: List<V6PilotDiagnosticDetail>,
-    val pairwisePilotDistances: Map<String, Double>
+    val pairwisePilotDistances: Map<String, Double>,
+    val contoursConsidered: Int = 0,
+    val quadsConsidered: Int = 0
 )
 
 data class V6CapturedFrameBundle(

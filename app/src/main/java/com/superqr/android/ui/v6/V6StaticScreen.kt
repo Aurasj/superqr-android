@@ -342,7 +342,9 @@ fun V6StaticScreen(
                                         }
                                     }
 
-                                    if (result.borderFound && result.orientationResolved) {
+                                    // DO NOT count TRACKED_HOMOGRAPHY frames as fresh classification measurements
+                                    val isFreshEval = (result.borderFound && result.orientationResolved && result.diagnosticPayload?.classificationSource == "FULL_DETECTION")
+                                    if (isFreshEval) {
                                         val nowMs = System.currentTimeMillis()
                                         val accuracyChanged = lastLoggedAccuracy == null || kotlin.math.abs(result.cellAccuracy - (lastLoggedAccuracy ?: 0.0)) >= 1.0
                                         val timeElapsed = (nowMs - lastLoggedEvalTimeMs) >= 2000L
@@ -446,13 +448,27 @@ fun V6StaticScreen(
     }
 
     val currentResult = staticResult
-    val trackingState = currentResult?.trackingState ?: "SEARCHING"
-    val statusText = trackingState
-    val statusBgColor = when (trackingState) {
-        "SEARCHING" -> Color(0xFF616161)
-        "ACQUIRING", "REACQUIRING" -> Color(0xFFF57C00)
-        "LOCKED", "TRACKING" -> Color(0xFF2E7D32)
-        else -> Color(0xFF616161)
+    val rawTrackingState = currentResult?.trackingState ?: "SEARCHING"
+    val classSource = currentResult?.diagnosticPayload?.classificationSource
+    val isLive = (classSource == "FULL_DETECTION")
+    val isHeld = (classSource == "TRACKED_HOMOGRAPHY")
+
+    val mainStatusText = when {
+        isHeld -> "HELD"
+        else -> rawTrackingState
+    }
+
+    val mainStatusBgColor = when {
+        isHeld -> Color(0xFFF57C00) // Amber/Orange
+        rawTrackingState == "ACQUIRING" || rawTrackingState == "REACQUIRING" -> Color(0xFFF57C00)
+        rawTrackingState == "LOCKED" || rawTrackingState == "TRACKING" -> Color(0xFF2E7D32) // Green
+        else -> Color(0xFF616161) // Gray
+    }
+
+    val reticleColor = when {
+        isLive && (rawTrackingState == "LOCKED" || rawTrackingState == "TRACKING") -> Color(0xFF4CAF50) // Green
+        isHeld -> Color(0xFFF57C00) // Amber/Orange
+        else -> Color.White.copy(alpha = 0.6f)
     }
 
     val hasValidEval = (currentResult != null && currentResult.borderFound && currentResult.orientationResolved)
@@ -462,9 +478,6 @@ fun V6StaticScreen(
     val crcMatches = (decodedCrc != null && expectedCrc != null && decodedCrc == expectedCrc)
     val isCrcPass = hasValidEval && crcMatches && (currentResult?.colorUncertain == 0)
 
-    val classSource = currentResult?.diagnosticPayload?.classificationSource
-    val isLive = (classSource == "FULL_DETECTION")
-    val isHeld = (classSource == "TRACKED_HOMOGRAPHY")
     val sourceLabel = when {
         isLive -> "LIVE"
         isHeld -> "HELD"
@@ -483,7 +496,7 @@ fun V6StaticScreen(
         // 2. Framing Guide Overlay
         FramingGuideOverlay(
             modifier = Modifier.fillMaxSize(),
-            isLockedOrTracking = (trackingState == "LOCKED" || trackingState == "TRACKING")
+            reticleColor = reticleColor
         )
 
         // 3. Top Control Bar
@@ -515,10 +528,10 @@ fun V6StaticScreen(
             ) {
                 Surface(
                     shape = CircleShape,
-                    color = statusBgColor
+                    color = mainStatusBgColor
                 ) {
                     Text(
-                        text = statusText,
+                        text = mainStatusText,
                         color = Color.White,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
@@ -638,7 +651,7 @@ fun V6StaticScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text("State: $trackingState", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                    Text("State: $mainStatusText", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
                                     Text("Source: $sourceLabel", fontSize = 11.sp, color = sourceColor, fontWeight = FontWeight.Bold)
                                     Text("Time: ${currentResult?.processingTimeMs ?: 0}ms", fontSize = 11.sp, color = Color.White.copy(alpha = 0.7f))
                                 }
@@ -652,22 +665,26 @@ fun V6StaticScreen(
                                     CompactMetricItem(
                                         label = "Correct",
                                         value = if (hasValidEval) "${currentResult?.colorCorrect}/400" else "—",
-                                        isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null
+                                        isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null,
+                                        isHeld = isHeld
                                     )
                                     CompactMetricItem(
                                         label = "Wrong",
                                         value = if (hasValidEval) "${currentResult!!.colorTotal - currentResult.colorCorrect - currentResult.colorUncertain}" else "—",
-                                        isGood = if (hasValidEval) (currentResult!!.colorTotal - currentResult.colorCorrect - currentResult.colorUncertain) == 0 else null
+                                        isGood = if (hasValidEval) (currentResult!!.colorTotal - currentResult.colorCorrect - currentResult.colorUncertain) == 0 else null,
+                                        isHeld = isHeld
                                     )
                                     CompactMetricItem(
                                         label = "Uncertain",
                                         value = if (hasValidEval) "${currentResult?.colorUncertain}" else "—",
-                                        isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null
+                                        isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null,
+                                        isHeld = isHeld
                                     )
                                     CompactMetricBadge(
                                         label = "CRC",
                                         value = if (hasValidEval) (if (isCrcPass) "PASS" else "FAIL") else "—",
-                                        isGood = hasValidEval && isCrcPass
+                                        isGood = hasValidEval && isCrcPass,
+                                        isHeld = isHeld
                                     )
                                 }
                             }
@@ -777,7 +794,8 @@ fun V6StaticScreen(
                         val guidance = when {
                             currentResult == null || !currentResult.borderFound -> "Center marker inside reticle"
                             !currentResult.orientationResolved -> "Hold steady..."
-                            trackingState == "LOCKED" || trackingState == "TRACKING" -> "Marker locked & tracking"
+                            isHeld -> "Revalidating marker..."
+                            rawTrackingState == "LOCKED" || rawTrackingState == "TRACKING" -> "Marker locked & tracking"
                             else -> "Acquiring marker..."
                         }
                         Text(
@@ -814,17 +832,20 @@ fun V6StaticScreen(
                         CompactMetricItem(
                             label = "Cells",
                             value = if (hasValidEval) "${currentResult?.colorCorrect}/400" else "—",
-                            isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null
+                            isGood = if (hasValidEval) (currentResult?.colorCorrect ?: 0) >= 390 else null,
+                            isHeld = isHeld
                         )
                         CompactMetricItem(
                             label = "Uncertain",
                             value = if (hasValidEval) "${currentResult?.colorUncertain}" else "—",
-                            isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null
+                            isGood = if (hasValidEval) (currentResult?.colorUncertain ?: 0) == 0 else null,
+                            isHeld = isHeld
                         )
                         CompactMetricBadge(
                             label = "CRC",
                             value = if (hasValidEval) (if (isCrcPass) "PASS" else "FAIL") else "—",
-                            isGood = hasValidEval && isCrcPass
+                            isGood = hasValidEval && isCrcPass,
+                            isHeld = isHeld
                         )
                     }
                 }
@@ -836,9 +857,8 @@ fun V6StaticScreen(
 @Composable
 private fun FramingGuideOverlay(
     modifier: Modifier = Modifier,
-    isLockedOrTracking: Boolean = false
+    reticleColor: Color = Color.White.copy(alpha = 0.6f)
 ) {
-    val borderColor = if (isLockedOrTracking) Color(0xFF4CAF50) else Color.White.copy(alpha = 0.6f)
     Canvas(modifier = modifier) {
         val side = size.minDimension * 0.65f
         val left = (size.width - side) / 2f
@@ -847,50 +867,73 @@ private fun FramingGuideOverlay(
         val strokeWidth = 3.dp.toPx()
 
         // Top-Left
-        drawLine(borderColor, Offset(left, top), Offset(left + cornerLen, top), strokeWidth)
-        drawLine(borderColor, Offset(left, top), Offset(left, top + cornerLen), strokeWidth)
+        drawLine(reticleColor, Offset(left, top), Offset(left + cornerLen, top), strokeWidth)
+        drawLine(reticleColor, Offset(left, top), Offset(left, top + cornerLen), strokeWidth)
 
         // Top-Right
-        drawLine(borderColor, Offset(left + side, top), Offset(left + side - cornerLen, top), strokeWidth)
-        drawLine(borderColor, Offset(left + side, top), Offset(left + side, top + cornerLen), strokeWidth)
+        drawLine(reticleColor, Offset(left + side, top), Offset(left + side - cornerLen, top), strokeWidth)
+        drawLine(reticleColor, Offset(left + side, top), Offset(left + side, top + cornerLen), strokeWidth)
 
         // Bottom-Right
-        drawLine(borderColor, Offset(left + side, top + side), Offset(left + side - cornerLen, top + side), strokeWidth)
-        drawLine(borderColor, Offset(left + side, top + side), Offset(left + side, top + side - cornerLen), strokeWidth)
+        drawLine(reticleColor, Offset(left + side, top + side), Offset(left + side - cornerLen, top + side), strokeWidth)
+        drawLine(reticleColor, Offset(left + side, top + side), Offset(left + side, top + side - cornerLen), strokeWidth)
 
         // Bottom-Left
-        drawLine(borderColor, Offset(left, top + side), Offset(left + cornerLen, top + side), strokeWidth)
-        drawLine(borderColor, Offset(left, top + side), Offset(left, top + side - cornerLen), strokeWidth)
+        drawLine(reticleColor, Offset(left, top + side), Offset(left + cornerLen, top + side), strokeWidth)
+        drawLine(reticleColor, Offset(left, top + side), Offset(left, top + side - cornerLen), strokeWidth)
     }
 }
 
 @Composable
-private fun CompactMetricItem(label: String, value: String, isGood: Boolean? = null) {
+private fun CompactMetricItem(
+    label: String,
+    value: String,
+    isGood: Boolean? = null,
+    isHeld: Boolean = false
+) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = label, fontSize = 10.sp, color = Color.White.copy(alpha = 0.6f))
+        Text(
+            text = if (isHeld && label != "Inliers") "$label (last)" else label,
+            fontSize = 10.sp,
+            color = Color.White.copy(alpha = 0.6f)
+        )
         Text(
             text = value,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
-            color = when (isGood) {
-                true -> Color(0xFF4CAF50)
-                false -> Color(0xFFF44336)
-                null -> Color.White
+            color = when {
+                isHeld -> Color(0xFFFFB74D) // De-emphasized amber when held
+                isGood == true -> Color(0xFF4CAF50)
+                isGood == false -> Color(0xFFF44336)
+                else -> Color.White
             }
         )
     }
 }
 
 @Composable
-private fun CompactMetricBadge(label: String, value: String, isGood: Boolean) {
+private fun CompactMetricBadge(
+    label: String,
+    value: String,
+    isGood: Boolean,
+    isHeld: Boolean = false
+) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = label, fontSize = 10.sp, color = Color.White.copy(alpha = 0.6f))
+        Text(
+            text = if (isHeld) "$label (last)" else label,
+            fontSize = 10.sp,
+            color = Color.White.copy(alpha = 0.6f)
+        )
         Surface(
             shape = RoundedCornerShape(4.dp),
-            color = if (isGood) Color(0xFF2E7D32) else Color(0xFF616161)
+            color = when {
+                isHeld -> Color(0xFFE65100).copy(alpha = 0.85f) // De-emphasized amber/orange when held
+                isGood -> Color(0xFF2E7D32)
+                else -> Color(0xFF616161)
+            }
         ) {
             Text(
-                text = value,
+                text = if (isHeld && value != "—") "$value (held)" else value,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White,

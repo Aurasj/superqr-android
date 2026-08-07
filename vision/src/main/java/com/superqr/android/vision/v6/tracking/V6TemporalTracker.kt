@@ -281,6 +281,10 @@ class V6TemporalTracker {
         val area = calculateQuadArea(cornerTL, cornerTR, cornerBR, cornerBL)
 
         val lastValid = lastValidStaticResult
+        val trackedPayload = lastValid?.diagnosticPayload?.copy(
+            classificationSource = "TRACKED_HOMOGRAPHY"
+        )
+
         return V6StaticResult(
             borderFound = true,
             detectedQuad = quadArray,
@@ -309,7 +313,10 @@ class V6TemporalTracker {
             warpMinLuma = lastValid?.warpMinLuma ?: 0,
             warpMaxLuma = lastValid?.warpMaxLuma ?: 0,
             warpMeanLuma = lastValid?.warpMeanLuma ?: 0,
-            warpCoverage = lastValid?.warpCoverage ?: 0.0
+            warpCoverage = lastValid?.warpCoverage ?: 0.0,
+            diagnosticPayload = trackedPayload,
+            contoursConsidered = lastValid?.contoursConsidered ?: 0,
+            quadsConsidered = lastValid?.quadsConsidered ?: 0
         )
     }
 

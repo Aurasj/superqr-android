@@ -75,23 +75,69 @@ class V6StaticDetector : AutoCloseable {
 
             var bestPts: Array<Point>? = null
             var maxArea = 0.0
+            
+            var contoursConsidered = 0
+            var quadsConsidered = 0
+
+            class QuadCandidate(val points: Array<Point>, val area: Double, val score: Double)
+            val candidates = mutableListOf<QuadCandidate>()
 
             val cvContour2f = MatOfPoint2f()
-            val cvPoints = arrayOfNulls<Point>(4)
+            val approxCurve = MatOfPoint2f()
+            val hull = org.opencv.core.MatOfInt()
 
             for (contour in contours) {
                 val area = Geometry.contourArea(contour)
-                if (area > maxArea && area > 10000) {
-                    contour.convertTo(cvContour2f, CvType.CV_32F)
+                if (area < 10000) continue
+                contoursConsidered++
+
+                contour.convertTo(cvContour2f, CvType.CV_32F)
+                val perimeter = Geometry.arcLength(cvContour2f, true)
+                Geometry.approxPolyDP(cvContour2f, approxCurve, 0.02 * perimeter, true)
+
+                var pts = approxCurve.toArray()
+                if (pts.size != 4) {
+                    Geometry.convexHull(contour, hull)
+                    val hullPoints = arrayOfNulls<Point>(hull.rows())
+                    val contourPts = contour.toArray()
+                    for (i in 0 until hull.rows()) {
+                        hullPoints[i] = contourPts[hull.get(i, 0)[0].toInt()]
+                    }
+                    val hullMat2f = MatOfPoint2f(*hullPoints.map { it!! }.toTypedArray())
+                    val hullPerimeter = Geometry.arcLength(hullMat2f, true)
+                    Geometry.approxPolyDP(hullMat2f, approxCurve, 0.04 * hullPerimeter, true)
+                    pts = approxCurve.toArray()
+                    hullMat2f.release()
+                }
+
+                if (pts.size == 4) {
+                    val ptsMatOfPoint = MatOfPoint(*pts)
+                    val isConvex = Geometry.isContourConvex(ptsMatOfPoint)
+                    ptsMatOfPoint.release()
+                    if (isConvex) {
+                        quadsConsidered++
+                        candidates.add(QuadCandidate(pts, area, area))
+                    }
+                } else {
                     val box = Geometry.minAreaRect(cvContour2f)
-                    box.points(cvPoints)
-                    
                     val boxArea = box.size.width * box.size.height
-                    if (boxArea > 0 && area / boxArea > 0.8) {
-                        maxArea = area
-                        bestPts = cvPoints.map { it!! }.toTypedArray()
+                    if (boxArea > 0 && area / boxArea > 0.75) {
+                        val cvPoints = arrayOfNulls<Point>(4)
+                        box.points(cvPoints)
+                        quadsConsidered++
+                        candidates.add(QuadCandidate(cvPoints.map { it!! }.toTypedArray(), area, area * 0.9))
                     }
                 }
+            }
+
+            cvContour2f.release()
+            approxCurve.release()
+            hull.release()
+            
+            val bestCandidate = candidates.maxByOrNull { it.score }
+            if (bestCandidate != null) {
+                bestPts = bestCandidate.points
+                maxArea = bestCandidate.area
             }
 
             contours.forEach { it.release() }
@@ -109,7 +155,7 @@ class V6StaticDetector : AutoCloseable {
             val classificationSource = if (usedTrackerFallback) "TRACKED_HOMOGRAPHY" else "FULL_DETECTION"
 
             if (bestPts == null) {
-                val res = V6StaticResult(false, null, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Outer border not found: max valid area was ${maxArea.roundToInt()}", null)
+                val res = V6StaticResult(false, null, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Outer border not found: max valid area was ${maxArea.roundToInt()}", null, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
                 val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
                 recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
                 return trackedRes
@@ -133,7 +179,7 @@ class V6StaticDetector : AutoCloseable {
                 initialSrcPoints,
                 canonicalPoints
             ) ?: run {
-                val res = V6StaticResult(true, detectedQuadArray, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Initial Homography failed", null)
+                val res = V6StaticResult(true, detectedQuadArray, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Initial Homography failed", null, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
                 val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
                 recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
                 return trackedRes
@@ -153,7 +199,7 @@ class V6StaticDetector : AutoCloseable {
             val warpMean = mean.`val`[0].toInt()
 
             if (coverage < 0.1 || warpMax == 0) {
-                val res = V6StaticResult(true, detectedQuadArray, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "WARP_INVALID: coverage=$coverage, max=$warpMax", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage)
+                val res = V6StaticResult(true, detectedQuadArray, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "WARP_INVALID: coverage=$coverage, max=$warpMax", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
                 val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
                 recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
                 return trackedRes
@@ -182,6 +228,7 @@ class V6StaticDetector : AutoCloseable {
             val decodedCornerMargins = mutableMapOf<String, Int>()
             val cornerMatchesMap = mutableMapOf<String, V6CornerMatch>()
             val bitSamplesMap = mutableMapOf<String, List<V6BitSample>>()
+            val anchorEvalMap = mutableMapOf<String, AnchorMatchResult>()
             val anchorKeys = listOf("TL", "TR", "BR", "BL")
 
             for (key in anchorKeys) {
@@ -192,8 +239,16 @@ class V6StaticDetector : AutoCloseable {
                 val w = core.width
                 val h = core.height
                 
-                val ringLuma = sampleMedianLuma(anchorBBox.x1 + 5.0, anchorBBox.y1 + 5.0)
+                // Robust black ring reference: sample 4 interior ring midpoints safely inside the black stroke (offset 10.0px)
+                val ringSamples = listOf(
+                    sampleMedianLuma(anchorBBox.x1 + 10.0, anchorBBox.y1 + 10.0),
+                    sampleMedianLuma(anchorBBox.x2 - 10.0, anchorBBox.y1 + 10.0),
+                    sampleMedianLuma(anchorBBox.x2 - 10.0, anchorBBox.y2 - 10.0),
+                    sampleMedianLuma(anchorBBox.x1 + 10.0, anchorBBox.y2 - 10.0)
+                )
+                val ringLuma = ringSamples.sorted()[1]
 
+                // Robust white core reference: sample 4 core quadrant centers
                 val cxTL = x1 + w * 0.25
                 val cyTL = y1 + h * 0.25
                 val cxTR = x1 + w * 0.75
@@ -208,13 +263,17 @@ class V6StaticDetector : AutoCloseable {
                 val medBR = sampleMedianLuma(cxBR, cyBR)
                 val medBL = sampleMedianLuma(cxBL, cyBL)
 
-                val coreWhiteRef = maxOf(medTL, medTR, medBR, medBL)
+                // 3 quadrants in anchor core are white, 1 is black -> sort ascending to get white core reference identity-independently
+                val sortedCore = listOf(medTL, medTR, medBR, medBL).sorted()
+                val coreWhiteRef = (sortedCore[1] + sortedCore[2] + sortedCore[3]) / 3
+                val contrast = coreWhiteRef - ringLuma
                 val threshold = (ringLuma + coreWhiteRef) / 2
 
-                val bTL = if (medTL >= threshold) 1 else 0
-                val bTR = if (medTR >= threshold) 1 else 0
-                val bBR = if (medBR >= threshold) 1 else 0
-                val bBL = if (medBL >= threshold) 1 else 0
+                // Identity-independent bit convention: BLACK = 1 (< threshold), WHITE = 0 (>= threshold)
+                val bTL = if (medTL < threshold) 1 else 0
+                val bTR = if (medTR < threshold) 1 else 0
+                val bBR = if (medBR < threshold) 1 else 0
+                val bBL = if (medBL < threshold) 1 else 0
 
                 val bitSamplesList = listOf(
                     V6BitSample("TL", cxTL, cyTL, medTL, ringLuma, coreWhiteRef, threshold, bTL),
@@ -227,40 +286,23 @@ class V6StaticDetector : AutoCloseable {
                 val decodedBits = "$bTL$bTR$bBR$bBL"
                 decodedCornerBits[key] = decodedBits
 
-                var bestId = "TL"
-                var bestDist = 5
-                var secondBestDist = 5
-
-                for (targetId in anchorKeys) {
-                    val expectedPattern = V6Contract.getAnchorIdentityPattern(targetId)
-                    var dist = 0
-                    for (i in 0..3) {
-                        if (decodedBits[i] != expectedPattern[i]) dist++
-                    }
-                    if (dist < bestDist) {
-                        secondBestDist = bestDist
-                        bestDist = dist
-                        bestId = targetId
-                    } else if (dist < secondBestDist) {
-                        secondBestDist = dist
-                    }
-                }
+                val anchorEval = V6OrientationEvaluator.evaluateAnchorBits(key, decodedBits, contrast)
+                anchorEvalMap[key] = anchorEval
 
                 val expectedPattern = V6Contract.getAnchorIdentityPattern(key)
-                val margin = secondBestDist - bestDist
-                decodedCornerIds[key] = bestId
-                decodedCornerDistances[key] = bestDist
-                decodedCornerMargins[key] = margin
+                decodedCornerIds[key] = anchorEval.bestMatchId
+                decodedCornerDistances[key] = anchorEval.bestDist
+                decodedCornerMargins[key] = anchorEval.margin
                 cornerMatchesMap[key] = V6CornerMatch(
                     expectedPattern = expectedPattern,
                     decodedPattern = decodedBits,
-                    bestMatchId = bestId,
-                    hammingDistance = bestDist,
-                    secondBestMargin = margin
+                    bestMatchId = anchorEval.bestMatchId,
+                    hammingDistance = anchorEval.bestDist,
+                    secondBestMargin = anchorEval.margin
                 )
             }
             
-            val orientationResolved = decodedCornerIds.values.toSet().containsAll(anchorKeys)
+            val orientationResolved = V6OrientationEvaluator.isOrientationResolved(anchorEvalMap)
 
             if (!orientationResolved) {
                 val res = V6StaticResult(
@@ -290,7 +332,9 @@ class V6StaticDetector : AutoCloseable {
                     warpMinLuma = warpMin,
                     warpMaxLuma = warpMax,
                     warpMeanLuma = warpMean,
-                    warpCoverage = coverage
+                    warpCoverage = coverage,
+                    contoursConsidered = contoursConsidered,
+                    quadsConsidered = quadsConsidered
                 )
                 val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
                 recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
@@ -314,7 +358,7 @@ class V6StaticDetector : AutoCloseable {
                 correctedSrcPoints,
                 canonicalPoints
             ) ?: run {
-                val res = V6StaticResult(true, detectedQuadArray, maxArea, decodedCornerIds, decodedCornerBits, decodedCornerDistances, decodedCornerMargins, bitSamplesMap, cornerMatchesMap, false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Final Homography failed", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage)
+                val res = V6StaticResult(true, detectedQuadArray, maxArea, decodedCornerIds, decodedCornerBits, decodedCornerDistances, decodedCornerMargins, bitSamplesMap, cornerMatchesMap, false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Final Homography failed", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
                 val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
                 recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
                 return trackedRes
@@ -328,7 +372,7 @@ class V6StaticDetector : AutoCloseable {
                 canonicalPoints,
                 correctedSrcPoints
             ) ?: run {
-                val res = V6StaticResult(true, detectedQuadArray, maxArea, decodedCornerIds, decodedCornerBits, decodedCornerDistances, decodedCornerMargins, bitSamplesMap, cornerMatchesMap, false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Final Inv Homography failed", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage)
+                val res = V6StaticResult(true, detectedQuadArray, maxArea, decodedCornerIds, decodedCornerBits, decodedCornerDistances, decodedCornerMargins, bitSamplesMap, cornerMatchesMap, false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Final Inv Homography failed", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
                 val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
                 recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
                 return trackedRes
@@ -626,7 +670,9 @@ class V6StaticDetector : AutoCloseable {
                 decodedCrc32 = crc32Decoded,
                 cellDetails = cellDetailsList,
                 pilotDetails = pilotDetailsList,
-                pairwisePilotDistances = pairwisePilotDistances
+                pairwisePilotDistances = pairwisePilotDistances,
+                contoursConsidered = contoursConsidered,
+                quadsConsidered = quadsConsidered
             )
 
             val res = V6StaticResult(
@@ -659,7 +705,9 @@ class V6StaticDetector : AutoCloseable {
                 warpMeanLuma = warpMean,
                 warpCoverage = coverage,
                 diagnosticPayload = frameDiagnosticPayload,
-                warpedLumaBytes = warpedLumaBytes
+                warpedLumaBytes = warpedLumaBytes,
+                contoursConsidered = contoursConsidered,
+                quadsConsidered = quadsConsidered
             )
             val trackedRes = tracker.processFrame(gray, res, finalInvHArr)
             recordFrameTrace(trackedRes, pilots, correct, incorrectCount, uncertain)

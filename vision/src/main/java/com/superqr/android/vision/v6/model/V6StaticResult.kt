@@ -55,5 +55,7 @@ data class V6StaticResult(
     val warpMeanLuma: Int = 0,
     val warpCoverage: Double = 0.0,
     val diagnosticPayload: V6FrameDiagnosticPayload? = null,
-    val warpedLumaBytes: ByteArray? = null
+    val warpedLumaBytes: ByteArray? = null,
+    val contoursConsidered: Int = 0,
+    val quadsConsidered: Int = 0
 )
