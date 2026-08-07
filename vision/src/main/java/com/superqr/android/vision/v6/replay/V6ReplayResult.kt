@@ -21,5 +21,7 @@ data class V6ReplayResult(
     val expectedTotalFrames: Int?,
     val packetSuccess: Boolean,
     val processingTimeMs: Long,
-    val failureReason: String?
+    val failureReason: String?,
+    /** True only when packetSuccess was evaluated against independent manifest ground truth. */
+    val packetGroundTruthAvailable: Boolean = false
 )

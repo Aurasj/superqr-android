@@ -3,10 +3,8 @@ package com.superqr.android.vision.v6.tracking
 import com.superqr.android.vision.v6.model.V6StaticResult
 import org.opencv.core.*
 import org.opencv.geometry.Geometry
-import org.opencv.imgproc.Imgproc
 import org.opencv.video.Video
 import kotlin.math.abs
-import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 enum class TrackingState {
@@ -44,21 +42,17 @@ class V6TemporalTracker {
     private var lastValidStaticResult: V6StaticResult? = null
     private var trackedPoints: MutableList<TrackedPoint> = mutableListOf()
 
-    private val alpha = 0.35 // EMA smoothing factor
+    private val alpha = 0.35
 
-    // 16 Canonical Reference Points
     val canonicalReferencePoints: List<Pair<String, Point>> = listOf(
-        // 4 Outer border corners
         "CORNER_TL" to Point(60.0, 60.0),
         "CORNER_TR" to Point(940.0, 60.0),
         "CORNER_BR" to Point(940.0, 940.0),
         "CORNER_BL" to Point(60.0, 940.0),
-        // 4 Anchor centers
         "ANCHOR_TL" to Point(140.0, 140.0),
         "ANCHOR_TR" to Point(860.0, 140.0),
         "ANCHOR_BR" to Point(860.0, 860.0),
         "ANCHOR_BL" to Point(140.0, 860.0),
-        // 8 Border tracking points
         "TOP_1" to Point(220.0, 70.0),
         "TOP_2" to Point(780.0, 70.0),
         "BOTTOM_1" to Point(220.0, 930.0),
@@ -81,93 +75,77 @@ class V6TemporalTracker {
         prevGray = null
     }
 
-    /**
-     * Called when static detector produces a result.
-     * Evaluates state machine transitions, optical flow tracking, motion limits, and drift correction.
-     */
     fun processFrame(
         grayMat: Mat?,
         staticResult: V6StaticResult,
         homographyInv: DoubleArray?
     ): V6StaticResult {
         frameCounter++
-
-        // Check if full re-detection drift correction is due
-        val isDriftCheckDue = (frameCounter % 45L == 0L)
+        val isDriftCheckDue = frameCounter % 45L == 0L
 
         val newState: TrackingState
         var effectiveResult = staticResult
-        var inliersCount = 0
 
         if (staticResult.borderFound && staticResult.orientationResolved && homographyInv != null) {
-            // Static detector found a valid marker!
             lastValidStaticResult = staticResult
-            if (state == TrackingState.SEARCHING) {
-                consecutiveAcquisitionCount = 1
-                newState = TrackingState.ACQUIRING
-            } else if (state == TrackingState.ACQUIRING) {
-                consecutiveAcquisitionCount++
-                newState = if (consecutiveAcquisitionCount >= 3) {
-                    TrackingState.LOCKED
-                } else {
+            newState = when (state) {
+                TrackingState.SEARCHING -> {
+                    consecutiveAcquisitionCount = 1
                     TrackingState.ACQUIRING
                 }
-            } else { // LOCKED, TRACKING, REACQUIRING
-                consecutiveAcquisitionCount = 3
-                newState = TrackingState.TRACKING
+                TrackingState.ACQUIRING -> {
+                    consecutiveAcquisitionCount++
+                    if (consecutiveAcquisitionCount >= 3) TrackingState.LOCKED else TrackingState.ACQUIRING
+                }
+                else -> {
+                    consecutiveAcquisitionCount = 3
+                    TrackingState.TRACKING
+                }
             }
             missedFrameCount = 0
             lastValidHomographyInv = homographyInv.clone()
-
-            // Update tracked points from the valid homography
             updateTrackedPointsFromHomography(homographyInv)
-            inliersCount = trackedPoints.size
-            ransacInliers = inliersCount
-
-        } else if ((state == TrackingState.LOCKED || state == TrackingState.TRACKING || state == TrackingState.REACQUIRING) && !isDriftCheckDue && prevGray != null && grayMat != null && trackedPoints.isNotEmpty()) {
-            // Static detector failed this frame, but we have optical flow tracking!
+            ransacInliers = trackedPoints.size
+        } else if (
+            (state == TrackingState.LOCKED || state == TrackingState.TRACKING || state == TrackingState.REACQUIRING) &&
+            !isDriftCheckDue && prevGray != null && grayMat != null && trackedPoints.isNotEmpty()
+        ) {
             val trackedRes = tryOpticalFlowTracking(prevGray!!, grayMat)
             if (trackedRes != null) {
                 missedFrameCount = 0
                 newState = TrackingState.TRACKING
                 effectiveResult = trackedRes
-                inliersCount = ransacInliers
             } else {
                 missedFrameCount++
-                if (missedFrameCount >= 4) {
-                    newState = TrackingState.SEARCHING
+                newState = if (missedFrameCount >= 4) {
                     reset()
+                    TrackingState.SEARCHING
                 } else {
-                    newState = TrackingState.REACQUIRING
+                    TrackingState.REACQUIRING
                 }
             }
         } else {
-            // No static detection and no tracking possible
             if (state != TrackingState.SEARCHING) {
                 missedFrameCount++
-                if (missedFrameCount >= 3) {
-                    newState = TrackingState.SEARCHING
+                newState = if (missedFrameCount >= 3) {
                     reset()
+                    TrackingState.SEARCHING
                 } else {
-                    newState = TrackingState.REACQUIRING
+                    TrackingState.REACQUIRING
                 }
             } else {
-                newState = TrackingState.SEARCHING
                 consecutiveAcquisitionCount = 0
+                newState = TrackingState.SEARCHING
             }
         }
 
         state = newState
 
-        // Save current frame for next optical flow step
         if (grayMat != null) {
             try {
-                if (prevGray == null) {
-                    prevGray = Mat()
-                }
+                if (prevGray == null) prevGray = Mat()
                 grayMat.copyTo(prevGray!!)
-            } catch (e: Throwable) {
-                // Ignore if native OpenCV is not loaded
+            } catch (_: Throwable) {
             }
         }
 
@@ -200,20 +178,16 @@ class V6TemporalTracker {
     private fun updateTrackedPointsFromHomography(hInv: DoubleArray) {
         trackedPoints.clear()
         for ((id, canonicalPt) in canonicalReferencePoints) {
-            val imgPt = mapPoint(canonicalPt.x, canonicalPt.y, hInv)
-            trackedPoints.add(TrackedPoint(id, canonicalPt, imgPt))
+            trackedPoints.add(TrackedPoint(id, canonicalPt, mapPoint(canonicalPt.x, canonicalPt.y, hInv)))
         }
     }
 
     fun recoverQuad(currMat: Mat): Array<Point>? {
         if (prevGray == null) return null
         val tempRansac = ransacInliers
-        val res = tryOpticalFlowTracking(prevGray!!, currMat)
-        ransacInliers = tempRansac // restore
-        if (res != null && res.detectedQuad != null) {
-            return res.detectedQuad.map { Point(it[0], it[1]) }.toTypedArray()
-        }
-        return null
+        val result = tryOpticalFlowTracking(prevGray!!, currMat)
+        ransacInliers = tempRansac
+        return result?.detectedQuad?.map { Point(it[0], it[1]) }?.toTypedArray()
     }
 
     private fun tryOpticalFlowTracking(prevMat: Mat, currMat: Mat): V6StaticResult? {
@@ -223,86 +197,88 @@ class V6TemporalTracker {
         val p1 = MatOfPoint2f()
         val status = MatOfByte()
         val err = MatOfFloat()
-
         val prevList = trackedPoints.map { it.imagePt }
         p0.fromList(prevList)
 
         try {
             Video.calcOpticalFlowPyrLK(prevMat, currMat, p0, p1, status, err)
-        } catch (e: Throwable) {
+        } catch (_: Throwable) {
+            p0.release(); p1.release(); status.release(); err.release()
             return null
         }
 
         val statusArr = status.toArray()
         val p1List = p1.toList()
-
-        val validPrev = mutableListOf<Point>()
         val validCurr = mutableListOf<Point>()
         val validIndices = mutableListOf<Int>()
 
         for (i in statusArr.indices) {
             if (statusArr[i].toInt() == 1 && i < p1List.size) {
-                val ptOld = prevList[i]
-                val ptNew = p1List[i]
-                val dist = sqrt((ptNew.x - ptOld.x) * (ptNew.x - ptOld.x) + (ptNew.y - ptOld.y) * (ptNew.y - ptOld.y))
-                if (dist <= 65.0) { // Motion threshold validation
-                    validPrev.add(ptOld)
-                    validCurr.add(ptNew)
+                val oldPt = prevList[i]
+                val newPt = p1List[i]
+                val dist = sqrt((newPt.x - oldPt.x) * (newPt.x - oldPt.x) + (newPt.y - oldPt.y) * (newPt.y - oldPt.y))
+                if (dist <= 65.0) {
+                    validCurr.add(newPt)
                     validIndices.add(i)
                 }
             }
         }
 
+        p0.release(); p1.release(); status.release(); err.release()
         if (validCurr.size < 4) return null
 
         ransacInliers = validCurr.size
-
-        // Smooth tracked point positions using EMA
         for (idx in validIndices.indices) {
             val originalIdx = validIndices[idx]
             val oldPt = trackedPoints[originalIdx].imagePt
             val newPt = validCurr[idx]
-            val smoothedX = oldPt.x * (1.0 - alpha) + newPt.x * alpha
-            val smoothedY = oldPt.y * (1.0 - alpha) + newPt.y * alpha
-            trackedPoints[originalIdx].imagePt = Point(smoothedX, smoothedY)
+            trackedPoints[originalIdx].imagePt = Point(
+                oldPt.x * (1.0 - alpha) + newPt.x * alpha,
+                oldPt.y * (1.0 - alpha) + newPt.y * alpha
+            )
         }
 
-        // Get 4 outer corner tracked points
         val cornerTL = trackedPoints.find { it.id == "CORNER_TL" }?.imagePt ?: validCurr[0]
         val cornerTR = trackedPoints.find { it.id == "CORNER_TR" }?.imagePt ?: validCurr[1]
         val cornerBR = trackedPoints.find { it.id == "CORNER_BR" }?.imagePt ?: validCurr[2]
         val cornerBL = trackedPoints.find { it.id == "CORNER_BL" }?.imagePt ?: validCurr[3]
-
-        // Validate quad convexity
         if (!isConvexQuad(cornerTL, cornerTR, cornerBR, cornerBL)) return null
 
-        val quadPts = listOf(cornerTL, cornerTR, cornerBR, cornerBL)
-        val quadArray = quadPts.map { doubleArrayOf(it.x, it.y) }
+        val quadArray = listOf(cornerTL, cornerTR, cornerBR, cornerBL).map { doubleArrayOf(it.x, it.y) }
         val area = calculateQuadArea(cornerTL, cornerTR, cornerBR, cornerBL)
-
         val lastValid = lastValidStaticResult
+
+        // A tracked result provides current geometry only. Classification and transport
+        // metadata belong to the previous full detection and must never masquerade as
+        // current-frame data.
         val trackedPayload = lastValid?.diagnosticPayload?.copy(
-            classificationSource = "TRACKED_HOMOGRAPHY"
+            classificationSource = "TRACKED_HOMOGRAPHY",
+            transportSessionId = null,
+            transportFrameId = null,
+            transportTotalFrames = null,
+            transportPayloadHex = null,
+            transportCrc16Hex = null,
+            transportError = "HELD_TRACKING_NOT_FRESH"
         )
 
         return V6StaticResult(
             borderFound = true,
             detectedQuad = quadArray,
             contourArea = area,
-            decodedCornerIds = lastValid?.decodedCornerIds ?: mapOf("TL" to "TL", "TR" to "TR", "BR" to "BR", "BL" to "BL"),
-            decodedCornerBits = lastValid?.decodedCornerBits ?: mapOf("TL" to "1000", "TR" to "0100", "BR" to "0010", "BL" to "0001"),
-            decodedCornerDistances = lastValid?.decodedCornerDistances ?: mapOf("TL" to 0, "TR" to 0, "BR" to 0, "BL" to 0),
-            decodedCornerMargins = lastValid?.decodedCornerMargins ?: mapOf("TL" to 2, "TR" to 2, "BR" to 2, "BL" to 2),
+            decodedCornerIds = lastValid?.decodedCornerIds ?: emptyMap(),
+            decodedCornerBits = lastValid?.decodedCornerBits ?: emptyMap(),
+            decodedCornerDistances = lastValid?.decodedCornerDistances ?: emptyMap(),
+            decodedCornerMargins = lastValid?.decodedCornerMargins ?: emptyMap(),
             bitSamples = lastValid?.bitSamples ?: emptyMap(),
             cornerMatches = lastValid?.cornerMatches ?: emptyMap(),
             orientationResolved = true,
-            reprojectionError = 1.8,
+            reprojectionError = Double.NaN,
             pilotYUVs = lastValid?.pilotYUVs ?: emptyMap(),
-            cellAccuracy = lastValid?.cellAccuracy ?: 100.0,
+            cellAccuracy = lastValid?.cellAccuracy ?: 0.0,
             uncertainCells = lastValid?.uncertainCells ?: 0,
             decodedCrc32 = lastValid?.decodedCrc32,
             expectedCrc32 = lastValid?.expectedCrc32,
-            colorCorrect = lastValid?.colorCorrect ?: 400,
+            colorCorrect = lastValid?.colorCorrect ?: 0,
             colorUncertain = lastValid?.colorUncertain ?: 0,
             colorTotal = lastValid?.colorTotal ?: 400,
             confusionMatrix = lastValid?.confusionMatrix,
@@ -316,29 +292,40 @@ class V6TemporalTracker {
             warpCoverage = lastValid?.warpCoverage ?: 0.0,
             diagnosticPayload = trackedPayload,
             contoursConsidered = lastValid?.contoursConsidered ?: 0,
-            quadsConsidered = lastValid?.quadsConsidered ?: 0
+            quadsConsidered = lastValid?.quadsConsidered ?: 0,
+            transportSessionId = null,
+            transportFrameId = null,
+            transportTotalFrames = null,
+            transportPayloadHex = null,
+            transportCrc16Hex = null,
+            transportError = "HELD_TRACKING_NOT_FRESH",
+            transportFrame = null
         )
     }
 
     private fun isConvexQuad(p0: Point, p1: Point, p2: Point, p3: Point): Boolean {
-        fun crossProduct(a: Point, b: Point, c: Point): Double {
-            return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-        }
+        fun crossProduct(a: Point, b: Point, c: Point): Double =
+            (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+
         val cp1 = crossProduct(p0, p1, p2)
         val cp2 = crossProduct(p1, p2, p3)
         val cp3 = crossProduct(p2, p3, p0)
         val cp4 = crossProduct(p3, p0, p1)
-        return (cp1 > 0 && cp2 > 0 && cp3 > 0 && cp4 > 0) || (cp1 < 0 && cp2 < 0 && cp3 < 0 && cp4 < 0)
+        return (cp1 > 0 && cp2 > 0 && cp3 > 0 && cp4 > 0) ||
+            (cp1 < 0 && cp2 < 0 && cp3 < 0 && cp4 < 0)
     }
 
-    private fun calculateQuadArea(p0: Point, p1: Point, p2: Point, p3: Point): Double {
-        return 0.5 * abs(p0.x * p1.y + p1.x * p2.y + p2.x * p3.y + p3.x * p0.y - (p1.x * p0.y + p2.x * p1.y + p3.x * p2.y + p0.x * p3.y))
-    }
+    private fun calculateQuadArea(p0: Point, p1: Point, p2: Point, p3: Point): Double =
+        0.5 * abs(
+            p0.x * p1.y + p1.x * p2.y + p2.x * p3.y + p3.x * p0.y -
+                (p1.x * p0.y + p2.x * p1.y + p3.x * p2.y + p0.x * p3.y)
+        )
 
     private fun mapPoint(canonicalX: Double, canonicalY: Double, hInv: DoubleArray): Point {
         val den = hInv[6] * canonicalX + hInv[7] * canonicalY + hInv[8]
-        val x = (hInv[0] * canonicalX + hInv[1] * canonicalY + hInv[2]) / den
-        val y = (hInv[3] * canonicalX + hInv[4] * canonicalY + hInv[5]) / den
-        return Point(x, y)
+        return Point(
+            (hInv[0] * canonicalX + hInv[1] * canonicalY + hInv[2]) / den,
+            (hInv[3] * canonicalX + hInv[4] * canonicalY + hInv[5]) / den
+        )
     }
 }

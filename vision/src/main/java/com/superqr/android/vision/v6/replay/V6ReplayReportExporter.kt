@@ -13,21 +13,18 @@ object V6ReplayReportExporter {
         outputDir: File
     ) {
         outputDir.mkdirs()
-
-        val summaryFile = File(outputDir, "summary.txt")
-        val csvFile = File(outputDir, "results.csv")
-        val jsonFile = File(outputDir, "results.json")
-
-        summaryFile.writeText(generateSummaryTxt(summary), Charsets.UTF_8)
-        csvFile.writeText(generateResultsCsv(results), Charsets.UTF_8)
-        jsonFile.writeText(generateResultsJson(summary, results), Charsets.UTF_8)
+        File(outputDir, "summary.txt").writeText(generateSummaryTxt(summary), Charsets.UTF_8)
+        File(outputDir, "results.csv").writeText(generateResultsCsv(results), Charsets.UTF_8)
+        File(outputDir, "results.json").writeText(generateResultsJson(summary, results), Charsets.UTF_8)
     }
 
     fun generateSummaryTxt(summary: V6ReplaySummary): String {
         val total = summary.totalCases
         val borderRateStr = "%.2f%%".format(Locale.US, summary.borderFoundRate * 100)
         val orientRateStr = "%.2f%%".format(Locale.US, summary.orientationResolvedRate * 100)
-        val psrStr = "%.2f%%".format(Locale.US, summary.packetSuccessRate * 100)
+        val psrStr = if (summary.packetGroundTruthCount > 0) {
+            "%.2f%%".format(Locale.US, summary.packetSuccessRate * 100)
+        } else "N/A"
         val avgSerStr = summary.averageSER?.let { "%.4f".format(Locale.US, it) } ?: "N/A"
         val meanMsStr = "%.2f ms".format(Locale.US, summary.meanProcessingMs)
         val medianMsStr = "%.2f ms".format(Locale.US, summary.medianProcessingMs)
@@ -40,7 +37,7 @@ SuperQR V6 Offline Replay Benchmark Summary
 Total Cases:               $total
 Border Found Rate:         $borderRateStr (${summary.borderFoundCount}/$total)
 Orientation Resolved Rate: $orientRateStr (${summary.orientationResolvedCount}/$total)
-Packet Success Rate (PSR): $psrStr (${summary.packetSuccessCount}/$total)
+Packet Success Rate (PSR): $psrStr (${summary.packetSuccessCount}/${summary.packetGroundTruthCount} grounded cases)
 Average SER:               $avgSerStr
 Mean Processing Time:      $meanMsStr
 Median Processing Time:    $medianMsStr
@@ -53,8 +50,7 @@ CRC Invalid Candidates:    ${summary.totalCrcInvalidFrames}
 
     fun generateResultsCsv(results: List<V6ReplayResult>): String {
         val sb = StringBuilder()
-        sb.append("label,zip,border_found,orientation_resolved,classification_source,correct_symbols,symbol_errors,ser,uncertain,transport_valid,session_id,frame_id,total_frames,expected_frame_id,packet_success,processing_ms,failure_reason\n")
-
+        sb.append("label,zip,border_found,orientation_resolved,classification_source,correct_symbols,symbol_errors,ser,uncertain,transport_valid,session_id,frame_id,total_frames,expected_frame_id,packet_ground_truth,packet_success,processing_ms,failure_reason\n")
         for (r in results) {
             val serStr = r.symbolErrorRate?.let { "%.4f".format(Locale.US, it) } ?: ""
             val reasonEscaped = (r.failureReason ?: "").replace("\"", "\"\"")
@@ -72,6 +68,7 @@ CRC Invalid Candidates:    ${summary.totalCrcInvalidFrames}
                 .append("${r.frameId ?: ""},")
                 .append("${r.totalFrames ?: ""},")
                 .append("${r.expectedFrameId ?: ""},")
+                .append("${r.packetGroundTruthAvailable},")
                 .append("${r.packetSuccess},")
                 .append("${r.processingTimeMs},")
                 .append("\"$reasonEscaped\"\n")
@@ -81,7 +78,6 @@ CRC Invalid Candidates:    ${summary.totalCrcInvalidFrames}
 
     fun generateResultsJson(summary: V6ReplaySummary, results: List<V6ReplayResult>): String {
         val root = JSONObject()
-
         val summaryObj = JSONObject()
         summaryObj.put("totalCases", summary.totalCases)
         summaryObj.put("borderFoundCount", summary.borderFoundCount)
@@ -90,15 +86,15 @@ CRC Invalid Candidates:    ${summary.totalCrcInvalidFrames}
         summaryObj.put("orientationResolvedRate", summary.orientationResolvedRate)
         summaryObj.put("parseAttemptedCount", summary.parseAttemptedCount)
         summaryObj.put("transportValidCount", summary.transportValidCount)
+        summaryObj.put("packetGroundTruthCount", summary.packetGroundTruthCount)
         summaryObj.put("packetSuccessCount", summary.packetSuccessCount)
-        summaryObj.put("packetSuccessRate", summary.packetSuccessRate)
+        summaryObj.put("packetSuccessRate", if (summary.packetGroundTruthCount > 0) summary.packetSuccessRate else JSONObject.NULL)
         summaryObj.put("averageSER", summary.averageSER ?: JSONObject.NULL)
         summaryObj.put("meanProcessingMs", summary.meanProcessingMs)
         summaryObj.put("medianProcessingMs", summary.medianProcessingMs)
         summaryObj.put("p95ProcessingMs", summary.p95ProcessingMs)
         summaryObj.put("totalCrcValidFrames", summary.totalCrcValidFrames)
         summaryObj.put("totalCrcInvalidFrames", summary.totalCrcInvalidFrames)
-
         root.put("summary", summaryObj)
 
         val resultsArr = JSONArray()
@@ -122,13 +118,13 @@ CRC Invalid Candidates:    ${summary.totalCrcInvalidFrames}
             obj.put("expectedSessionId", r.expectedSessionId ?: JSONObject.NULL)
             obj.put("expectedFrameId", r.expectedFrameId ?: JSONObject.NULL)
             obj.put("expectedTotalFrames", r.expectedTotalFrames ?: JSONObject.NULL)
+            obj.put("packetGroundTruthAvailable", r.packetGroundTruthAvailable)
             obj.put("packetSuccess", r.packetSuccess)
             obj.put("processingTimeMs", r.processingTimeMs)
             obj.put("failureReason", r.failureReason ?: JSONObject.NULL)
             resultsArr.put(obj)
         }
         root.put("results", resultsArr)
-
         return root.toString(2)
     }
 }
