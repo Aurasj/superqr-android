@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "zip": "frame0_good.zip",
+      "label": "hello-frame0-600px",
+      "expectedSessionId": 3,
+      "expectedFrameId": 0,
+      "expectedTotalFrames": 2,
+      "expectedFrameHex": "A50603000000020000001F"
+    },
+    {
+      "zip": "frame1_good.zip",
+      "label": "hello-frame1-600px",
+      "expectedSessionId": 3,
+      "expectedFrameId": 1,
+      "expectedTotalFrames": 2
+    }
+  ]
+}

@@ -116,6 +116,8 @@ class V6FullDiagnosticCaptureTest {
 
         val summary = V6FullDiagnosticExporter.generateSummaryTxt(bundle)
         assertTrue(summary.contains("SUPERQR V6 FULL DIAGNOSTIC SUMMARY"))
+        assertTrue(summary.contains("Normalized Detector Dimensions: 1080 x 1920"))
+        assertTrue(summary.contains("Overlay Coordinate Space: NORMALIZED_DETECTOR"))
 
         val jsonStr = V6FullDiagnosticExporter.generateFrameMetadataJson(bundle)
         val json = JSONObject(jsonStr)

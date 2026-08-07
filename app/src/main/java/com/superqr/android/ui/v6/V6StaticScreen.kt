@@ -560,6 +560,27 @@ fun V6StaticScreen(
         else -> Color.White.copy(alpha = 0.6f)
     }
 
+    val borderFound = currentResult?.borderFound == true
+    val orientResolved = currentResult?.orientationResolved == true
+    val isTransportValid = (currentResult?.transportSessionId != null && currentResult?.transportError == null)
+    val isAccumulating = (accumulator.getCurrentSessionId() != -1)
+
+    val quadArea = currentResult?.contourArea ?: 0.0
+    val normWidth = currentResult?.diagnosticPayload?.normalizedAnalysisWidth ?: 480
+    val normHeight = currentResult?.diagnosticPayload?.normalizedAnalysisHeight ?: 640
+    val normArea = (normWidth * normHeight).toDouble()
+    val areaRatio = if (normArea > 0) quadArea / normArea else 0.0
+
+    val (guidanceText, alignmentColor) = when {
+        isAccumulating -> "RECEIVING" to Color(0xFF4CAF50)
+        isTransportValid -> "READING" to Color(0xFF4CAF50)
+        !borderFound -> "ALIGN QR" to Color.White.copy(alpha = 0.8f)
+        !orientResolved -> "HOLD STEADY" to Color(0xFFFFB74D)
+        areaRatio > 0.0 && areaRatio < 0.12 -> "MOVE CLOSER" to Color(0xFFFFB74D)
+        areaRatio > 0.60 -> "MOVE FARTHER" to Color(0xFFFFB74D)
+        else -> "GOOD POSITION" to Color(0xFF4CAF50)
+    }
+
     val hasValidEval = (currentResult != null && currentResult.borderFound && currentResult.orientationResolved)
 
     val decodedCrc = currentResult?.decodedCrc32
@@ -641,7 +662,9 @@ fun V6StaticScreen(
         // 2. Framing Guide Overlay
         FramingGuideOverlay(
             modifier = Modifier.fillMaxSize(),
-            reticleColor = reticleColor
+            reticleColor = reticleColor,
+            guidanceText = guidanceText,
+            guidanceColor = alignmentColor
         )
 
         // 3. Top Control Bar
@@ -1028,30 +1051,71 @@ fun V6StaticScreen(
 @Composable
 private fun FramingGuideOverlay(
     modifier: Modifier = Modifier,
-    reticleColor: Color = Color.White.copy(alpha = 0.6f)
+    reticleColor: Color = Color.White.copy(alpha = 0.6f),
+    guidanceText: String = "ALIGN QR",
+    guidanceColor: Color = Color.White.copy(alpha = 0.8f)
 ) {
-    Canvas(modifier = modifier) {
-        val side = size.minDimension * 0.65f
-        val left = (size.width - side) / 2f
-        val top = (size.height - side) / 2f
-        val cornerLen = side * 0.15f
-        val strokeWidth = 3.dp.toPx()
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val side = minOf(size.width, size.height) * 0.70f // 70% of smaller dimension
+            val left = (size.width - side) / 2f
+            val top = (size.height - side) / 2f
+            val cornerLen = side * 0.15f
+            val strokeWidth = 3.dp.toPx()
 
-        // Top-Left
-        drawLine(reticleColor, Offset(left, top), Offset(left + cornerLen, top), strokeWidth)
-        drawLine(reticleColor, Offset(left, top), Offset(left, top + cornerLen), strokeWidth)
+            // Top-Left
+            drawLine(reticleColor, Offset(left, top), Offset(left + cornerLen, top), strokeWidth)
+            drawLine(reticleColor, Offset(left, top), Offset(left, top + cornerLen), strokeWidth)
 
-        // Top-Right
-        drawLine(reticleColor, Offset(left + side, top), Offset(left + side - cornerLen, top), strokeWidth)
-        drawLine(reticleColor, Offset(left + side, top), Offset(left + side, top + cornerLen), strokeWidth)
+            // Top-Right
+            drawLine(reticleColor, Offset(left + side, top), Offset(left + side - cornerLen, top), strokeWidth)
+            drawLine(reticleColor, Offset(left + side, top), Offset(left + side, top + cornerLen), strokeWidth)
 
-        // Bottom-Right
-        drawLine(reticleColor, Offset(left + side, top + side), Offset(left + side - cornerLen, top + side), strokeWidth)
-        drawLine(reticleColor, Offset(left + side, top + side), Offset(left + side, top + side - cornerLen), strokeWidth)
+            // Bottom-Right
+            drawLine(reticleColor, Offset(left + side, top + side), Offset(left + side - cornerLen, top + side), strokeWidth)
+            drawLine(reticleColor, Offset(left + side, top + side), Offset(left + side, top + side - cornerLen), strokeWidth)
 
-        // Bottom-Left
-        drawLine(reticleColor, Offset(left, top + side), Offset(left + cornerLen, top + side), strokeWidth)
-        drawLine(reticleColor, Offset(left, top + side), Offset(left, top + side - cornerLen), strokeWidth)
+            // Bottom-Left
+            drawLine(reticleColor, Offset(left, top + side), Offset(left + cornerLen, top + side), strokeWidth)
+            drawLine(reticleColor, Offset(left, top + side), Offset(left, top + side - cornerLen), strokeWidth)
+
+            // Center crosshair / dot
+            val cx = size.width / 2f
+            val cy = size.height / 2f
+            val crosshairLen = 10.dp.toPx()
+            drawLine(reticleColor, Offset(cx - crosshairLen, cy), Offset(cx + crosshairLen, cy), 1.5f.dp.toPx())
+            drawLine(reticleColor, Offset(cx, cy - crosshairLen), Offset(cx, cy + crosshairLen), 1.5f.dp.toPx())
+        }
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(bottom = 240.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color.Black.copy(alpha = 0.65f)
+            ) {
+                Text(
+                    text = guidanceText,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = guidanceColor,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+            }
+            Text(
+                text = "Place the entire SuperQR inside the frame",
+                fontSize = 11.sp,
+                color = Color.White.copy(alpha = 0.85f),
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Keep all 4 outer corners visible",
+                fontSize = 10.sp,
+                color = Color.White.copy(alpha = 0.65f)
+            )
+        }
     }
 }
 

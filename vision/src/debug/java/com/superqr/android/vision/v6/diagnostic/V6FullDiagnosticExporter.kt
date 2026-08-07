@@ -13,6 +13,9 @@ import java.util.*
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.math.roundToInt
+import com.superqr.android.vision.v6.normalization.FrameRotationHelper
+import com.superqr.android.vision.v6.normalization.V6NormalizedFrameConverter
+import com.superqr.android.vision.v6.replay.V6RawYuvFrame
 
 object V6FullDiagnosticExporter {
     const val IS_SUPPORTED: Boolean = true
@@ -145,6 +148,12 @@ ${if (payload.transportError != null) "Transport Rejection Reason: ${payload.tra
 """.trimIndent()
         }
 
+        val rawCropW = bundle.cropRect.right - bundle.cropRect.left
+        val rawCropH = bundle.cropRect.bottom - bundle.cropRect.top
+        val cropW = if (rawCropW > 0) rawCropW else bundle.imageWidth
+        val cropH = if (rawCropH > 0) rawCropH else bundle.imageHeight
+        val (normW, normH) = FrameRotationHelper.getNormalizedDimensions(cropW, cropH, bundle.rotationDegrees)
+
         return """
 ===================================================================
 SUPERQR V6 FULL DIAGNOSTIC SUMMARY
@@ -161,9 +170,11 @@ RANSAC Inliers: ${bundle.ransacInliers}
 Detected Quad: [$quadStr]
 
 --- CAMERA FRAME PARAMETERS ---
-Dimensions: ${bundle.imageWidth} x ${bundle.imageHeight}
+Raw Camera Dimensions: ${bundle.imageWidth} x ${bundle.imageHeight}
 Rotation: ${bundle.rotationDegrees} degrees
-Crop Rect: Rect(${bundle.cropRect.left}, ${bundle.cropRect.top} - ${bundle.cropRect.right}, ${bundle.cropRect.bottom})
+Crop Rect: Rect(${bundle.cropRect.left}, ${bundle.cropRect.top} - ${bundle.cropRect.right}, ${bundle.cropRect.bottom}) (${cropW}x${cropH})
+Normalized Detector Dimensions: $normW x $normH
+Overlay Coordinate Space: NORMALIZED_DETECTOR
 Y Plane: RowStride=${bundle.yRowStride}, PixelStride=${bundle.yPixelStride}
 U Plane: RowStride=${bundle.uRowStride}, PixelStride=${bundle.uPixelStride}
 V Plane: RowStride=${bundle.vRowStride}, PixelStride=${bundle.vPixelStride}
@@ -359,43 +370,49 @@ ${highlights.joinToString("\n")}
         }
         return sb.toString()
     }
-
     private fun generateAndAddImages(bundle: V6CapturedFrameBundle, zos: ZipOutputStream) {
-        val w = bundle.imageWidth
-        val h = bundle.imageHeight
-        val rgbBytes = ByteArray(w * h * 3)
+        val rawCropW = bundle.cropRect.right - bundle.cropRect.left
+        val rawCropH = bundle.cropRect.bottom - bundle.cropRect.top
+        val cropRight = if (rawCropW > 0) bundle.cropRect.right else bundle.imageWidth
+        val cropBottom = if (rawCropH > 0) bundle.cropRect.bottom else bundle.imageHeight
 
-        // Convert raw YUV_420_888 to BGR Mat for OpenCV
-        for (y in 0 until h) {
-            for (x in 0 until w) {
-                val yIdx = y * bundle.yRowStride + x * bundle.yPixelStride
-                val uIdx = (y / 2) * bundle.uRowStride + (x / 2) * bundle.uPixelStride
-                val vIdx = (y / 2) * bundle.vRowStride + (x / 2) * bundle.vPixelStride
+        val rawFrame = V6RawYuvFrame(
+            imageWidth = bundle.imageWidth,
+            imageHeight = bundle.imageHeight,
+            cropLeft = bundle.cropRect.left,
+            cropTop = bundle.cropRect.top,
+            cropRight = cropRight,
+            cropBottom = cropBottom,
+            rotationDegrees = bundle.rotationDegrees,
+            yRowStride = bundle.yRowStride,
+            yPixelStride = bundle.yPixelStride,
+            uRowStride = bundle.uRowStride,
+            uPixelStride = bundle.uPixelStride,
+            vRowStride = bundle.vRowStride,
+            vPixelStride = bundle.vPixelStride,
+            yPlaneBytes = bundle.yPlaneBytes,
+            uPlaneBytes = bundle.uPlaneBytes,
+            vPlaneBytes = bundle.vPlaneBytes
+        )
 
-                val yVal = if (yIdx in bundle.yPlaneBytes.indices) bundle.yPlaneBytes[yIdx].toInt() and 0xFF else 128
-                val uVal = if (uIdx in bundle.uPlaneBytes.indices) bundle.uPlaneBytes[uIdx].toInt() and 0xFF else 128
-                val vVal = if (vIdx in bundle.vPlaneBytes.indices) bundle.vPlaneBytes[vIdx].toInt() and 0xFF else 128
+        // 1. camera_raw_rgb.png & camera_rgb.png (raw sensor orientation)
+        val rawRes = V6NormalizedFrameConverter.convertRawYuvToRawBgr(rawFrame)
+        val cameraRawMat = Mat(rawRes.height, rawRes.width, CvType.CV_8UC3)
+        cameraRawMat.put(0, 0, rawRes.bgrBytes)
+        val cameraRawPng = encodeMatToPng(cameraRawMat)
+        addZipEntry(zos, "camera_raw_rgb.png", cameraRawPng)
+        addZipEntry(zos, "camera_rgb.png", cameraRawPng)
+        cameraRawMat.release()
 
-                val b = (yVal + 1.772 * (uVal - 128)).roundToInt().coerceIn(0, 255)
-                val g = (yVal - 0.344136 * (uVal - 128) - 0.714136 * (vVal - 128)).roundToInt().coerceIn(0, 255)
-                val r = (yVal + 1.402 * (vVal - 128)).roundToInt().coerceIn(0, 255)
+        // 2. camera_normalized_rgb.png (EXACT image coordinate space used by V6StaticDetector)
+        val normRes = V6NormalizedFrameConverter.convertRawYuvToNormalizedBgr(rawFrame)
+        val cameraNormalizedMat = Mat(normRes.height, normRes.width, CvType.CV_8UC3)
+        cameraNormalizedMat.put(0, 0, normRes.bgrBytes)
+        val cameraNormPng = encodeMatToPng(cameraNormalizedMat)
+        addZipEntry(zos, "camera_normalized_rgb.png", cameraNormPng)
 
-                val destIdx = (y * w + x) * 3
-                rgbBytes[destIdx] = b.toByte()
-                rgbBytes[destIdx + 1] = g.toByte()
-                rgbBytes[destIdx + 2] = r.toByte()
-            }
-        }
-
-        val cameraRgbMat = Mat(h, w, CvType.CV_8UC3)
-        cameraRgbMat.put(0, 0, rgbBytes)
-
-        // 1. camera_rgb.png
-        val cameraRgbPng = encodeMatToPng(cameraRgbMat)
-        addZipEntry(zos, "camera_rgb.png", cameraRgbPng)
-
-        // 2. camera_overlay.png
-        val cameraOverlayMat = cameraRgbMat.clone()
+        // 3. camera_normalized_overlay.png & camera_overlay.png
+        val cameraOverlayMat = cameraNormalizedMat.clone()
         val quad = bundle.payload.detectedQuad
         if (quad != null && quad.size == 4) {
             for (i in 0 until 4) {
@@ -423,15 +440,16 @@ ${highlights.joinToString("\n")}
             Imgproc.circle(cameraOverlayMat, pt, 2, color, -1)
         }
         val cameraOverlayPng = encodeMatToPng(cameraOverlayMat)
+        addZipEntry(zos, "camera_normalized_overlay.png", cameraOverlayPng)
         addZipEntry(zos, "camera_overlay.png", cameraOverlayPng)
         cameraOverlayMat.release()
 
-        // 3. canonical_rgb.png & canonical_luma.png
+        // 4. canonical_rgb.png & canonical_luma.png
         val canonicalRgbMat = Mat(1000, 1000, CvType.CV_8UC3)
         val hMat = Mat(3, 3, CvType.CV_64F)
         val imgToCanon = bundle.payload.imageToCanonicalHomography ?: doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
         hMat.put(0, 0, *imgToCanon)
-        Imgproc.warpPerspective(cameraRgbMat, canonicalRgbMat, hMat, Size(1000.0, 1000.0), Imgproc.INTER_NEAREST)
+        Imgproc.warpPerspective(cameraNormalizedMat, canonicalRgbMat, hMat, Size(1000.0, 1000.0), Imgproc.INTER_NEAREST)
 
         val canonicalRgbPng = encodeMatToPng(canonicalRgbMat)
         addZipEntry(zos, "canonical_rgb.png", canonicalRgbPng)
@@ -497,7 +515,7 @@ ${highlights.joinToString("\n")}
             roiMat.release()
         }
 
-        cameraRgbMat.release()
+        cameraNormalizedMat.release()
         canonicalRgbMat.release()
         canonicalLumaMat.release()
         hMat.release()
