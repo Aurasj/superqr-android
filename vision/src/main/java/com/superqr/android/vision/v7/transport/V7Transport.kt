@@ -25,6 +25,43 @@ object V7Transport {
     private val FRAME_MAGIC = byteArrayOf('S'.code.toByte(), 'Q'.code.toByte())
     private val PACKAGE_MAGIC = byteArrayOf('S'.code.toByte(), 'Q'.code.toByte(), 'P'.code.toByte(), '7'.code.toByte())
 
+    fun buildFrame(sessionId: Int, frameId: Int, totalFrames: Int, payload: ByteArray): ByteArray {
+        require(sessionId in 1..0xFFFF)
+        require(totalFrames >= 1)
+        require(frameId in 0 until totalFrames)
+        require(payload.size <= PAYLOAD_SIZE)
+
+        val bytes = ByteArray(FRAME_SIZE)
+        val buf = ByteBuffer.wrap(bytes)
+        buf.put(FRAME_MAGIC)
+        buf.put(VERSION.toByte())
+        buf.put(FLAGS.toByte())
+        buf.putShort(sessionId.toShort())
+        buf.putInt(frameId)
+        buf.putInt(totalFrames)
+        buf.putShort(payload.size.toShort())
+        buf.put(payload)
+        // Remaining payload bytes are already zero padded by ByteArray initialization.
+        val crc = CRC32().apply { update(bytes, 0, FRAME_SIZE - CRC_SIZE) }.value
+        ByteBuffer.wrap(bytes, FRAME_SIZE - CRC_SIZE, CRC_SIZE).putInt(crc.toInt())
+        return bytes
+    }
+
+    fun bytesToSymbols(bytes: ByteArray): ByteArray {
+        require(bytes.size == FRAME_SIZE)
+        val out = ByteArray(CELL_COUNT)
+        var j = 0
+        for (byte in bytes) {
+            val b = byte.toInt() and 0xFF
+            out[j] = ((b ushr 6) and 0x03).toByte()
+            out[j + 1] = ((b ushr 4) and 0x03).toByte()
+            out[j + 2] = ((b ushr 2) and 0x03).toByte()
+            out[j + 3] = (b and 0x03).toByte()
+            j += 4
+        }
+        return out
+    }
+
     fun symbolsToBytes(symbols: ByteArray): ByteArray? {
         if (symbols.size != CELL_COUNT) return null
         val out = ByteArray(FRAME_SIZE)
