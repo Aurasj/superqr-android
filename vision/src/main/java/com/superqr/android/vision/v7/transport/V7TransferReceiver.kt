@@ -8,12 +8,48 @@ import com.superqr.android.vision.v7_capacity_lab.V7SoftClassifier
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+/** Per-analysis transport instrumentation exposed to the production UI/debugger. */
+data class V7TransportDiagnostics(
+    val rawErasures: Int = 0,
+    val headerAttempted: Boolean = false,
+    val headerValid: Boolean = false,
+    val header: V7FrameHeader? = null,
+    val headerError: String? = null,
+    val temporalObservations: Int = 0,
+    val temporalFilledCells: Int = 0,
+    val temporalOverriddenCells: Int = 0,
+    val temporalConsensusCells: Int = 0,
+    val remainingErasures: Int = 0,
+    val packAttempted: Boolean = false,
+    val crcAttempted: Boolean = false,
+    val crcPassed: Boolean = false,
+    val rejectionReason: String? = null,
+)
+
+/** Throttled deep snapshot used only while Live Debug is open. */
+data class V7DebugSnapshot(
+    val profileId: Int,
+    val grid: Int,
+    val probeMode: V7HighDensitySampler.ProbeMode,
+    val symbols: ByteArray,
+    val stabilizedSymbols: ByteArray?,
+    val secondBestSymbols: ByteArray,
+    val bestDistances: IntArray,
+    val secondBestDistances: IntArray,
+    val validMask: ByteArray,
+    val sampleY: IntArray,
+    val sampleU: IntArray,
+    val sampleV: IntArray,
+    val transport: V7TransportDiagnostics,
+)
+
 /**
  * Production adaptive V7 payload decoder.
  *
  * Carrier acquisition/tracking remains the proven V6 detector. After geometry
- * lock, four monochrome header cells announce the active V7 optical profile,
- * allowing Android to follow Desktop automatically.
+ * lock, four monochrome header cells announce the active V7 optical profile.
+ * The payload decoder then performs rectangular-grid sampling, soft decisions,
+ * explicit erasures, header-first inspection and CRC-gated temporal recovery.
  */
 class V7TransferReceiver {
     val sampler = V7HighDensitySampler()
@@ -24,9 +60,14 @@ class V7TransferReceiver {
 
     var probeMode: V7HighDensitySampler.ProbeMode = V7HighDensitySampler.ProbeMode.CROSS_5
     var forcedProfileId: Int? = null
+    var debugSnapshotEnabled: Boolean = false
+    var debugSnapshotIntervalNs: Long = 250_000_000L
 
     var activeProfile: V7OpticalProfile = V7OpticalProfiles.all.first()
         private set
+
+    private val temporal = V7TemporalFrameStabilizer()
+    private var lastDebugSnapshotNs = 0L
 
     data class Timing(
         val profileUs: Long = 0,
@@ -46,15 +87,19 @@ class V7TransferReceiver {
         val erasureCount: Int,
         val acceptedFrame: V7TransportFrame?,
         val transportError: String?,
+        val transport: V7TransportDiagnostics,
+        val debugSnapshot: V7DebugSnapshot?,
         val timing: Timing,
     )
 
     init { applyProfile(activeProfile) }
 
     fun reset() {
+        temporal.reset()
         calibrator.reset()
         activeProfile = V7OpticalProfiles.all.first()
         applyProfile(activeProfile)
+        lastDebugSnapshotNs = 0L
     }
 
     private fun applyProfile(profile: V7OpticalProfile) {
@@ -62,6 +107,8 @@ class V7TransferReceiver {
         sampler.setGridSize(profile.grid, V7OpticalProfiles.payloadBbox)
         calibrator = V7Calibrator(profile.colorCount)
         classifier = V7SoftClassifier().also { it.setCellCount(profile.cellCount) }
+        temporal.reset()
+        lastDebugSnapshotNs = 0L
     }
 
     fun analyze(
@@ -74,10 +121,12 @@ class V7TransferReceiver {
         val t0 = System.nanoTime()
         val hInv = geometry.finalInvHomography
         if (!geometry.borderFound || !geometry.orientationResolved || hInv == null) {
+            val transport = V7TransportDiagnostics(remainingErasures = activeProfile.cellCount)
             return DecodeResult(
                 geometry.trackingState, activeProfile, forcedProfileId == null,
                 calibrator.calibratedCount(), 0, 0, activeProfile.cellCount,
-                null, null, Timing(totalUs = (System.nanoTime() - t0) / 1000)
+                null, null, transport, null,
+                Timing(totalUs = (System.nanoTime() - t0) / 1000)
             )
         }
 
@@ -97,10 +146,12 @@ class V7TransferReceiver {
         val samplingUs = (System.nanoTime() - ts0) / 1000
 
         if (!calibrator.isFullyCalibrated()) {
+            val transport = V7TransportDiagnostics(remainingErasures = activeProfile.cellCount)
             return DecodeResult(
                 geometry.trackingState, activeProfile, forcedProfileId == null,
                 calibrator.calibratedCount(), validSamples, 0, activeProfile.cellCount,
-                null, null, Timing(profileUs, samplingUs, totalUs = (System.nanoTime() - t0) / 1000)
+                null, null, transport, null,
+                Timing(profileUs, samplingUs, totalUs = (System.nanoTime() - t0) / 1000)
             )
         }
 
@@ -110,31 +161,117 @@ class V7TransferReceiver {
         val u = if (probeMode == V7HighDensitySampler.ProbeMode.CENTER_1) sampler.getUCenters() else sampler.getUCross5()
         val v = if (probeMode == V7HighDensitySampler.ProbeMode.CENTER_1) sampler.getVCenters() else sampler.getVCross5()
         classifier.classify(y, u, v, activeProfile.cellCount)
+
+        // A projected cell with insufficient real YUV probes is an explicit
+        // erasure even if neutral fallback values happen to be near a palette.
+        val validMask = sampler.getValidMask()
+        for (i in 0 until activeProfile.cellCount) {
+            if (validMask[i].toInt() == 0) classifier.bestSymbols[i] = V7SoftClassifier.ERASURE_MARKER
+        }
         val classificationUs = (System.nanoTime() - tc0) / 1000
 
-        var erasures = 0
-        for (symbol in classifier.bestSymbols) if (symbol == V7SoftClassifier.ERASURE_MARKER) erasures++
-        val confident = activeProfile.cellCount - erasures
+        var rawErasures = 0
+        for (symbol in classifier.bestSymbols) if (symbol == V7SoftClassifier.ERASURE_MARKER) rawErasures++
+        val confident = activeProfile.cellCount - rawErasures
 
-        var accepted: V7TransportFrame? = null
-        var error: String? = null
         val tt0 = System.nanoTime()
-        if (erasures == 0 && validSamples == activeProfile.cellCount) {
-            val bytes = V7Transport.symbolsToBytes(classifier.bestSymbols, activeProfile)
-            if (bytes != null) {
-                try {
-                    accepted = V7Transport.parseFrame(bytes, activeProfile)
-                } catch (e: V7TransportError) {
-                    error = e.message
-                }
+        var headerAttempted = false
+        var headerValid = false
+        var header: V7FrameHeader? = null
+        var headerError: String? = null
+        var merged: V7TemporalFrameStabilizer.MergeResult? = null
+        var packAttempted = false
+        var crcAttempted = false
+        var crcPassed = false
+        var accepted: V7TransportFrame? = null
+        var rejection: String? = null
+
+        val headerBytes = V7Transport.symbolsToPrefixBytes(classifier.bestSymbols, activeProfile, V7Transport.HEADER_SIZE)
+        headerAttempted = true
+        if (headerBytes == null) {
+            headerError = "header contains erasures"
+            rejection = headerError
+        } else {
+            try {
+                header = V7Transport.inspectHeader(headerBytes, activeProfile)
+                headerValid = true
+            } catch (e: V7TransportError) {
+                headerError = e.message
+                rejection = e.message
             }
         }
-        val transportUs = (System.nanoTime() - tt0) / 1000
 
+        var candidateSymbols: ByteArray = classifier.bestSymbols
+        if (header != null) {
+            merged = temporal.merge(header, classifier.bestSymbols)
+            candidateSymbols = merged.symbols
+        }
+        val remainingErasures = merged?.remainingErasures ?: rawErasures
+
+        if (headerValid && remainingErasures == 0) {
+            packAttempted = true
+            val bytes = V7Transport.symbolsToBytes(candidateSymbols, activeProfile)
+            if (bytes == null) {
+                rejection = "symbol packing failed"
+            } else {
+                crcAttempted = true
+                try {
+                    accepted = V7Transport.parseFrame(bytes, activeProfile)
+                    crcPassed = true
+                    rejection = null
+                } catch (e: V7TransportError) {
+                    rejection = e.message
+                }
+            }
+        } else if (headerValid && remainingErasures > 0) {
+            rejection = "$remainingErasures erasures remain after temporal recovery"
+        }
+
+        val transport = V7TransportDiagnostics(
+            rawErasures = rawErasures,
+            headerAttempted = headerAttempted,
+            headerValid = headerValid,
+            header = header,
+            headerError = headerError,
+            temporalObservations = merged?.observations ?: 0,
+            temporalFilledCells = merged?.filledErasures ?: 0,
+            temporalOverriddenCells = merged?.overriddenConflicts ?: 0,
+            temporalConsensusCells = merged?.consensusCells ?: 0,
+            remainingErasures = remainingErasures,
+            packAttempted = packAttempted,
+            crcAttempted = crcAttempted,
+            crcPassed = crcPassed,
+            rejectionReason = rejection,
+        )
+
+        val nowNs = System.nanoTime()
+        val debugSnapshot = if (
+            debugSnapshotEnabled &&
+            (lastDebugSnapshotNs == 0L || nowNs - lastDebugSnapshotNs >= debugSnapshotIntervalNs)
+        ) {
+            lastDebugSnapshotNs = nowNs
+            V7DebugSnapshot(
+                profileId = activeProfile.id,
+                grid = activeProfile.grid,
+                probeMode = probeMode,
+                symbols = classifier.bestSymbols.copyOf(),
+                stabilizedSymbols = merged?.symbols?.copyOf(),
+                secondBestSymbols = classifier.secondBestSymbols.copyOf(),
+                bestDistances = classifier.bestDistances.copyOf(),
+                secondBestDistances = classifier.secondBestDistances.copyOf(),
+                validMask = validMask.copyOf(),
+                sampleY = y.copyOf(),
+                sampleU = u.copyOf(),
+                sampleV = v.copyOf(),
+                transport = transport,
+            )
+        } else null
+
+        val transportUs = (System.nanoTime() - tt0) / 1000
         return DecodeResult(
             geometry.trackingState, activeProfile, forcedProfileId == null,
-            calibrator.calibratedCount(), validSamples, confident, erasures,
-            accepted, error,
+            calibrator.calibratedCount(), validSamples, confident, rawErasures,
+            accepted, rejection, transport, debugSnapshot,
             Timing(profileUs, samplingUs, classificationUs, transportUs, (System.nanoTime() - t0) / 1000)
         )
     }
