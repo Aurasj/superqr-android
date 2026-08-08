@@ -22,6 +22,7 @@ class V7TemporalFrameStabilizerTest {
 
         assertEquals(1, merged.filledErasures)
         assertEquals(0, merged.remainingErasures)
+        assertEquals(1, merged.fillOnlySymbols[100].toInt())
         assertEquals(1, merged.symbols[100].toInt())
         assertEquals(2, merged.observations)
     }
@@ -41,12 +42,14 @@ class V7TemporalFrameStabilizerTest {
     }
 
     @Test
-    fun `strong consensus can override isolated conflict`() {
+    fun `strong consensus is separate from fill-only candidate`() {
         val stabilizer = V7TemporalFrameStabilizer()
         val stable = ByteArray(profile.cellCount) { 0 }
         repeat(4) { stabilizer.merge(header, stable, 1_000L + it) }
         val noisy = stable.copyOf().also { it[55] = 3 }
         val merged = stabilizer.merge(header, noisy, 2_000L)
+
+        assertEquals(3, merged.fillOnlySymbols[55].toInt())
         assertEquals(0, merged.symbols[55].toInt())
         assertTrue(merged.overriddenConflicts >= 1)
     }
