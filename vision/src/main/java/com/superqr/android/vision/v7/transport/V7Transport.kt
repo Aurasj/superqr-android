@@ -67,13 +67,34 @@ object V7Transport {
 
     fun symbolsToBytes(symbols: ByteArray, profile: V7OpticalProfile = baseline): ByteArray? {
         if (symbols.size != profile.cellCount) return null
-        val out = ByteArray(profile.frameSize)
-        var bitPos = 0
+        return symbolsToPrefixBytes(symbols, profile, profile.frameSize)
+    }
+
+    /**
+     * Pack only the leading [byteCount] bytes from optical symbols.
+     * Returns null if one of the symbols needed for that prefix is erased.
+     * This lets the receiver inspect the 16-byte frame header even when cells
+     * later in the optical frame are uncertain.
+     */
+    fun symbolsToPrefixBytes(
+        symbols: ByteArray,
+        profile: V7OpticalProfile,
+        byteCount: Int,
+    ): ByteArray? {
+        if (symbols.size != profile.cellCount) return null
+        require(byteCount in 1..profile.frameSize)
+        val totalBits = byteCount * 8
+        val cellsNeeded = (totalBits + profile.bitsPerCell - 1) / profile.bitsPerCell
+        if (cellsNeeded > symbols.size) return null
+
+        val out = ByteArray(byteCount)
         val maxSymbol = (1 shl profile.bitsPerCell) - 1
-        for (symbolByte in symbols) {
-            val symbol = symbolByte.toInt()
+        var bitPos = 0
+        for (cell in 0 until cellsNeeded) {
+            val symbol = symbols[cell].toInt()
             if (symbol !in 0..maxSymbol) return null
             for (shiftInSymbol in profile.bitsPerCell - 1 downTo 0) {
+                if (bitPos >= totalBits) break
                 if (((symbol shr shiftInSymbol) and 1) != 0) {
                     val byteIdx = bitPos shr 3
                     val shift = 7 - (bitPos and 7)
@@ -85,18 +106,14 @@ object V7Transport {
         return out
     }
 
-    fun parseFrame(bytes: ByteArray, expectedProfile: V7OpticalProfile? = null): V7TransportFrame {
-        if (bytes.size < HEADER_SIZE + CRC_SIZE) throw V7TransportError("truncated V7 frame")
+    /** Validate only the transport header, deliberately before CRC. */
+    fun inspectHeader(bytes: ByteArray, expectedProfile: V7OpticalProfile? = null): V7FrameHeader {
+        if (bytes.size < HEADER_SIZE) throw V7TransportError("truncated V7 header")
         if (bytes[0] != FRAME_MAGIC[0] || bytes[1] != FRAME_MAGIC[1]) throw V7TransportError("invalid V7 frame magic")
         if ((bytes[2].toInt() and 0xFF) != VERSION) throw V7TransportError("invalid V7 version")
         val profileId = bytes[3].toInt() and 0xFF
         val profile = V7OpticalProfiles.byId(profileId) ?: throw V7TransportError("unknown V7 profile id $profileId")
         if (expectedProfile != null && expectedProfile.id != profileId) throw V7TransportError("optical profile does not match frame header")
-        if (bytes.size != profile.frameSize) throw V7TransportError("frame size does not match ${profile.key}")
-
-        val expectedCrc = ByteBuffer.wrap(bytes, bytes.size - 4, 4).int.toLong() and 0xFFFFFFFFL
-        val crc = CRC32().apply { update(bytes, 0, bytes.size - 4) }.value and 0xFFFFFFFFL
-        if (crc != expectedCrc) throw V7TransportError("frame CRC32 mismatch")
 
         val buf = ByteBuffer.wrap(bytes)
         buf.position(4)
@@ -109,7 +126,26 @@ object V7Transport {
         if (frameIdLong >= totalLong || frameIdLong > Int.MAX_VALUE) throw V7TransportError("invalid frame numbering")
         if (payloadLen > profile.payloadSize) throw V7TransportError("invalid payload length")
 
-        return V7TransportFrame(sessionId, frameIdLong.toInt(), totalLong.toInt(), bytes.copyOfRange(HEADER_SIZE, HEADER_SIZE + payloadLen), profileId)
+        return V7FrameHeader(sessionId, frameIdLong.toInt(), totalLong.toInt(), payloadLen, profileId)
+    }
+
+    fun parseFrame(bytes: ByteArray, expectedProfile: V7OpticalProfile? = null): V7TransportFrame {
+        if (bytes.size < HEADER_SIZE + CRC_SIZE) throw V7TransportError("truncated V7 frame")
+        val header = inspectHeader(bytes, expectedProfile)
+        val profile = V7OpticalProfiles.byId(header.profileId) ?: throw V7TransportError("unknown V7 profile id ${header.profileId}")
+        if (bytes.size != profile.frameSize) throw V7TransportError("frame size does not match ${profile.key}")
+
+        val expectedCrc = ByteBuffer.wrap(bytes, bytes.size - 4, 4).int.toLong() and 0xFFFFFFFFL
+        val crc = CRC32().apply { update(bytes, 0, bytes.size - 4) }.value and 0xFFFFFFFFL
+        if (crc != expectedCrc) throw V7TransportError("frame CRC32 mismatch")
+
+        return V7TransportFrame(
+            header.sessionId,
+            header.frameId,
+            header.totalFrames,
+            bytes.copyOfRange(HEADER_SIZE, HEADER_SIZE + header.payloadLen),
+            header.profileId,
+        )
     }
 
     fun parsePackage(bytes: ByteArray): V7TransferPackage {
@@ -135,6 +171,14 @@ object V7Transport {
         return V7TransferPackage(filename, if (mime.isBlank()) "application/octet-stream" else mime, fileData.size, expectedCrc, fileData)
     }
 }
+
+data class V7FrameHeader(
+    val sessionId: Int,
+    val frameId: Int,
+    val totalFrames: Int,
+    val payloadLen: Int,
+    val profileId: Int,
+)
 
 data class V7TransportFrame(
     val sessionId: Int,
