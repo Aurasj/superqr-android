@@ -16,16 +16,13 @@ class ChromaSampleBuffers {
  * Chroma reader for CameraX YUV_420_888 analysis frames.
  *
  * Luma is full resolution while U/V are normally one sample per 2x2 luma block.
- * The old implementation truncated normalized coordinates to Int and then chose a
- * single chroma texel. Near dense SuperQR cell boundaries that can pair the luma
- * from one cell with the chroma from its neighbor. We now preserve sub-pixel
- * coordinates through rotation and bilinearly interpolate the four surrounding
- * chroma samples. This mirrors normal YUV upsampling much more closely while
- * leaving the proven luma/detector path untouched.
+ * We preserve sub-pixel coordinates through rotation and bilinearly interpolate
+ * surrounding chroma samples. The hot read() path is allocation-free; CROSS_5 can
+ * call it thousands of times per frame without creating Pair objects for rotation.
  */
 class ImageProxyChromaSampler(
     imageProxy: ImageProxy,
-    private val buffers: ChromaSampleBuffers,
+    @Suppress("UNUSED_PARAMETER") buffers: ChromaSampleBuffers,
 ) : ChromaPixelReader {
     private val cropLeft = imageProxy.cropRect.left
     private val cropTop = imageProxy.cropRect.top
@@ -43,29 +40,41 @@ class ImageProxyChromaSampler(
         require(destination.size >= 2)
         if (!imageX.isFinite() || !imageY.isFinite()) return false
 
-        val raw = mapNormalizedToRaw(imageX, imageY)
-        val fullX = cropLeft.toDouble() + raw.first
-        val fullY = cropTop.toDouble() + raw.second
+        val rawX: Double
+        val rawY: Double
+        when (rotation) {
+            90 -> {
+                rawX = imageY
+                rawY = rawHeight - 1.0 - imageX
+            }
+            180 -> {
+                rawX = rawWidth - 1.0 - imageX
+                rawY = rawHeight - 1.0 - imageY
+            }
+            270 -> {
+                rawX = rawWidth - 1.0 - imageY
+                rawY = imageX
+            }
+            else -> {
+                rawX = imageX
+                rawY = imageY
+            }
+        }
 
-        // Chroma plane coordinates are half-resolution. Keeping .5 positions lets
-        // odd luma coordinates blend adjacent chroma samples instead of always
-        // snapping to the upper-left 2x2 block.
-        val chromaX = fullX / 2.0
-        val chromaY = fullY / 2.0
+        val fullX = cropLeft.toDouble() + rawX
+        val fullY = cropTop.toDouble() + rawY
+        if (fullX < 0.0 || fullY < 0.0) return false
+
+        // Chroma plane coordinates are half-resolution. Keeping fractional
+        // positions lets odd luma coordinates blend adjacent chroma samples rather
+        // than snapping to one arbitrary 2x2 block.
+        val chromaX = fullX * 0.5
+        val chromaY = fullY * 0.5
         val u = uPlane.sampleBilinear(chromaX, chromaY) ?: return false
         val v = vPlane.sampleBilinear(chromaX, chromaY) ?: return false
         destination[0] = u
         destination[1] = v
         return true
-    }
-
-    private fun mapNormalizedToRaw(nx: Double, ny: Double): Pair<Double, Double> {
-        return when (rotation) {
-            90 -> Pair(ny, rawHeight - 1.0 - nx)
-            180 -> Pair(rawWidth - 1.0 - nx, rawHeight - 1.0 - ny)
-            270 -> Pair(rawWidth - 1.0 - ny, nx)
-            else -> Pair(nx, ny)
-        }
     }
 
     private class PlaneReader(plane: ImageProxy.PlaneProxy) {
