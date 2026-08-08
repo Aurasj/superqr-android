@@ -7,13 +7,15 @@ import java.util.LinkedHashMap
  * Small, bounded temporal recovery cache keyed by the decoded V7 frame header.
  *
  * It never combines observations from different logical frames. The header must
- * decode first, so sender frame changes cannot smear symbols together. Current
- * confident cells are kept; only current erasures are filled from prior
- * observations of the same (session, frame, profile). Strong historical
- * consensus may also override an isolated conflicting current symbol.
+ * decode first, so sender frame changes cannot smear symbols together.
  *
- * CRC32 remains the final authority: recovered candidates are never accepted
- * merely because this stabilizer produced a complete symbol vector.
+ * Two recovery candidates are produced:
+ * 1) fillOnlySymbols: current confident cells are preserved and only erasures
+ *    are filled from previous observations of the same frame;
+ * 2) symbols: a stronger consensus candidate which may additionally override an
+ *    isolated conflicting current symbol.
+ *
+ * The receiver tries candidates independently and CRC32 remains final authority.
  */
 class V7TemporalFrameStabilizer(
     private val maxTrackedFrames: Int = 32,
@@ -27,6 +29,7 @@ class V7TemporalFrameStabilizer(
     )
 
     data class MergeResult(
+        val fillOnlySymbols: ByteArray,
         val symbols: ByteArray,
         val observations: Int,
         val filledErasures: Int,
@@ -100,39 +103,47 @@ class V7TemporalFrameStabilizer(
             }
         }
 
-        val merged = currentSymbols.copyOf()
+        val fillOnly = currentSymbols.copyOf()
         var filled = 0
-        var overridden = 0
         var remaining = 0
         var consensus = 0
-        for (i in merged.indices) {
+        for (i in fillOnly.indices) {
             val candidate = state.candidate[i]
             val vote = state.votes[i].toInt() and 0xFF
             if (candidate != V7SoftClassifier.ERASURE_MARKER && vote >= 2) consensus++
 
-            if (merged[i] == V7SoftClassifier.ERASURE_MARKER) {
-                // One prior observation is enough to propose a fill; CRC will
-                // reject a bad proposal. Two+ observations are marked consensus.
+            if (fillOnly[i] == V7SoftClassifier.ERASURE_MARKER) {
                 if (candidate != V7SoftClassifier.ERASURE_MARKER && vote >= 1) {
-                    merged[i] = candidate
+                    fillOnly[i] = candidate
                     filled++
                 } else {
                     remaining++
                 }
-            } else if (
-                candidate != V7SoftClassifier.ERASURE_MARKER &&
-                candidate != merged[i] &&
-                vote >= 3
-            ) {
-                // Strong historical consensus can correct one confidently but
-                // inconsistently classified current observation.
-                merged[i] = candidate
-                overridden++
+            }
+        }
+
+        val consensusCandidate = fillOnly.copyOf()
+        var overridden = 0
+        if (remaining == 0) {
+            for (i in consensusCandidate.indices) {
+                val current = currentSymbols[i]
+                if (current == V7SoftClassifier.ERASURE_MARKER) continue
+                val candidate = state.candidate[i]
+                val vote = state.votes[i].toInt() and 0xFF
+                if (
+                    candidate != V7SoftClassifier.ERASURE_MARKER &&
+                    candidate != current &&
+                    vote >= 3
+                ) {
+                    consensusCandidate[i] = candidate
+                    overridden++
+                }
             }
         }
 
         return MergeResult(
-            symbols = merged,
+            fillOnlySymbols = fillOnly,
+            symbols = consensusCandidate,
             observations = state.observations,
             filledErasures = filled,
             overriddenConflicts = overridden,
