@@ -29,7 +29,7 @@ internal data class V7DebugUiState(
     val classificationSource: String,
     val borderFound: Boolean,
     val orientationResolved: Boolean,
-    val detectorMs: Double,
+    val detectorMs: Number,
     val calibrated: Int,
     val validSamples: Int,
     val confident: Int,
@@ -213,7 +213,7 @@ internal fun V7DebugPanel(
 
             Text("Profile ${ui.profile.key} • id ${ui.profile.id} • ${ui.profile.grid}×${ui.profile.grid} • ${ui.profile.colorCount} colors • ${ui.profile.frameSize} B/frame", color = Color.White, fontSize = 10.sp)
             Text("Camera ${ui.cameraState} • tracking ${ui.trackingState} • ${ui.classificationSource}", color = Color.White, fontSize = 10.sp)
-            Text("Geometry border ${ui.borderFound} • orientation ${ui.orientationResolved} • detector ${"%.2f".format(ui.detectorMs)} ms", color = Color.White.copy(alpha = .78f), fontSize = 10.sp)
+            Text("Geometry border ${ui.borderFound} • orientation ${ui.orientationResolved} • detector ${"%.2f".format(ui.detectorMs.toDouble())} ms", color = Color.White.copy(alpha = .78f), fontSize = 10.sp)
             Text("Cells sampled ${ui.validSamples}/${ui.profile.cellCount} • confident ${ui.confident} • raw erased ${ui.erasures} • CAL ${ui.calibrated}/${ui.profile.colorCount}", color = Color.White, fontSize = 10.sp)
 
             val t = ui.latestTransport
