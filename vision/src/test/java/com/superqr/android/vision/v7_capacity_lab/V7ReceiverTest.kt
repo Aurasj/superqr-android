@@ -138,12 +138,15 @@ class V7ReceiverTest {
         receiver.close()
     }
 
-    // ---- Geometry engine not null ----
+    // ---- Receiver has expected components ----
 
     @Test
-    fun `geometry engine is created`() {
+    fun `receiver is created with sampler calibrator and classifier`() {
         val receiver = V7CapacityLabReceiver(manifest)
-        assertNotNull(receiver.geometryEngine)
+        assertNotNull(receiver.sampler)
+        assertNotNull(receiver.calibrator)
+        assertNotNull(receiver.classifier)
+        assertNotNull(receiver.metrics)
         receiver.close()
     }
 

@@ -47,6 +47,10 @@ import androidx.lifecycle.LifecycleOwner
 import com.superqr.android.camera.ChromaSampleBuffers
 import com.superqr.android.camera.ImageProxyChromaSampler
 import com.superqr.android.camera.LumaFrameBuffer
+import com.superqr.android.vision.v7_capacity_lab.V7CapacityLabReceiver
+import com.superqr.android.vision.v7_capacity_lab.V7ChannelMetrics
+import com.superqr.android.vision.v7_capacity_lab.V7HighDensitySampler
+import com.superqr.android.vision.v7_capacity_lab.V7LabManifest
 import com.superqr.android.vision.v6.contract.V6Contract
 import com.superqr.android.vision.v6.detection.V6StaticDetector
 import com.superqr.android.vision.v6.diagnostic.V6CapturedFrameBundle
@@ -68,6 +72,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 private enum class V6ScannerState { IDLE, STARTING, SCANNING, COMPLETE, ERROR }
+
+private enum class ScannerMode { V6_RECEIVE, V7_CAPACITY_LAB }
 
 private data class CompletedUiTransfer(
     val pkg: V6TransferPackage,
@@ -126,6 +132,30 @@ fun V6StaticScreen(
     var transferStats by remember { mutableStateOf<V6TransferStats?>(null) }
 
     var scannerState by remember { mutableStateOf(V6ScannerState.IDLE) }
+
+    // ── V7 Capacity Lab mode ──────────────────────────────────────────
+    var scannerMode by remember { mutableStateOf(ScannerMode.V6_RECEIVE) }
+    var v7Receiver by remember { mutableStateOf<V7CapacityLabReceiver?>(null) }
+    var v7Manifest by remember { mutableStateOf<V7LabManifest?>(null) }
+    var v7ProfileName by remember { mutableStateOf("ref_40x40_v6_reference_4_seed42") }
+    var v7ExpectedFrame by remember { mutableIntStateOf(0) }
+    var v7SamplerMode by remember { mutableStateOf(V7HighDensitySampler.ProbeMode.CENTER_1) }
+    var v7LastMetrics by remember { mutableStateOf<V7ChannelMetrics.FrameMetrics?>(null) }
+    var v7CalibrationLabel by remember { mutableStateOf("—") }
+    var v7ConfidenceSummary by remember { mutableStateOf("—") }
+    var v7FrameCount by remember { mutableIntStateOf(0) }
+    var v7AnalysisMs by remember { mutableDoubleStateOf(0.0) }
+    var v7CameraFps by remember { mutableDoubleStateOf(0.0) }
+
+    // Load V7 manifest
+    LaunchedEffect(Unit) {
+        try {
+            val bytes = context.assets.open("v7_capacity_lab/lab_manifest.json")
+                .use { it.readBytes() }
+            v7Manifest = V7LabManifest.loadFromBytes(bytes)
+        } catch (_: Throwable) {
+        }
+    }
 
     var showLab by remember { mutableStateOf(false) }
     var labTab by remember { mutableIntStateOf(0) }
@@ -190,6 +220,16 @@ fun V6StaticScreen(
         accumulator.reset(); statsCollector.reset()
         detectorRef?.close(); detectorRef = null
         boundSessionConfig = null
+        v7LastMetrics = null
+        v7CalibrationLabel = "—"
+        v7ConfidenceSummary = "—"
+        // Initialize V7 receiver if in V7 mode
+        if (scannerMode == ScannerMode.V7_CAPACITY_LAB && v7Manifest != null) {
+            val rec = V7CapacityLabReceiver(v7Manifest!!)
+            rec.selectProfile(v7ProfileName)
+            rec.probeMode = v7SamplerMode
+            v7Receiver = rec
+        }
         cameraBindingState = "STARTING"
         scannerState = V6ScannerState.STARTING
     }
@@ -200,6 +240,7 @@ fun V6StaticScreen(
             // 1. Stop new analyzer callbacks from entering detection.
             val det = detectorRef
             detectorRef = null
+            val v7r = v7Receiver; v7Receiver = null
 
             // 2. Invalidate stale main-executor dispatches from this scan.
             scanGeneration.incrementAndGet()
@@ -218,11 +259,14 @@ fun V6StaticScreen(
             boundSessionConfig = null
             boundCamera = null
 
-            // 5. Close detector on the analysis executor so it serializes
+            // 5. Close detector and V7 receiver on the analysis executor so it serializes
             //    behind any callback that was already past the detectorRef
             //    null-check. After this runs, all callbacks have finished.
-            if (det != null) {
-                analysisExecutor.execute { try { det.close() } catch (_: Throwable) {} }
+            if (det != null || v7r != null) {
+                analysisExecutor.execute {
+                    try { det?.close() } catch (_: Throwable) {}
+                    try { v7r?.close() } catch (_: Throwable) {}
+                }
             }
         } catch (_: Throwable) {}
     }
@@ -336,6 +380,14 @@ fun V6StaticScreen(
                     )
                     val result = rawResult.copy(analyzerArrivalNs = analyzerArrivalNs)
 
+                    // ── V7 Capacity Lab payload analysis ──────────────
+                    val v7Recv = v7Receiver
+                    val v7Result = if (v7Recv != null && result.borderFound && result.orientationResolved) {
+                        val lumaW = lumaBuffer.width
+                        val lumaH = lumaBuffer.height
+                        v7Recv.analyze(result, lumaBuffer.bytes, lumaW, lumaH, chromaReader)
+                    } else null
+
                     statsCollector.recordDetectorResult(
                         classificationSource = result.diagnosticPayload?.classificationSource,
                         borderFound = result.borderFound,
@@ -410,8 +462,36 @@ fun V6StaticScreen(
                             pv.outputTransform?.let { V6PreviewOverlayMapper.map(result, sourceTransform, it) }
                         } else null
 
+                        // ── V7 metrics update ──────────────────────────
+                        val vr = v7Result
+                        if (vr != null && scannerMode == ScannerMode.V7_CAPACITY_LAB) {
+                            v7LastMetrics = vr.metrics
+                            v7ExpectedFrame = vr.expectedFrameIndex
+                            v7CalibrationLabel = vr.calibrationStatus
+                            v7FrameCount++
+                            v7AnalysisMs = vr.metrics?.totalAnalysisUs?.div(1000.0) ?: 0.0
+                            // Camera FPS from sensor timestamp delta
+                            if (result.detectorStartNs > 0 && result.detectorEndNs > 0) {
+                                val v7Rec = v7Receiver
+                                if (v7Rec != null) {
+                                    v7CameraFps = if (v7Rec.timing.totalAnalysisUs > 0)
+                                        1_000_000.0 / v7Rec.timing.totalAnalysisUs.toDouble() else 0.0
+                                }
+                            }
+                            // Confidence summary from first 100 cells
+                            val r = v7Receiver
+                            if (r != null && r.classifier.bestSymbols.isNotEmpty()) {
+                                val margins = (0 until minOf(100, r.gridSize * r.gridSize)).map {
+                                    r.classifier.confidenceMargin(it)
+                                }.filter { it > 0.0 }
+                                v7ConfidenceSummary = if (margins.isNotEmpty())
+                                    "μ=%.3f".format(margins.average()) else "—"
+                            }
+                        }
+
+                        // ── V6 transport (V6_RECEIVE mode only) ────────
                         val frame = result.transportFrame
-                        if (frame != null && completedTransfer == null) {
+                        if (scannerMode == ScannerMode.V6_RECEIVE && frame != null && completedTransfer == null) {
                             try {
                                 val pre = V6TransferStatsCollector.AccPreState(
                                     accumulator.getUniqueFrames(), accumulator.getDuplicateCount(),
@@ -552,10 +632,74 @@ fun V6StaticScreen(
     if (scannerState == V6ScannerState.IDLE || scannerState == V6ScannerState.ERROR) {
         Box(modifier = modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("V6 Scanner", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                Text("SuperQR Scanner", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                 if (scannerState == V6ScannerState.ERROR) {
                     Text("Camera binding failed", color = Color(0xFFF38BA8), fontSize = 14.sp)
                 }
+
+                // Mode selector
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = scannerMode == ScannerMode.V6_RECEIVE,
+                        onClick = { scannerMode = ScannerMode.V6_RECEIVE },
+                        label = { Text("V6 Receive", fontSize = 12.sp) },
+                    )
+                    FilterChip(
+                        selected = scannerMode == ScannerMode.V7_CAPACITY_LAB,
+                        onClick = { scannerMode = ScannerMode.V7_CAPACITY_LAB },
+                        label = { Text("V7 Capacity Lab", fontSize = 12.sp) },
+                    )
+                }
+
+                // V7 profile selector (only in V7 mode)
+                if (scannerMode == ScannerMode.V7_CAPACITY_LAB) {
+                    var expanded by remember { mutableStateOf(false) }
+                    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+                        OutlinedTextField(
+                            value = v7ProfileName.takeLast(35),
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Profile") },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedLabelColor = Color(0xFF89B4FA),
+                                unfocusedLabelColor = Color.White.copy(alpha = 0.6f),
+                                focusedBorderColor = Color(0xFF89B4FA),
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
+                            ),
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                            modifier = Modifier.menuAnchor().fillMaxWidth(),
+                        )
+                        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            v7Manifest?.referenceProfiles?.keys?.forEach { name ->
+                                DropdownMenuItem(
+                                    text = {
+                                        val p = v7Manifest?.referenceProfiles?.get(name)
+                                        val label = if (p != null) "${p.gridSize}x${p.gridSize} ${p.paletteName}" else name
+                                        Text(label, fontSize = 11.sp)
+                                    },
+                                    onClick = { v7ProfileName = name; expanded = false },
+                                )
+                            }
+                        }
+                    }
+
+                    // Sampler mode
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = v7SamplerMode == V7HighDensitySampler.ProbeMode.CENTER_1,
+                            onClick = { v7SamplerMode = V7HighDensitySampler.ProbeMode.CENTER_1 },
+                            label = { Text("CENTER_1", fontSize = 10.sp) },
+                        )
+                        FilterChip(
+                            selected = v7SamplerMode == V7HighDensitySampler.ProbeMode.CROSS_5,
+                            onClick = { v7SamplerMode = V7HighDensitySampler.ProbeMode.CROSS_5 },
+                            label = { Text("CROSS_5", fontSize = 10.sp) },
+                        )
+                    }
+                }
+
                 Button(onClick = { doStartScan() }) {
                     Text("START SCAN", fontSize = 18.sp, fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 32.dp, vertical = 12.dp))
@@ -651,7 +795,7 @@ fun V6StaticScreen(
                 if (onBack != null) {
                     TextButton(onClick = onBack) { Text("‹", color = Color.White, fontSize = 28.sp) }
                 }
-                Text("V6 Scanner", color = Color.White, fontWeight = FontWeight.Bold)
+                Text(if (scannerMode == ScannerMode.V6_RECEIVE) "V6 Scanner" else "V7 Capacity Lab", color = Color.White, fontWeight = FontWeight.Bold)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatusPill(
@@ -700,6 +844,25 @@ fun V6StaticScreen(
                 selectedTab = labTab,
                 onTabSelected = { labTab = it },
                 onClose = { showLab = false },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(12.dp),
+            )
+        } else if (scannerMode == ScannerMode.V7_CAPACITY_LAB) {
+            V7MetricsCard(
+                result = result,
+                v7LastMetrics = v7LastMetrics,
+                v7ProfileName = v7ProfileName,
+                v7ExpectedFrame = v7ExpectedFrame,
+                v7CalibrationLabel = v7CalibrationLabel,
+                v7ConfidenceSummary = v7ConfidenceSummary,
+                v7SamplerMode = v7SamplerMode,
+                cameraBindingState = cameraBindingState,
+                frameCount = v7FrameCount,
+                v7AnalysisMs = v7AnalysisMs,
+                v7CameraFps = v7CameraFps,
+                v7Receiver = v7Receiver,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
@@ -1057,5 +1220,120 @@ private fun buildCompactDiagnosticReport(
     appendLine("--- LOGS ---")
     logger.getLogs().takeLast(40).forEach { log ->
         appendLine("[${log.timestamp}] ${log.level}/${log.category}: ${log.message}")
+    }
+}
+
+@Composable
+private fun V7MetricsCard(
+    result: V6StaticResult?,
+    v7LastMetrics: V7ChannelMetrics.FrameMetrics?,
+    v7ProfileName: String,
+    v7ExpectedFrame: Int,
+    v7CalibrationLabel: String,
+    v7ConfidenceSummary: String,
+    v7SamplerMode: V7HighDensitySampler.ProbeMode,
+    cameraBindingState: String,
+    frameCount: Int,
+    v7AnalysisMs: Double,
+    v7CameraFps: Double,
+    v7Receiver: V7CapacityLabReceiver?,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.85f)),
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            // Row 1: profile + state
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    "V7 Lab: ${v7ProfileName.takeLast(30)}",
+                    color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold
+                )
+                val state = result?.trackingState ?: "—"
+                val stateColor = when (state) {
+                    "TRACKING", "LOCKED" -> Color(0xFF4CAF50)
+                    "ACQUIRING", "REACQUIRING" -> Color(0xFFFFB74D)
+                    else -> Color.White.copy(alpha = 0.6f)
+                }
+                Text(state, color = stateColor, fontSize = 10.sp)
+            }
+
+            // Row 2: cal + sampler + cam
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Cal: $v7CalibrationLabel | $v7SamplerMode", color = Color.White.copy(alpha = 0.7f), fontSize = 9.sp)
+                Text("Cam: ${"%.1f".format(v7CameraFps)} fps", color = Color.White.copy(alpha = 0.7f), fontSize = 9.sp)
+            }
+
+            // Row 3: expected frame + analysis ms + frame count
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Exp frame: $v7ExpectedFrame", color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp)
+                Text("${"%.1f".format(v7AnalysisMs)} ms", color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp)
+                Text("#$frameCount", color = Color.White.copy(alpha = 0.5f), fontSize = 9.sp)
+            }
+
+            // Row 4: Error metrics
+            val m = v7LastMetrics
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    "SER: ${if (m != null) "%.1f%%".format(m.serAll * 100) else "—"}",
+                    color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "C-SER: ${if (m != null && !m.conditionalSer.isNaN()) "%.1f%%".format(m.conditionalSer * 100) else "—"}",
+                    color = Color.White, fontSize = 10.sp
+                )
+                Text(
+                    "BER: ${if (m != null && !m.berAccepted.isNaN()) "%.3f".format(m.berAccepted) else "—"}",
+                    color = Color.White, fontSize = 10.sp
+                )
+            }
+
+            // Row 5: erasure + confidence + accuracy
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    "Era: ${if (m != null) "%.1f%%".format(m.erasureRate * 100) else "—"}",
+                    color = if (m != null && m.erasureRate > 0.3) Color(0xFFFFB74D) else Color.White,
+                    fontSize = 10.sp
+                )
+                Text("Conf: $v7ConfidenceSummary", color = Color.White.copy(alpha = 0.7f), fontSize = 9.sp)
+                Text(
+                    "Acc: ${if (m != null) "${m.correctSymbols}/${m.totalCells}" else "—"}",
+                    color = Color.White.copy(alpha = 0.7f), fontSize = 9.sp
+                )
+            }
+
+            // Buttons
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        v7Receiver?.retreatExpectedFrame()
+                        v7Receiver?.let { rec -> /* update tracked state */ }
+                    },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp),
+                ) { Text("◀", fontSize = 10.sp) }
+                OutlinedButton(
+                    onClick = {
+                        v7Receiver?.advanceExpectedFrame()
+                    },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp),
+                ) { Text("▶", fontSize = 10.sp) }
+                OutlinedButton(
+                    onClick = {
+                        v7Receiver?.resetExpectedFrame()
+                    },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp),
+                ) { Text("RstIdx", fontSize = 8.sp) }
+                OutlinedButton(
+                    onClick = { v7Receiver?.resetCalibration() },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp),
+                ) { Text("RstCal", fontSize = 8.sp) }
+            }
+        }
     }
 }
