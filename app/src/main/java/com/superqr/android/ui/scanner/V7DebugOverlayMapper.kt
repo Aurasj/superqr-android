@@ -12,7 +12,6 @@ import com.superqr.android.vision.v7_capacity_lab.V7HighDensitySampler
 import com.superqr.android.vision.v7_capacity_lab.V7SoftClassifier
 import kotlin.math.abs
 
-/** Debug overlays shown on top of the real CameraX PreviewView. */
 enum class V7DebugOverlayMode { LIVE, GRID, SAMPLES, CLASSIFY, TRANSPORT }
 
 data class V7DebugOverlayGeometry(
@@ -25,11 +24,7 @@ data class V7DebugOverlayGeometry(
     val headerPoints: List<Offset> = emptyList(),
 )
 
-/**
- * Builds debug geometry from the exact production canonical payload bbox,
- * homography, rectangular grid pitch and CROSS_5 offsets. In SAMPLES mode each
- * individual physical probe is colored from its own validity bit.
- */
+/** Debug geometry generated from the exact production bbox/homography/probe spacing. */
 object V7DebugOverlayMapper {
     fun map(
         result: V6StaticResult,
@@ -70,8 +65,8 @@ object V7DebugOverlayMapper {
         val bySymbol = MutableList(profile.colorCount) { ArrayList<Offset>() }
         val header = ArrayList<Offset>()
         val headerCells = (V7Transport.HEADER_SIZE * 8 + profile.bitsPerCell - 1) / profile.bitsPerCell
-        val ox = cellW * 0.15 / 2.0
-        val oy = cellH * 0.15 / 2.0
+        val ox = cellW * V7HighDensitySampler.CROSS_OFFSET_FRACTION
+        val oy = cellH * V7HighDensitySampler.CROSS_OFFSET_FRACTION
         val stabilizedSymbols = snapshot.stabilizedSymbols
 
         for (idx in 0 until profile.cellCount) {
