@@ -21,7 +21,51 @@ object V7Transport {
     private val FRAME_MAGIC = byteArrayOf('S'.code.toByte(), 'Q'.code.toByte())
     private val PACKAGE_MAGIC = byteArrayOf('S'.code.toByte(), 'Q'.code.toByte(), 'P'.code.toByte(), '7'.code.toByte())
 
-    fun symbolsToBytes(symbols: ByteArray, profile: V7OpticalProfile): ByteArray? {
+    fun buildFrame(
+        sessionId: Int,
+        frameId: Int,
+        totalFrames: Int,
+        payload: ByteArray,
+        profile: V7OpticalProfile = baseline,
+    ): ByteArray {
+        require(sessionId in 1..0xFFFF)
+        require(totalFrames >= 1)
+        require(frameId in 0 until totalFrames)
+        require(payload.size <= profile.payloadSize)
+        val out = ByteArray(profile.frameSize)
+        val buf = ByteBuffer.wrap(out)
+        buf.put(FRAME_MAGIC)
+        buf.put(VERSION.toByte())
+        buf.put(profile.id.toByte())
+        buf.putShort(sessionId.toShort())
+        buf.putInt(frameId)
+        buf.putInt(totalFrames)
+        buf.putShort(payload.size.toShort())
+        buf.put(payload)
+        while (buf.position() < profile.frameSize - CRC_SIZE) buf.put(0)
+        val crc = CRC32().apply { update(out, 0, profile.frameSize - CRC_SIZE) }.value
+        buf.putInt(crc.toInt())
+        return out
+    }
+
+    fun bytesToSymbols(bytes: ByteArray, profile: V7OpticalProfile = baseline): ByteArray {
+        require(bytes.size == profile.frameSize)
+        val out = ByteArray(profile.cellCount)
+        var bitPos = 0
+        for (i in 0 until profile.cellCount) {
+            var value = 0
+            repeat(profile.bitsPerCell) {
+                val byteIdx = bitPos shr 3
+                val shift = 7 - (bitPos and 7)
+                value = (value shl 1) or ((bytes[byteIdx].toInt() ushr shift) and 1)
+                bitPos++
+            }
+            out[i] = value.toByte()
+        }
+        return out
+    }
+
+    fun symbolsToBytes(symbols: ByteArray, profile: V7OpticalProfile = baseline): ByteArray? {
         if (symbols.size != profile.cellCount) return null
         val out = ByteArray(profile.frameSize)
         var bitPos = 0
