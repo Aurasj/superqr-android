@@ -51,6 +51,7 @@ data class V7DebugSnapshot(
     val calibrationCenters: Array<IntArray>,
     val maxDistanceThreshold: Int,
     val marginThreshold: Double,
+    val channelWeights: IntArray,
     val finalInvHomography: DoubleArray,
     val transport: V7TransportDiagnostics,
 )
@@ -58,10 +59,11 @@ data class V7DebugSnapshot(
 /**
  * Production adaptive V7 payload decoder.
  *
- * Carrier acquisition/tracking remains the proven V6 detector. After geometry
- * lock, four monochrome header cells announce the active V7 optical profile.
- * The payload decoder then performs rectangular-grid sampling, soft decisions,
- * explicit erasures, header-first inspection and CRC-gated temporal recovery.
+ * Carrier acquisition/tracking remains the proven V6 detector. Dense payload
+ * classification is tuned for CameraX YUV_420: spatially lower-resolution
+ * chroma is de-emphasized for the 4-color production alphabet, CROSS_5 samples
+ * distinct chroma locations, and very-high-confidence payload cells gently
+ * refine the pilot-derived camera-space palette centers.
  */
 class V7TransferReceiver {
     val sampler = V7HighDensitySampler()
@@ -118,7 +120,14 @@ class V7TransferReceiver {
         activeProfile = profile
         sampler.setGridSize(profile.grid, V7OpticalProfiles.payloadBbox)
         calibrator = V7Calibrator(profile.colorCount)
-        classifier = V7SoftClassifier().also { it.setCellCount(profile.cellCount) }
+        classifier = V7SoftClassifier().also {
+            it.setCellCount(profile.cellCount)
+            // 4:2:0 chroma has half spatial resolution on each axis. The four-color
+            // alphabet has strong luma separation, so favor the full-resolution Y
+            // channel. Eight colors still need substantially more chroma influence.
+            if (profile.colorCount == 4) it.setChannelWeights(10, 1, 1)
+            else it.setChannelWeights(4, 2, 2)
+        }
         temporal.reset()
         lastDebugSnapshotNs = 0L
     }
@@ -168,18 +177,23 @@ class V7TransferReceiver {
         }
 
         val tc0 = System.nanoTime()
-        val calibrationCenters = calibrator.getCentersSnapshot()
+        var calibrationCenters = calibrator.getCentersSnapshot()
         classifier.setCenters(calibrationCenters)
         val y = if (probeMode == V7HighDensitySampler.ProbeMode.CENTER_1) sampler.getYCenters() else sampler.getYCross5()
         val u = if (probeMode == V7HighDensitySampler.ProbeMode.CENTER_1) sampler.getUCenters() else sampler.getUCross5()
         val v = if (probeMode == V7HighDensitySampler.ProbeMode.CENTER_1) sampler.getVCenters() else sampler.getVCross5()
-        classifier.classify(y, u, v, activeProfile.cellCount)
-
-        // A projected cell with insufficient real YUV probes is an explicit
-        // erasure even if neutral fallback values happen to be near a palette.
         val validMask = sampler.getValidMask()
-        for (i in 0 until activeProfile.cellCount) {
-            if (validMask[i].toInt() == 0) classifier.bestSymbols[i] = V7SoftClassifier.ERASURE_MARKER
+
+        classifyAndApplyPhysicalMask(y, u, v, validMask)
+
+        // Pilots live above the payload. Display/camera angle, moire and chroma
+        // subsampling can shift payload-space centers slightly. Use only extremely
+        // confident payload observations to perform one gentle online k-means step,
+        // then reclassify this same optical frame with the refined centers.
+        if (refinePayloadCalibration(y, u, v, validMask)) {
+            calibrationCenters = calibrator.getCentersSnapshot()
+            classifier.setCenters(calibrationCenters)
+            classifyAndApplyPhysicalMask(y, u, v, validMask)
         }
         val classificationUs = (System.nanoTime() - tc0) / 1000
 
@@ -315,6 +329,7 @@ class V7TransferReceiver {
                 calibrationCenters = calibrationCenters.map { it.copyOf() }.toTypedArray(),
                 maxDistanceThreshold = classifier.maxDistanceThreshold,
                 marginThreshold = classifier.marginThreshold,
+                channelWeights = intArrayOf(classifier.yWeight, classifier.uWeight, classifier.vWeight),
                 finalInvHomography = hInv.copyOf(),
                 transport = transport,
             )
@@ -327,6 +342,64 @@ class V7TransferReceiver {
             accepted, rejection, transport, debugSnapshot,
             Timing(profileUs, samplingUs, classificationUs, transportUs, (System.nanoTime() - t0) / 1000)
         )
+    }
+
+    private fun classifyAndApplyPhysicalMask(
+        y: IntArray,
+        u: IntArray,
+        v: IntArray,
+        validMask: ByteArray,
+    ) {
+        classifier.classify(y, u, v, activeProfile.cellCount)
+        for (i in 0 until activeProfile.cellCount) {
+            if (validMask[i].toInt() == 0) classifier.bestSymbols[i] = V7SoftClassifier.ERASURE_MARKER
+        }
+    }
+
+    /**
+     * Online payload-space center refinement. This deliberately accepts only a
+     * small, very-high-confidence subset so it cannot chase ambiguous cells.
+     */
+    private fun refinePayloadCalibration(
+        y: IntArray,
+        u: IntArray,
+        v: IntArray,
+        validMask: ByteArray,
+    ): Boolean {
+        val colors = activeProfile.colorCount
+        val sumY = LongArray(colors)
+        val sumU = LongArray(colors)
+        val sumV = LongArray(colors)
+        val counts = IntArray(colors)
+
+        for (i in 0 until activeProfile.cellCount) {
+            if (validMask[i].toInt() == 0) continue
+            val symbol = classifier.bestSymbols[i].toInt()
+            if (symbol !in 0 until colors) continue
+            val best = classifier.bestDistances[i]
+            val second = classifier.secondBestDistances[i]
+            if (best > PAYLOAD_REFINE_MAX_DISTANCE || second <= 0 || second == Int.MAX_VALUE) continue
+            if (best.toDouble() / second.toDouble() > PAYLOAD_REFINE_MAX_RATIO) continue
+            sumY[symbol] += y[i].toLong()
+            sumU[symbol] += u[i].toLong()
+            sumV[symbol] += v[i].toLong()
+            counts[symbol]++
+        }
+
+        var updated = false
+        for (s in 0 until colors) {
+            val n = counts[s]
+            if (n < PAYLOAD_REFINE_MIN_SAMPLES) continue
+            calibrator.updateCenterEMA(
+                s,
+                (sumY[s] / n).toInt(),
+                (sumU[s] / n).toInt(),
+                (sumV[s] / n).toInt(),
+                alpha = PAYLOAD_REFINE_ALPHA,
+            )
+            updated = true
+        }
+        return updated
     }
 
     private fun inspectCrc(bytes: ByteArray): Pair<Long, Long> {
@@ -405,5 +478,12 @@ class V7TransferReceiver {
         val uv = IntArray(2)
         if (chromaReader == null || !chromaReader.read(x, y, uv)) return null
         return intArrayOf(yy, uv[0], uv[1])
+    }
+
+    companion object {
+        private const val PAYLOAD_REFINE_MAX_DISTANCE = 12000
+        private const val PAYLOAD_REFINE_MAX_RATIO = 0.35
+        private const val PAYLOAD_REFINE_MIN_SAMPLES = 24
+        private const val PAYLOAD_REFINE_ALPHA = 0.10
     }
 }
