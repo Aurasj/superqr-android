@@ -6,8 +6,8 @@ import kotlin.math.roundToInt
 /**
  * Allocation-light high-density sampler used by production V7 and Capacity Lab.
  *
- * Important: payloads may be rectangular. X and Y cell pitch are therefore
- * computed independently and CROSS_5 uses independent X/Y probe offsets.
+ * Payloads may be rectangular. X and Y cell pitch are therefore computed
+ * independently and CROSS_5 uses independent X/Y probe offsets.
  */
 class V7HighDensitySampler {
 
@@ -104,7 +104,10 @@ class V7HighDensitySampler {
             }
 
             sampleY[i] = lumaBytes[py * lumaWidth + px].toInt() and 0xFF
-            if (chromaReader != null && chromaReader.read(ix, iy, chromaBuf)) {
+            if (chromaReader == null) {
+                sampleU[i] = 128; sampleV[i] = 128
+                validMask[i] = 1; validCount++
+            } else if (chromaReader.read(ix, iy, chromaBuf)) {
                 sampleU[i] = chromaBuf[0]
                 sampleV[i] = chromaBuf[1]
                 validMask[i] = 1
@@ -151,21 +154,25 @@ class V7HighDensitySampler {
                 val inBounds = px in 0 until lumaWidth && py in 0 until lumaHeight
                 if (inBounds) probeY5[p] = lumaBytes[py * lumaWidth + px].toInt() and 0xFF else probeY5[p] = 128
 
-                if (inBounds && chromaReader != null && chromaReader.read(ix, iy, chromaBuf)) {
-                    probeU5[p] = chromaBuf[0]
-                    probeV5[p] = chromaBuf[1]
-                    probeValid5[p] = true
-                    validProbes++
-                } else {
-                    probeU5[p] = 128
-                    probeV5[p] = 128
-                    probeValid5[p] = false
+                when {
+                    !inBounds -> {
+                        probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = false
+                    }
+                    chromaReader == null -> {
+                        probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = true; validProbes++
+                    }
+                    chromaReader.read(ix, iy, chromaBuf) -> {
+                        probeU5[p] = chromaBuf[0]
+                        probeV5[p] = chromaBuf[1]
+                        probeValid5[p] = true
+                        validProbes++
+                    }
+                    else -> {
+                        probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = false
+                    }
                 }
             }
 
-            // CROSS_5 is considered usable when a majority of the actual probes
-            // are valid. This prevents synthetic 128 chroma values from being
-            // mistaken for confident optical symbols.
             if (validProbes >= 3) {
                 sample5Y[i] = medianValid5(probeY5, probeValid5)
                 sample5U[i] = medianValid5(probeU5, probeValid5)
@@ -222,10 +229,10 @@ class V7HighDensitySampler {
             var n = 0
             for (i in 0 until 5) if (valid[i]) tmp[n++] = values[i]
             for (i in 1 until n) {
-                val v = tmp[i]
+                val value = tmp[i]
                 var j = i - 1
-                while (j >= 0 && tmp[j] > v) { tmp[j + 1] = tmp[j]; j-- }
-                tmp[j + 1] = v
+                while (j >= 0 && tmp[j] > value) { tmp[j + 1] = tmp[j]; j-- }
+                tmp[j + 1] = value
             }
             return tmp[n / 2]
         }
