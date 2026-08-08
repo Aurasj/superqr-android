@@ -26,8 +26,9 @@ data class V7DebugOverlayGeometry(
 )
 
 /**
- * Builds the debug geometry from the same canonical payload bbox, homography,
- * grid pitch and CROSS_5 offsets used by the production sampler.
+ * Builds debug geometry from the exact production canonical payload bbox,
+ * homography, rectangular grid pitch and CROSS_5 offsets. In SAMPLES mode each
+ * individual physical probe is colored from its own validity bit.
  */
 object V7DebugOverlayMapper {
     fun map(
@@ -80,12 +81,13 @@ object V7DebugOverlayMapper {
             val center = mapCanonical(h, transform, cx, cy) ?: continue
 
             val symbol = snapshot.symbols[idx].toInt()
-            val valid = snapshot.validMask.getOrNull(idx)?.toInt() == 1
+            val cellValid = snapshot.validMask.getOrNull(idx)?.toInt() == 1
+            val probeMask = snapshot.probeValidityMask.getOrNull(idx)?.toInt()?.and(0xFF) ?: 0
             val best = snapshot.bestDistances.getOrNull(idx) ?: Int.MAX_VALUE
             val second = snapshot.secondBestDistances.getOrNull(idx) ?: Int.MAX_VALUE
             val ratio = if (second in 1 until Int.MAX_VALUE) best.toDouble() / second.toDouble() else 1.0
-            val isErased = !valid || symbol == V7SoftClassifier.ERASURE_MARKER.toInt()
-            val isLow = !isErased && (ratio > 0.72 || best > 28_000)
+            val cellErased = !cellValid || symbol == V7SoftClassifier.ERASURE_MARKER.toInt()
+            val cellLow = !cellErased && (ratio > 0.72 || best > 28_000)
 
             if (idx < headerCells) header.add(center)
             if (symbol in 0 until profile.colorCount) bySymbol[symbol].add(center)
@@ -94,13 +96,12 @@ object V7DebugOverlayMapper {
                 if (stable in 0 until profile.colorCount) recovered.add(center)
             }
 
-            val pointBucket = when {
-                isErased -> erased
-                isLow -> low
-                else -> good
-            }
             if (snapshot.probeMode == V7HighDensitySampler.ProbeMode.CENTER_1) {
-                pointBucket.add(center)
+                when {
+                    (probeMask and 0x01) == 0 || cellErased -> erased.add(center)
+                    cellLow -> low.add(center)
+                    else -> good.add(center)
+                }
             } else {
                 val probes = arrayOf(
                     0.0 to 0.0,
@@ -109,8 +110,15 @@ object V7DebugOverlayMapper {
                     -ox to oy,
                     ox to oy,
                 )
-                for ((dx, dy) in probes) {
-                    mapCanonical(h, transform, cx + dx, cy + dy)?.let { pointBucket.add(it) }
+                probes.forEachIndexed { p, (dx, dy) ->
+                    val point = mapCanonical(h, transform, cx + dx, cy + dy) ?: return@forEachIndexed
+                    val physicalProbeValid = (probeMask and (1 shl p)) != 0
+                    when {
+                        !physicalProbeValid -> erased.add(point)
+                        cellErased -> erased.add(point)
+                        cellLow -> low.add(point)
+                        else -> good.add(point)
+                    }
                 }
             }
         }
