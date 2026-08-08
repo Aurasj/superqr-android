@@ -47,6 +47,7 @@ import androidx.lifecycle.LifecycleOwner
 import com.superqr.android.camera.ChromaSampleBuffers
 import com.superqr.android.camera.ImageProxyChromaSampler
 import com.superqr.android.camera.LumaFrameBuffer
+import com.superqr.android.camera.V7AnalysisRateAccumulator
 import com.superqr.android.vision.v7_capacity_lab.V7CapacityLabReceiver
 import com.superqr.android.vision.v7_capacity_lab.V7ChannelMetrics
 import com.superqr.android.vision.v7_capacity_lab.V7HighDensitySampler
@@ -84,7 +85,7 @@ private data class CompletedUiTransfer(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun V6StaticScreen(
+fun SuperQRScannerScreen(
     analysisExecutor: ExecutorService = remember { Executors.newSingleThreadExecutor() },
     lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
     modifier: Modifier = Modifier,
@@ -146,6 +147,9 @@ fun V6StaticScreen(
     var v7FrameCount by remember { mutableIntStateOf(0) }
     var v7AnalysisMs by remember { mutableDoubleStateOf(0.0) }
     var v7CameraFps by remember { mutableDoubleStateOf(0.0) }
+    var v7LastSensorTs by remember { mutableLongStateOf(0L) }
+    var v7AnalysisFps by remember { mutableDoubleStateOf(0.0) }
+    val v7AnalysisRateAccum = remember { V7AnalysisRateAccumulator(64) }
 
     // Load V7 manifest
     LaunchedEffect(Unit) {
@@ -223,6 +227,7 @@ fun V6StaticScreen(
         v7LastMetrics = null
         v7CalibrationLabel = "—"
         v7ConfidenceSummary = "—"
+        v7AnalysisRateAccum.reset()
         // Initialize V7 receiver if in V7 mode
         if (scannerMode == ScannerMode.V7_CAPACITY_LAB && v7Manifest != null) {
             val rec = V7CapacityLabReceiver(v7Manifest!!)
@@ -249,6 +254,8 @@ fun V6StaticScreen(
             //    are already frozen before this call by the completion path).
             currentResult = null
             previewGeometry = null
+            v7AnalysisFps = 0.0
+            v7AnalysisRateAccum.reset()
 
             // 4. Unbind CameraX session on the main thread (we are on main).
             val provider = try { ProcessCameraProvider.getInstance(context).get() } catch (_: Throwable) { null }
@@ -382,6 +389,7 @@ fun V6StaticScreen(
 
                     // ── V7 Capacity Lab payload analysis ──────────────
                     val v7Recv = v7Receiver
+                    val v7SensorTs = sensorTs
                     val v7Result = if (v7Recv != null && result.borderFound && result.orientationResolved) {
                         val lumaW = lumaBuffer.width
                         val lumaH = lumaBuffer.height
@@ -470,14 +478,16 @@ fun V6StaticScreen(
                             v7CalibrationLabel = vr.calibrationStatus
                             v7FrameCount++
                             v7AnalysisMs = vr.metrics?.totalAnalysisUs?.div(1000.0) ?: 0.0
-                            // Camera FPS from sensor timestamp delta
-                            if (result.detectorStartNs > 0 && result.detectorEndNs > 0) {
-                                val v7Rec = v7Receiver
-                                if (v7Rec != null) {
-                                    v7CameraFps = if (v7Rec.timing.totalAnalysisUs > 0)
-                                        1_000_000.0 / v7Rec.timing.totalAnalysisUs.toDouble() else 0.0
+                            v7AnalysisRateAccum.recordCompletion(System.nanoTime())
+                            v7AnalysisFps = v7AnalysisRateAccum.computeFps()
+                            // Real camera delivered FPS from ImageProxy sensor timestamp delta
+                            if (v7LastSensorTs > 0L) {
+                                val deltaSec = (v7SensorTs - v7LastSensorTs) / 1_000_000_000.0
+                                if (deltaSec > 0.0) {
+                                    v7CameraFps = 1.0 / deltaSec
                                 }
                             }
+                            v7LastSensorTs = v7SensorTs
                             // Confidence summary from first 100 cells
                             val r = v7Receiver
                             if (r != null && r.classifier.bestSymbols.isNotEmpty()) {
@@ -780,6 +790,7 @@ fun V6StaticScreen(
             guidance = guidance,
             guidanceColor = guidanceColor,
             cameraAligned = cameraBindingState == "WYSIWYG",
+            showDataGrid = scannerMode != ScannerMode.V7_CAPACITY_LAB,
             modifier = Modifier.fillMaxSize(),
         )
 
@@ -850,7 +861,7 @@ fun V6StaticScreen(
                     .padding(12.dp),
             )
         } else if (scannerMode == ScannerMode.V7_CAPACITY_LAB) {
-            V7MetricsCard(
+            V7ScannerPanel(
                 result = result,
                 v7LastMetrics = v7LastMetrics,
                 v7ProfileName = v7ProfileName,
@@ -858,10 +869,10 @@ fun V6StaticScreen(
                 v7CalibrationLabel = v7CalibrationLabel,
                 v7ConfidenceSummary = v7ConfidenceSummary,
                 v7SamplerMode = v7SamplerMode,
-                cameraBindingState = cameraBindingState,
                 frameCount = v7FrameCount,
                 v7AnalysisMs = v7AnalysisMs,
                 v7CameraFps = v7CameraFps,
+                v7AnalysisFps = v7AnalysisFps,
                 v7Receiver = v7Receiver,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -888,6 +899,7 @@ private fun ScannerOverlay(
     guidance: String,
     guidanceColor: Color,
     cameraAligned: Boolean,
+    showDataGrid: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier) {
@@ -922,13 +934,16 @@ private fun ScannerOverlay(
                     )
                 }
 
-                // 20x20 data matrix projected with the detector's exact canonical
-                // homography, then CameraX's exact ImageAnalysis->Preview transform.
-                if (g.isFresh) {
+                // V6 20x20 payload grid — only shown in V6 mode.
+                // In V7 mode the grid is misleading (V7 uses different cell count).
+                if (g.isFresh && showDataGrid) {
                     val gridColor = Color(0xFF00E676).copy(alpha = 0.32f)
                     for ((a, b) in g.gridSegments) {
                         drawLine(gridColor, a, b, 0.8.dp.toPx())
                     }
+                }
+                // Pilot dots always shown.
+                if (g.isFresh) {
                     for (pilot in g.pilotPoints) {
                         drawCircle(Color.Magenta.copy(alpha = 0.9f), 3.dp.toPx(), pilot)
                     }
@@ -1223,117 +1238,15 @@ private fun buildCompactDiagnosticReport(
     }
 }
 
+@Deprecated(
+    "Use SuperQRScannerScreen instead. V6StaticScreen is a backward-compatible alias.",
+    ReplaceWith("SuperQRScannerScreen(analysisExecutor, lifecycleOwner, modifier, onBack, diagnosticLogger)")
+)
 @Composable
-private fun V7MetricsCard(
-    result: V6StaticResult?,
-    v7LastMetrics: V7ChannelMetrics.FrameMetrics?,
-    v7ProfileName: String,
-    v7ExpectedFrame: Int,
-    v7CalibrationLabel: String,
-    v7ConfidenceSummary: String,
-    v7SamplerMode: V7HighDensitySampler.ProbeMode,
-    cameraBindingState: String,
-    frameCount: Int,
-    v7AnalysisMs: Double,
-    v7CameraFps: Double,
-    v7Receiver: V7CapacityLabReceiver?,
+fun V6StaticScreen(
+    analysisExecutor: ExecutorService = remember { Executors.newSingleThreadExecutor() },
+    lifecycleOwner: LifecycleOwner = LocalLifecycleOwner.current,
     modifier: Modifier = Modifier,
-) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.85f)),
-        shape = RoundedCornerShape(14.dp),
-    ) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            // Row 1: profile + state
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(
-                    "V7 Lab: ${v7ProfileName.takeLast(30)}",
-                    color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold
-                )
-                val state = result?.trackingState ?: "—"
-                val stateColor = when (state) {
-                    "TRACKING", "LOCKED" -> Color(0xFF4CAF50)
-                    "ACQUIRING", "REACQUIRING" -> Color(0xFFFFB74D)
-                    else -> Color.White.copy(alpha = 0.6f)
-                }
-                Text(state, color = stateColor, fontSize = 10.sp)
-            }
-
-            // Row 2: cal + sampler + cam
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Cal: $v7CalibrationLabel | $v7SamplerMode", color = Color.White.copy(alpha = 0.7f), fontSize = 9.sp)
-                Text("Cam: ${"%.1f".format(v7CameraFps)} fps", color = Color.White.copy(alpha = 0.7f), fontSize = 9.sp)
-            }
-
-            // Row 3: expected frame + analysis ms + frame count
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Exp frame: $v7ExpectedFrame", color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp)
-                Text("${"%.1f".format(v7AnalysisMs)} ms", color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp)
-                Text("#$frameCount", color = Color.White.copy(alpha = 0.5f), fontSize = 9.sp)
-            }
-
-            // Row 4: Error metrics
-            val m = v7LastMetrics
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(
-                    "SER: ${if (m != null) "%.1f%%".format(m.serAll * 100) else "—"}",
-                    color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold
-                )
-                Text(
-                    "C-SER: ${if (m != null && !m.conditionalSer.isNaN()) "%.1f%%".format(m.conditionalSer * 100) else "—"}",
-                    color = Color.White, fontSize = 10.sp
-                )
-                Text(
-                    "BER: ${if (m != null && !m.berAccepted.isNaN()) "%.3f".format(m.berAccepted) else "—"}",
-                    color = Color.White, fontSize = 10.sp
-                )
-            }
-
-            // Row 5: erasure + confidence + accuracy
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(
-                    "Era: ${if (m != null) "%.1f%%".format(m.erasureRate * 100) else "—"}",
-                    color = if (m != null && m.erasureRate > 0.3) Color(0xFFFFB74D) else Color.White,
-                    fontSize = 10.sp
-                )
-                Text("Conf: $v7ConfidenceSummary", color = Color.White.copy(alpha = 0.7f), fontSize = 9.sp)
-                Text(
-                    "Acc: ${if (m != null) "${m.correctSymbols}/${m.totalCells}" else "—"}",
-                    color = Color.White.copy(alpha = 0.7f), fontSize = 9.sp
-                )
-            }
-
-            // Buttons
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        v7Receiver?.retreatExpectedFrame()
-                        v7Receiver?.let { rec -> /* update tracked state */ }
-                    },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp),
-                ) { Text("◀", fontSize = 10.sp) }
-                OutlinedButton(
-                    onClick = {
-                        v7Receiver?.advanceExpectedFrame()
-                    },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp),
-                ) { Text("▶", fontSize = 10.sp) }
-                OutlinedButton(
-                    onClick = {
-                        v7Receiver?.resetExpectedFrame()
-                    },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp),
-                ) { Text("RstIdx", fontSize = 8.sp) }
-                OutlinedButton(
-                    onClick = { v7Receiver?.resetCalibration() },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp),
-                ) { Text("RstCal", fontSize = 8.sp) }
-            }
-        }
-    }
-}
+    onBack: (() -> Unit)? = null,
+    diagnosticLogger: V6DiagnosticLogger = remember { V6DiagnosticLogger() },
+) = SuperQRScannerScreen(analysisExecutor, lifecycleOwner, modifier, onBack, diagnosticLogger)
