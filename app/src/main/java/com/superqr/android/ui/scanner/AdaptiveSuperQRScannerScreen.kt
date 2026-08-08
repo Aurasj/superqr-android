@@ -92,6 +92,7 @@ fun AdaptiveSuperQRScannerScreen(
     var receiverRef by remember { mutableStateOf<V7TransferReceiver?>(null) }
     val generation = remember { AtomicInteger(0) }
     val accumulator = remember { V7SessionAccumulator() }
+    val debugHistory = remember { V7DebugHistory(512) }
 
     var result by remember { mutableStateOf<V6StaticResult?>(null) }
     var carrierOverlay by remember { mutableStateOf<V6PreviewOverlayGeometry?>(null) }
@@ -114,6 +115,7 @@ fun AdaptiveSuperQRScannerScreen(
     var headerInvalidCount by remember { mutableIntStateOf(0) }
     var packAttempts by remember { mutableIntStateOf(0) }
     var crcAttempts by remember { mutableIntStateOf(0) }
+    var crcCandidateAttempts by remember { mutableIntStateOf(0) }
     var crcPass by remember { mutableIntStateOf(0) }
     var crcFail by remember { mutableIntStateOf(0) }
     var parserRejects by remember { mutableIntStateOf(0) }
@@ -136,11 +138,12 @@ fun AdaptiveSuperQRScannerScreen(
     var frozenSnapshot by remember { mutableStateOf<V7DebugSnapshot?>(null) }
 
     fun resetLive() {
-        accumulator.reset(); result = null; carrierOverlay = null; debugOverlay = null; debugSnapshot = null; completed = null
+        accumulator.reset(); debugHistory.reset()
+        result = null; carrierOverlay = null; debugOverlay = null; debugSnapshot = null; completed = null
         activeProfile = V7OpticalProfiles.default; calibrated = 0; validSamples = 0; confidentCells = 0; erasures = 0
         lastFrame = -1; lastError = null; latestTransport = null
         analyzedFrames = 0; skippedErasures = 0; headerValidCount = 0; headerInvalidCount = 0; packAttempts = 0
-        crcAttempts = 0; crcPass = 0; crcFail = 0; parserRejects = 0; temporalRecoveredFrames = 0
+        crcAttempts = 0; crcCandidateAttempts = 0; crcPass = 0; crcFail = 0; parserRejects = 0; temporalRecoveredFrames = 0
         cameraFps = 0.0; analysisFps = 0.0; analysisMs = 0.0; lastSensorTs = 0L; rate.reset()
         frozenBitmap = null; frozenOverlay = null; frozenSnapshot = null
     }
@@ -174,7 +177,11 @@ fun AdaptiveSuperQRScannerScreen(
             future.addListener({ focusState = try { if (future.get().isFocusSuccessful) "LOCKED" else "FAILED" } catch (_: Throwable) { "FAILED" } }, mainExecutor)
         } catch (_: Throwable) { focusState = "FAILED" }
     }
-    fun unlockFocus() { try { boundCamera?.cameraControl?.cancelFocusAndMetering() } catch (_: Throwable) {}; focusState = "AUTO" }
+
+    fun unlockFocus() {
+        try { boundCamera?.cameraControl?.cancelFocusAndMetering() } catch (_: Throwable) {}
+        focusState = "AUTO"
+    }
 
     fun buildReport(): V7DebugExporter.Report = V7DebugExporter.Report(
         profile = activeProfile,
@@ -194,6 +201,7 @@ fun AdaptiveSuperQRScannerScreen(
         headerInvalid = headerInvalidCount,
         packAttempts = packAttempts,
         crcAttempts = crcAttempts,
+        crcCandidateAttempts = crcCandidateAttempts,
         crcPass = crcPass,
         crcFail = crcFail,
         parserRejects = parserRejects,
@@ -233,6 +241,11 @@ fun AdaptiveSuperQRScannerScreen(
         }
     }
 
+    fun clearOpticalOverlay() {
+        overlayMode = V7DebugOverlayMode.LIVE
+        frozenBitmap = null; frozenOverlay = null; frozenSnapshot = null
+    }
+
     fun exportDebugBundle() {
         val a = activity ?: return
         V7DebugExporter.captureWindow(a) { res ->
@@ -245,6 +258,8 @@ fun AdaptiveSuperQRScannerScreen(
                     previewBitmap = preview,
                     report = buildReport(),
                     snapshot = frozenSnapshot ?: debugSnapshot,
+                    events = debugHistory.snapshot(),
+                    frameSummaries = debugHistory.summaries(),
                 )
                 V7DebugExporter.shareFile(context, zip, "application/zip")
             } catch (t: Throwable) {
@@ -291,7 +306,7 @@ fun AdaptiveSuperQRScannerScreen(
                     val r = receiverRef ?: return@setAnalyzer
                     r.forcedProfileId = forcedProfile.takeIf { it >= 0 }
                     r.probeMode = samplerMode
-                    r.debugSnapshotEnabled = showDebug
+                    r.debugSnapshotEnabled = showDebug || overlayMode != V7DebugOverlayMode.LIVE || frozenBitmap != null
                     if (!luma.packFrom(image)) return@setAnalyzer
                     val chromaReader = ImageProxyChromaSampler(image, chroma)
                     val detected = d.detect(luma.bytes, luma.width, luma.height, "deterministic_random", chromaReader).copy(analyzerArrivalNs = arrival)
@@ -311,6 +326,7 @@ fun AdaptiveSuperQRScannerScreen(
                         analyzedFrames++
 
                         val td = decoded.transport
+                        debugHistory.record(analyzedFrames, decoded.profile, td, accepted)
                         if (td.headerAttempted) {
                             if (td.headerValid) headerValidCount++ else headerInvalidCount++
                         }
@@ -318,21 +334,28 @@ fun AdaptiveSuperQRScannerScreen(
                         if (td.packAttempted) packAttempts++
                         if (td.crcAttempted) {
                             crcAttempts++
+                            crcCandidateAttempts += td.crcCandidateAttempts
                             if (td.crcPassed) crcPass++
                             else if (td.rejectionReason?.contains("CRC32", ignoreCase = true) == true) crcFail++
                             else parserRejects++
                         }
-                        if (td.crcPassed && (td.temporalFilledCells > 0 || td.temporalOverriddenCells > 0)) temporalRecoveredFrames++
+                        if (td.crcPassed && td.candidatePassed?.startsWith("TEMPORAL") == true) temporalRecoveredFrames++
                         if (accepted != null) { lastFrame = accepted.frameId; lastError = null }
                         else lastError = td.rejectionReason
 
                         if (lastSensorTs > 0L) {
                             val delta = (sensorTs - lastSensorTs) / 1_000_000_000.0
-                            if (delta > 0) cameraFps = 1.0 / delta
+                            if (delta > 0) {
+                                val instant = 1.0 / delta
+                                cameraFps = if (cameraFps <= 0.0) instant else cameraFps * 0.85 + instant * 0.15
+                            }
                         }
-                        lastSensorTs = sensorTs; rate.recordCompletion(System.nanoTime()); analysisFps = rate.computeFps()
+                        lastSensorTs = sensorTs
+                        rate.recordCompletion(System.nanoTime())
+                        analysisFps = rate.computeFps()
 
-                        if (showDebug && frozenBitmap == null && sourceTx != null && decoded.debugSnapshot != null) {
+                        val opticalDebugActive = showDebug || overlayMode != V7DebugOverlayMode.LIVE
+                        if (opticalDebugActive && frozenBitmap == null && sourceTx != null && decoded.debugSnapshot != null) {
                             val target = pv.outputTransform
                             if (target != null) {
                                 debugSnapshot = decoded.debugSnapshot
@@ -401,7 +424,9 @@ fun AdaptiveSuperQRScannerScreen(
     }
 
     if (!permission) {
-        Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) { Text("Grant camera permission") } }
+        Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) { Text("Grant camera permission") }
+        }
         return
     }
 
@@ -429,7 +454,7 @@ fun AdaptiveSuperQRScannerScreen(
         } else {
             Image(bitmap = frozen.asImageBitmap(), contentDescription = "Frozen camera debug frame", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         }
-        V7ScannerOverlay(carrierOverlay, overlayToDraw, if (showDebug) overlayMode else V7DebugOverlayMode.LIVE, guidance, guideColor, Modifier.fillMaxSize())
+        V7ScannerOverlay(carrierOverlay, overlayToDraw, overlayMode, guidance, guideColor, Modifier.fillMaxSize())
 
         Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 7.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column {
@@ -437,10 +462,7 @@ fun AdaptiveSuperQRScannerScreen(
                 Text(activeProfile.label, color = Color(0xFF7CB7FF), fontSize = 9.sp)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                AssistChip(onClick = {
-                    showDebug = !showDebug
-                    if (!showDebug) { overlayMode = V7DebugOverlayMode.LIVE; frozenBitmap = null; frozenOverlay = null; frozenSnapshot = null }
-                }, label = { Text(if (showDebug) "Live" else "Debug", fontSize = 10.sp) })
+                AssistChip(onClick = { showDebug = !showDebug }, label = { Text(if (showDebug) "Hide" else "Debug", fontSize = 10.sp) })
                 TextButton(onClick = { stopScan() }) { Text("Stop", color = Color.White) }
             }
         }
@@ -464,6 +486,7 @@ fun AdaptiveSuperQRScannerScreen(
                 headerInvalid = headerInvalidCount,
                 packAttempts = packAttempts,
                 crcAttempts = crcAttempts,
+                crcCandidateAttempts = crcCandidateAttempts,
                 crcPass = crcPass,
                 crcFail = crcFail,
                 parserRejects = parserRejects,
@@ -492,7 +515,19 @@ fun AdaptiveSuperQRScannerScreen(
                 onShare = { capture(true) },
                 onFreeze = ::toggleFreeze,
                 onExport = ::exportDebugBundle,
-                onClose = { showDebug = false; overlayMode = V7DebugOverlayMode.LIVE; frozenBitmap = null; frozenOverlay = null; frozenSnapshot = null },
+                onClose = { showDebug = false },
+                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(10.dp),
+            )
+        } else if (overlayMode != V7DebugOverlayMode.LIVE || isFrozen) {
+            V7OverlayStatusBar(
+                mode = overlayMode,
+                frozen = isFrozen,
+                confident = confidentCells,
+                total = activeProfile.cellCount,
+                crcPass = crcPass,
+                crcFail = crcFail,
+                onOpenDebug = { showDebug = true },
+                onLive = ::clearOpticalOverlay,
                 modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(10.dp),
             )
         } else {
