@@ -72,6 +72,7 @@ object V7DebugOverlayMapper {
         val headerCells = (V7Transport.HEADER_SIZE * 8 + profile.bitsPerCell - 1) / profile.bitsPerCell
         val ox = cellW * 0.15 / 2.0
         val oy = cellH * 0.15 / 2.0
+        val stabilizedSymbols = snapshot.stabilizedSymbols
 
         for (idx in 0 until profile.cellCount) {
             val row = idx / profile.grid
@@ -91,8 +92,8 @@ object V7DebugOverlayMapper {
 
             if (idx < headerCells) header.add(center)
             if (symbol in 0 until profile.colorCount) bySymbol[symbol].add(center)
-            if (snapshot.stabilizedSymbols != null && symbol == V7SoftClassifier.ERASURE_MARKER.toInt()) {
-                val stable = snapshot.stabilizedSymbols.getOrNull(idx)?.toInt() ?: -1
+            if (stabilizedSymbols != null && symbol == V7SoftClassifier.ERASURE_MARKER.toInt()) {
+                val stable = stabilizedSymbols.getOrNull(idx)?.toInt() ?: -1
                 if (stable in 0 until profile.colorCount) recovered.add(center)
             }
 
