@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <cache-path name="superqr_debug" path="superqr_debug/" />
-    <cache-path name="superqr_received" path="superqr_received/" />
-</paths>
