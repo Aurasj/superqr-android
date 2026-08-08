@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.util.Log
+import android.util.Range
 import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -13,10 +14,12 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
-import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.SessionConfig
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.camera.view.transform.ImageProxyTransformFactory
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -38,6 +41,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.view.doOnLayout
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.superqr.android.camera.ChromaSampleBuffers
 import com.superqr.android.camera.ImageProxyChromaSampler
@@ -46,6 +51,8 @@ import com.superqr.android.vision.v6.contract.V6Contract
 import com.superqr.android.vision.v6.detection.V6StaticDetector
 import com.superqr.android.vision.v6.diagnostic.V6CapturedFrameBundle
 import com.superqr.android.vision.v6.diagnostic.V6FullDiagnosticExporter
+import com.superqr.android.vision.v6.diagnostic.V6TransferStats
+import com.superqr.android.vision.v6.diagnostic.V6TransferStatsCollector
 import com.superqr.android.vision.v6.model.V6StaticResult
 import com.superqr.android.vision.v6.transport.V6ReceiveUtils
 import com.superqr.android.vision.v6.transport.V6SessionAccumulator
@@ -57,7 +64,10 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+
+private enum class V6ScannerState { IDLE, STARTING, SCANNING, COMPLETE, ERROR }
 
 private data class CompletedUiTransfer(
     val pkg: V6TransferPackage,
@@ -107,11 +117,15 @@ fun V6StaticScreen(
     var previewGeometry by remember { mutableStateOf<V6PreviewOverlayGeometry?>(null) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
     var focusState by remember { mutableStateOf("AUTO") }
-    var cameraBindingState by remember { mutableStateOf("WAITING") }
+    var cameraBindingState by remember { mutableStateOf("IDLE") }
 
     val accumulator = remember { V6SessionAccumulator() }
+    val statsCollector = remember { V6TransferStatsCollector().also { it.reset() } }
     var completedTransfer by remember { mutableStateOf<CompletedUiTransfer?>(null) }
     var completedCacheFile by remember { mutableStateOf<File?>(null) }
+    var transferStats by remember { mutableStateOf<V6TransferStats?>(null) }
+
+    var scannerState by remember { mutableStateOf(V6ScannerState.IDLE) }
 
     var showLab by remember { mutableStateOf(false) }
     var labTab by remember { mutableIntStateOf(0) }
@@ -157,242 +171,401 @@ fun V6StaticScreen(
         focusState = "AUTO"
     }
 
-    DisposableEffect(hasCameraPermission, lifecycleOwner, previewView) {
-        if (!hasCameraPermission) return@DisposableEffect onDispose {}
+    // ── camera + detector refs (bound per scan session) ────────────────
+    var detectorRef by remember { mutableStateOf<V6StaticDetector?>(null) }
+    var boundSessionConfig by remember { mutableStateOf<SessionConfig?>(null) }
 
-        val providerFuture = ProcessCameraProvider.getInstance(context)
-        var detector: V6StaticDetector? = null
-        var disposed = false
+    // Monotonically increasing per-scan generation. The analyzer callback
+    // captures a snapshot and only publishes results when the snapshot
+    // still matches the current generation. Incrementing it invalidates
+    // any in-flight main-executor dispatches from a previous scan.
+    val scanGeneration = remember { AtomicInteger(0) }
 
-        val providerListener = Runnable {
-            if (disposed) return@Runnable
-            val provider = try {
-                providerFuture.get()
-            } catch (e: Throwable) {
+    // ── start-scan helper ──────────────────────────────────────────────
+    val doStartScan: () -> Unit = {
+        scanGeneration.incrementAndGet()
+        completedCacheFile?.delete(); completedCacheFile = null
+        completedTransfer = null; transferStats = null
+        currentResult = null; previewGeometry = null
+        accumulator.reset(); statsCollector.reset()
+        detectorRef?.close(); detectorRef = null
+        boundSessionConfig = null
+        cameraBindingState = "STARTING"
+        scannerState = V6ScannerState.STARTING
+    }
+
+    // ── resource-release helper (separate from scannerState) ──────────
+    fun releaseCamera() {
+        try {
+            // 1. Stop new analyzer callbacks from entering detection.
+            val det = detectorRef
+            detectorRef = null
+
+            // 2. Invalidate stale main-executor dispatches from this scan.
+            scanGeneration.incrementAndGet()
+
+            // 3. Clear live UI state immediately (completed result/stats
+            //    are already frozen before this call by the completion path).
+            currentResult = null
+            previewGeometry = null
+
+            // 4. Unbind CameraX session on the main thread (we are on main).
+            val provider = try { ProcessCameraProvider.getInstance(context).get() } catch (_: Throwable) { null }
+            val sc = boundSessionConfig
+            if (provider != null && sc != null) {
+                try { provider.unbind(sc) } catch (_: Throwable) {}
+            }
+            boundSessionConfig = null
+            boundCamera = null
+
+            // 5. Close detector on the analysis executor so it serializes
+            //    behind any callback that was already past the detectorRef
+            //    null-check. After this runs, all callbacks have finished.
+            if (det != null) {
+                analysisExecutor.execute { try { det.close() } catch (_: Throwable) {} }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    // ── camera setup + binding (called from main executor via doOnLayout) ──
+    fun prepareAndBindCamera(provider: ProcessCameraProvider, pv: PreviewView) {
+        try {
+            // Defensive: clear any prior bound session.
+            try { provider.unbindAll() } catch (_: Throwable) {}
+            boundCamera = null
+            boundSessionConfig = null
+
+            val targetRotation = pv.display?.rotation ?: Surface.ROTATION_0
+
+            val preview = Preview.Builder()
+                .setTargetRotation(targetRotation)
+                .build()
+                .also { it.surfaceProvider = pv.surfaceProvider }
+
+            val analysis = ImageAnalysis.Builder()
+                .setTargetRotation(targetRotation)
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+
+            val viewPort = pv.viewPort
+            if (viewPort == null) {
                 cameraBindingState = "ERROR"
-                diagnosticLogger.log("ERROR", "CAMERA", "PROVIDER", e.message ?: e.toString())
-                return@Runnable
+                scannerState = V6ScannerState.ERROR
+                diagnosticLogger.log("ERROR", "CAMERA", "VIEWPORT_NULL",
+                    "PreviewView ViewPort unavailable after layout; refusing non-WYSIWYG binding")
+                return
             }
 
-            previewView.doOnLayout {
-                if (disposed) return@doOnLayout
+            val cameraInfo = try {
+                provider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
+            } catch (_: Throwable) { null }
+
+            var supportedRanges = emptySet<Range<Int>>()
+            if (cameraInfo != null) {
+                val preBuilder = SessionConfig.Builder(listOf(preview, analysis))
+                viewPort.let { preBuilder.setViewPort(it) }
                 try {
-                    provider.unbindAll()
-                    V6Contract.loadAndVerify(context)
+                    cameraInfo.getSupportedFrameRateRanges(preBuilder.build())
+                        .also { supportedRanges = it }
+                } catch (_: Throwable) {}
+            }
 
-                    val targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
-                    val preview = Preview.Builder()
-                        .setTargetRotation(targetRotation)
-                        .build()
-                        .also { it.surfaceProvider = previewView.surfaceProvider }
+            val rangesLogLine = supportedRanges.joinToString(", ") { "[${it.lower},${it.upper}]" }
+            diagnosticLogger.log("INFO", "CAMERA", "FPS_SUPPORTED", rangesLogLine)
 
-                    val analysis = ImageAnalysis.Builder()
-                        .setTargetRotation(targetRotation)
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
+            val chosenRange: Range<Int>?
+            val chosenLabel: String
+            when {
+                supportedRanges.any { it.lower == 60 && it.upper == 60 } -> {
+                    chosenRange = Range(60, 60); chosenLabel = "60-60"
+                }
+                supportedRanges.any { it.upper == 60 } -> {
+                    val best = supportedRanges.filter { it.upper == 60 }.maxByOrNull { it.lower }
+                    chosenRange = best
+                    chosenLabel = best?.let { "${it.lower}-${it.upper}" } ?: "DEFAULT"
+                }
+                supportedRanges.any { it.lower == 30 && it.upper == 30 } -> {
+                    chosenRange = Range(30, 30); chosenLabel = "30-30"
+                }
+                else -> { chosenRange = null; chosenLabel = "DEFAULT" }
+            }
 
-                    val viewPort = previewView.viewPort
-                    if (viewPort == null) {
-                        cameraBindingState = "ERROR"
-                        diagnosticLogger.log(
-                            "ERROR",
-                            "CAMERA",
-                            "VIEWPORT_NULL",
-                            "PreviewView ViewPort unavailable after layout; refusing non-WYSIWYG binding",
+            val finalBuilder = SessionConfig.Builder(listOf(preview, analysis))
+            viewPort.let { finalBuilder.setViewPort(it) }
+            if (chosenRange != null) { finalBuilder.setFrameRateRange(chosenRange) }
+            val sessionConfig = finalBuilder.build()
+            var boundLabel = if (chosenRange != null) chosenLabel else "DEFAULT"
+
+            detectorRef = V6StaticDetector()
+            val lumaBuffer = LumaFrameBuffer()
+            val chromaBuffers = ChromaSampleBuffers()
+            val imageTransformFactory = ImageProxyTransformFactory().apply {
+                setUsingCropRect(true); setUsingRotationDegrees(true)
+            }
+
+            var firstConfigRecorded = false
+
+            analysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                // Capture the scan generation at callback entry. Results are
+                // published only if this snapshot still matches the current generation.
+                val myGen = scanGeneration.get()
+                try {
+                    val activeDetector = detectorRef ?: return@setAnalyzer
+                    val sensorTs = imageProxy.imageInfo.timestamp
+                    statsCollector.recordAnalyzerFrame(sensorTs)
+                    val analyzerArrivalNs = System.nanoTime()
+                    val lumaOk = lumaBuffer.packFrom(imageProxy)
+                    if (!lumaOk) return@setAnalyzer
+
+                    if (!firstConfigRecorded) {
+                        firstConfigRecorded = true
+                        val rangesStr = supportedRanges.joinToString(", ") { "[${it.lower},${it.upper}]" }
+                        statsCollector.recordCameraConfig(
+                            width = lumaBuffer.width, height = lumaBuffer.height,
+                            supportedRanges = rangesStr, selectedRange = chosenLabel,
+                            boundRange = boundLabel,
+                            fallback = cameraBindingState == "WYSIWYG-FALLBACK"
                         )
-                        return@doOnLayout
                     }
 
-                    detector = V6StaticDetector()
-                    val lumaBuffer = LumaFrameBuffer()
-                    val chromaBuffers = ChromaSampleBuffers()
-                    val imageTransformFactory = ImageProxyTransformFactory().apply {
-                        setUsingCropRect(true)
-                        setUsingRotationDegrees(true)
+                    val chromaReader = ImageProxyChromaSampler(imageProxy, chromaBuffers)
+                    val rawResult = activeDetector.detect(
+                        luma = lumaBuffer.bytes, width = lumaBuffer.width,
+                        height = lumaBuffer.height, mode = selectedTestModeState.value,
+                        chromaReader = chromaReader,
+                    )
+                    val result = rawResult.copy(analyzerArrivalNs = analyzerArrivalNs)
+
+                    statsCollector.recordDetectorResult(
+                        classificationSource = result.diagnosticPayload?.classificationSource,
+                        borderFound = result.borderFound,
+                        orientationResolved = result.orientationResolved,
+                        detectorStartNs = result.detectorStartNs,
+                        detectorEndNs = result.detectorEndNs
+                    )
+
+                    if (result.detectorStartNs > 0) {
+                        statsCollector.recordStageTiming(result.detectorStartNs - analyzerArrivalNs)
                     }
 
-                    analysis.setAnalyzer(analysisExecutor) { imageProxy ->
-                        try {
-                            val analyzerArrivalNs = System.nanoTime()
-                            val activeDetector = detector ?: return@setAnalyzer
-                            val lumaOk = lumaBuffer.packFrom(imageProxy)
-                            if (!lumaOk) return@setAnalyzer
+                    val sourceTransform = try {
+                        imageTransformFactory.getOutputTransform(imageProxy)
+                    } catch (_: Throwable) { null }
 
-                            val chromaReader = ImageProxyChromaSampler(imageProxy, chromaBuffers)
-                            val rawResult = activeDetector.detect(
-                                luma = lumaBuffer.bytes,
-                                width = lumaBuffer.width,
-                                height = lumaBuffer.height,
-                                mode = selectedTestModeState.value,
-                                chromaReader = chromaReader,
+                    val payload = result.diagnosticPayload
+                    if (fullDiagnosticArmed.get()) {
+                        val expired = System.currentTimeMillis() - diagnosticArmedAt.get() > 5000L
+                        if (expired) {
+                            fullDiagnosticArmed.set(false)
+                            mainExecutor.execute { diagnosticState = "TIMEOUT" }
+                        } else if (result.borderFound && result.orientationResolved &&
+                            payload?.classificationSource == "FULL_DETECTION"
+                        ) {
+                            fullDiagnosticArmed.set(false)
+                            val yPlane = imageProxy.planes[0]; val uPlane = imageProxy.planes[1]
+                            val vPlane = imageProxy.planes[2]
+                            fun copyBuffer(b: java.nio.ByteBuffer) = b.duplicate().let { d ->
+                                ByteArray(d.remaining()).also { d.get(it) }
+                            }
+                            val bundle = V6CapturedFrameBundle(
+                                timestamp = payload.timestamp,
+                                imageWidth = imageProxy.width, imageHeight = imageProxy.height,
+                                rotationDegrees = imageProxy.imageInfo.rotationDegrees,
+                                cropRect = android.graphics.Rect(imageProxy.cropRect),
+                                yRowStride = yPlane.rowStride, yPixelStride = yPlane.pixelStride,
+                                uRowStride = uPlane.rowStride, uPixelStride = uPlane.pixelStride,
+                                vRowStride = vPlane.rowStride, vPixelStride = vPlane.pixelStride,
+                                yPlaneBytes = copyBuffer(yPlane.buffer),
+                                uPlaneBytes = copyBuffer(uPlane.buffer),
+                                vPlaneBytes = copyBuffer(vPlane.buffer),
+                                trackingState = result.trackingState,
+                                ransacInliers = result.ransacInliers,
+                                correctCount = result.colorCorrect,
+                                incorrectCount = result.colorTotal - result.colorCorrect - result.colorUncertain,
+                                uncertainCount = result.colorUncertain,
+                                payload = payload, warpedLumaBytes = result.warpedLumaBytes,
+                                frameTrace = activeDetector.getFrameTraceSnapshot(),
                             )
-                            val result = rawResult.copy(analyzerArrivalNs = analyzerArrivalNs)
-
-                            // Source transform is captured while ImageProxy is valid. The target
-                            // transform is obtained on the UI thread from the actual PreviewView.
-                            val sourceTransform = try {
-                                imageTransformFactory.getOutputTransform(imageProxy)
-                            } catch (_: Throwable) {
-                                null
-                            }
-
-                            // Capture diagnostics only from a CURRENT full detection. This keeps
-                            // raw YUV, homography, matrix samples and transport metadata from the
-                            // exact same camera frame.
-                            val payload = result.diagnosticPayload
-                            if (fullDiagnosticArmed.get()) {
-                                val expired = System.currentTimeMillis() - diagnosticArmedAt.get() > 5000L
-                                if (expired) {
-                                    fullDiagnosticArmed.set(false)
-                                    mainExecutor.execute { diagnosticState = "TIMEOUT" }
-                                } else if (
-                                    result.borderFound &&
-                                    result.orientationResolved &&
-                                    payload?.classificationSource == "FULL_DETECTION"
-                                ) {
-                                    fullDiagnosticArmed.set(false)
-                                    val yPlane = imageProxy.planes[0]
-                                    val uPlane = imageProxy.planes[1]
-                                    val vPlane = imageProxy.planes[2]
-
-                                    fun copyBuffer(buffer: java.nio.ByteBuffer): ByteArray {
-                                        val duplicate = buffer.duplicate()
-                                        val out = ByteArray(duplicate.remaining())
-                                        duplicate.get(out)
-                                        return out
-                                    }
-
-                                    val bundle = V6CapturedFrameBundle(
-                                        timestamp = payload.timestamp,
-                                        imageWidth = imageProxy.width,
-                                        imageHeight = imageProxy.height,
-                                        rotationDegrees = imageProxy.imageInfo.rotationDegrees,
-                                        cropRect = android.graphics.Rect(imageProxy.cropRect),
-                                        yRowStride = yPlane.rowStride,
-                                        yPixelStride = yPlane.pixelStride,
-                                        uRowStride = uPlane.rowStride,
-                                        uPixelStride = uPlane.pixelStride,
-                                        vRowStride = vPlane.rowStride,
-                                        vPixelStride = vPlane.pixelStride,
-                                        yPlaneBytes = copyBuffer(yPlane.buffer),
-                                        uPlaneBytes = copyBuffer(uPlane.buffer),
-                                        vPlaneBytes = copyBuffer(vPlane.buffer),
-                                        trackingState = result.trackingState,
-                                        ransacInliers = result.ransacInliers,
-                                        correctCount = result.colorCorrect,
-                                        incorrectCount = result.colorTotal - result.colorCorrect - result.colorUncertain,
-                                        uncertainCount = result.colorUncertain,
-                                        payload = payload,
-                                        warpedLumaBytes = result.warpedLumaBytes,
-                                        frameTrace = activeDetector.getFrameTraceSnapshot(),
-                                    )
-
-                                    analysisExecutor.execute {
-                                        try {
-                                            val file = V6FullDiagnosticExporter.exportToZip(bundle, context.cacheDir)
-                                            mainExecutor.execute {
-                                                capturedZip = file
-                                                diagnosticState = "CAPTURED"
-                                            }
-                                        } catch (e: Throwable) {
-                                            mainExecutor.execute { diagnosticState = "ERROR: ${e.message}" }
-                                        }
-                                    }
+                            analysisExecutor.execute {
+                                try {
+                                    val f = V6FullDiagnosticExporter.exportToZip(bundle, context.cacheDir)
+                                    mainExecutor.execute { capturedZip = f; diagnosticState = "CAPTURED" }
+                                } catch (e: Throwable) {
+                                    mainExecutor.execute { diagnosticState = "ERROR: ${e.message}" }
                                 }
                             }
-
-                            mainExecutor.execute {
-                                val uiDeliveryNs = System.nanoTime()
-                                currentResult = result.copy(uiDeliveryNs = uiDeliveryNs)
-
-                                previewGeometry = if (sourceTransform != null) {
-                                    val target = previewView.outputTransform
-                                    if (target != null) {
-                                        V6PreviewOverlayMapper.map(result, sourceTransform, target)
-                                    } else {
-                                        null
-                                    }
-                                } else {
-                                    null
-                                }
-
-                                // Only a fresh, CRC-valid transport frame can enter the receiver.
-                                val frame = result.transportFrame
-                                if (frame != null && completedTransfer == null) {
-                                    try {
-                                        val sessionId = frame.sessionId
-                                        val totalFrames = frame.totalFrames
-                                        val pkg = accumulator.addFrame(frame)
-                                        if (pkg != null) {
-                                            val crc = java.util.zip.CRC32().apply { update(pkg.fileData) }.value
-                                            val safeName = V6ReceiveUtils.sanitizeFilename(pkg.filename)
-                                            val dir = File(context.cacheDir, "superqr_received").apply { mkdirs() }
-                                            val cacheFile = File(dir, safeName)
-                                            cacheFile.writeBytes(pkg.fileData)
-                                            completedCacheFile = cacheFile
-                                            completedTransfer = CompletedUiTransfer(
-                                                pkg = pkg,
-                                                sessionId = sessionId,
-                                                totalFrames = totalFrames,
-                                                fileCrc32 = crc,
-                                            )
-                                        }
-                                    } catch (e: Throwable) {
-                                        diagnosticLogger.log(
-                                            "ERROR",
-                                            "TRANSPORT",
-                                            "ACCUMULATOR",
-                                            e.message ?: e.toString(),
-                                        )
-                                    }
-                                }
-                            }
-                        } catch (e: Throwable) {
-                            Log.e("V6StaticScreen", "Frame analysis error", e)
-                            diagnosticLogger.log("ERROR", "CAMERA", "ANALYSIS", e.message ?: e.toString())
-                        } finally {
-                            imageProxy.close()
                         }
                     }
 
-                    // The key WYSIWYG invariant: Preview and ImageAnalysis share one ViewPort.
-                    // CameraX therefore gives both use cases crop rects representing the same
-                    // sensor region shown to the user.
-                    val useCaseGroup = UseCaseGroup.Builder()
-                        .addUseCase(preview)
-                        .addUseCase(analysis)
-                        .setViewPort(viewPort)
-                        .build()
+                    mainExecutor.execute {
+                        // Gate: only publish if this callback's generation still
+                        // matches the active scan. Stale dispatches from a previous
+                        // scan are silently dropped.
+                        if (myGen != scanGeneration.get()) return@execute
+                        val uiDeliveryNs = System.nanoTime()
+                        statsCollector.recordCrcOutcome(result.transportFrame, result.transportError)
+                        currentResult = result.copy(uiDeliveryNs = uiDeliveryNs)
 
-                    boundCamera = provider.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        useCaseGroup,
-                    )
-                    cameraBindingState = "WYSIWYG"
-                    diagnosticLogger.log(
-                        "INFO",
-                        "CAMERA",
-                        "WYSIWYG_BOUND",
-                        "Preview and ImageAnalysis bound through shared PreviewView ViewPort",
-                    )
+                        previewGeometry = if (sourceTransform != null) {
+                            pv.outputTransform?.let { V6PreviewOverlayMapper.map(result, sourceTransform, it) }
+                        } else null
+
+                        val frame = result.transportFrame
+                        if (frame != null && completedTransfer == null) {
+                            try {
+                                val pre = V6TransferStatsCollector.AccPreState(
+                                    accumulator.getUniqueFrames(), accumulator.getDuplicateCount(),
+                                    accumulator.getConflictCount(),
+                                    accumulator.getCurrentSessionId(), accumulator.getTotalFrames()
+                                )
+                                val pkg = accumulator.addFrame(frame)
+                                val post = V6TransferStatsCollector.AccPostState(
+                                    accumulator.getUniqueFrames(), accumulator.getDuplicateCount(),
+                                    accumulator.getConflictCount()
+                                )
+                                statsCollector.recordAccumulatorOutcome(pre, post, frame, pkg)
+
+                                if (pkg != null) {
+                                    val crc = java.util.zip.CRC32().apply { update(pkg.fileData) }.value
+                                    val safeName = V6ReceiveUtils.sanitizeFilename(pkg.filename)
+                                    val dir = File(context.cacheDir, "superqr_received").apply { mkdirs() }
+                                    val cacheFile = File(dir, safeName)
+                                    cacheFile.writeBytes(pkg.fileData)
+                                    // 1. Freeze final stats + result BEFORE releasing camera.
+                                    val frozenStats = statsCollector.buildSnapshot()
+                                    completedCacheFile = cacheFile
+                                    transferStats = frozenStats
+                                    completedTransfer = CompletedUiTransfer(pkg, frame.sessionId, frame.totalFrames, crc)
+                                    // 2. Release camera resources (clears currentResult/previewGeometry/detector).
+                                    releaseCamera()
+                                    // 3. Transition to COMPLETE — final result/stats survive.
+                                    scannerState = V6ScannerState.COMPLETE
+                                    cameraBindingState = "STOPPED"
+                                }
+                            } catch (e: Throwable) {
+                                diagnosticLogger.log("ERROR", "TRANSPORT", "ACCUMULATOR", e.message ?: e.toString())
+                            }
+                        }
+                    }
                 } catch (e: Throwable) {
+                    Log.e("V6StaticScreen", "Frame analysis error", e)
+                    diagnosticLogger.log("ERROR", "CAMERA", "ANALYSIS", e.message ?: e.toString())
+                } finally {
+                    imageProxy.close()
+                    statsCollector.recordAnalyzerClose()
+                }
+            }
+
+            // ── bind ──────────────────────────────────────────────────────
+            try {
+                boundCamera = provider.bindToLifecycle(
+                    lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, sessionConfig
+                )
+                boundSessionConfig = sessionConfig
+                cameraBindingState = "WYSIWYG"
+                scannerState = V6ScannerState.SCANNING
+                diagnosticLogger.log("INFO", "CAMERA", "WYSIWYG_BOUND",
+                    "SessionConfig bound: chosenRange=$chosenLabel, boundRange=$boundLabel, supportedRanges=$rangesLogLine")
+            } catch (e: Throwable) {
+                diagnosticLogger.log("WARN", "CAMERA", "FALLBACK",
+                    "High-FPS SessionConfig binding failed: ${e.message}. Retrying.")
+                val fbConfig = SessionConfig.Builder(listOf(preview, analysis))
+                    .also { viewPort?.let { vp -> it.setViewPort(vp) } }
+                    .build()
+                boundCamera = provider.bindToLifecycle(
+                    lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, fbConfig
+                )
+                boundSessionConfig = fbConfig
+                cameraBindingState = "WYSIWYG-FALLBACK"
+                boundLabel = "DEFAULT"
+                scannerState = V6ScannerState.SCANNING
+                diagnosticLogger.log("INFO", "CAMERA", "FALLBACK_BOUND", "Fallback bind succeeded")
+            }
+        } catch (e: Throwable) {
+            cameraBindingState = "ERROR"
+            scannerState = V6ScannerState.ERROR
+            diagnosticLogger.log("ERROR", "CAMERA", "BIND", e.message ?: e.toString())
+        }
+    }
+
+    // ── scanner state transitions ──────────────────────────────────────
+    if (scannerState == V6ScannerState.STARTING) {
+        LaunchedEffect(Unit) {
+            mainExecutor.execute {
+                val provider = try {
+                    ProcessCameraProvider.getInstance(context).get()
+                } catch (e: Throwable) {
+                    scannerState = V6ScannerState.ERROR
                     cameraBindingState = "ERROR"
-                    diagnosticLogger.log("ERROR", "CAMERA", "BIND", e.message ?: e.toString())
+                    diagnosticLogger.log("ERROR", "CAMERA", "PROVIDER", e.message ?: e.toString())
+                    return@execute
+                }
+                try { V6Contract.loadAndVerify(context) } catch (_: Throwable) {}
+                // doOnLayout ensures ViewPort is available.
+                previewView.doOnLayout { prepareAndBindCamera(provider, previewView) }
+            }
+        }
+    }
+
+    // ── background / ON_STOP: release camera, go to IDLE ──────────────
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                val st = scannerState
+                if (st == V6ScannerState.STARTING || st == V6ScannerState.SCANNING) {
+                    releaseCamera()
+                    scannerState = V6ScannerState.IDLE
+                    cameraBindingState = "STOPPED"
+                    diagnosticLogger.log("INFO", "CAMERA", "BACKGROUND", "Scanner stopped on ON_STOP (was $st)")
                 }
             }
         }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
-        providerFuture.addListener(providerListener, mainExecutor)
-
+    // ── full disposal (composition removed) ────────────────────────────
+    DisposableEffect(Unit) {
         onDispose {
-            disposed = true
+            releaseCamera()
+            scannerState = V6ScannerState.IDLE
+        }
+    }
+
+    // ── keep screen on while scanning ─────────────────────────────────
+    DisposableEffect(scannerState) {
+        try {
+            val act = context as? android.app.Activity
+            if (scannerState == V6ScannerState.SCANNING) {
+                act?.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        } catch (_: Throwable) {}
+        onDispose {
             try {
-                detector?.close()
-                if (providerFuture.isDone) providerFuture.get().unbindAll()
-            } catch (_: Throwable) {
+                val act = context as? android.app.Activity
+                act?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    // ── idle screen ────────────────────────────────────────────────────
+    if (scannerState == V6ScannerState.IDLE || scannerState == V6ScannerState.ERROR) {
+        Box(modifier = modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("V6 Scanner", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                if (scannerState == V6ScannerState.ERROR) {
+                    Text("Camera binding failed", color = Color(0xFFF38BA8), fontSize = 14.sp)
+                }
+                Button(onClick = { doStartScan() }) {
+                    Text("START SCAN", fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 32.dp, vertical = 12.dp))
+                }
+                if (onBack != null) {
+                    TextButton(onClick = onBack) { Text("Back", color = Color.White) }
+                }
             }
         }
+        return
     }
 
     if (!hasCameraPermission) {
@@ -408,12 +581,9 @@ fun V6StaticScreen(
     if (completed != null) {
         TransferCompleteScreen(
             completed = completed,
+            stats = transferStats,
             onScanAnother = {
-                completedCacheFile?.delete()
-                completedCacheFile = null
-                completedTransfer = null
-                accumulator.reset()
-                previewGeometry = null
+                doStartScan()
             },
             modifier = modifier,
         )
@@ -761,16 +931,22 @@ private fun ScannerLabPanel(
 @Composable
 private fun TransferCompleteScreen(
     completed: CompletedUiTransfer,
+    stats: V6TransferStats?,
     onScanAnother: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val pkg = completed.pkg
     Box(modifier.fillMaxSize().background(Color.Black).padding(18.dp)) {
         Column(
-            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("TRANSFER COMPLETE", color = Color(0xFF4CAF50), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+
             Card(colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.09f))) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(pkg.filename, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
@@ -781,11 +957,45 @@ private fun TransferCompleteScreen(
                     Text("Temporary app cache", color = Color.White.copy(alpha = 0.65f), fontSize = 11.sp)
                 }
             }
+
+            // ── Transfer stats (debug / diagnostic only) ──
+            val s = stats
+            if (s != null) {
+                Card(colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.07f))) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        // Render each line from formatSummary with section-header lines in bold/color.
+                        for (line in s.formatSummary().lines()) {
+                            val styledColor = when {
+                                line.startsWith("──") -> Color(0xFF89B4FA)
+                                else -> Color.White.copy(alpha = 0.72f)
+                            }
+                            val styledWeight = when {
+                                line.startsWith("──") -> FontWeight.Bold
+                                else -> FontWeight.Normal
+                            }
+                            Text(line, color = styledColor, fontSize = 10.sp, fontWeight = styledWeight)
+                        }
+                    }
+                }
+            }
+
+            if (stats == null) {
+                Text("No transfer stats collected", color = Color.White.copy(alpha = 0.45f), fontSize = 10.sp)
+            }
+
             Text("Decoded preview", color = Color.White, fontWeight = FontWeight.Bold)
             Box(
-                Modifier.weight(1f).fillMaxWidth().background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(10.dp)).padding(10.dp)
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 160.dp, max = 360.dp)
+                    .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(10.dp))
+                    .padding(10.dp)
             ) {
-                Text(V6ReceiveUtils.generatePreview(pkg.fileData), color = Color.White.copy(alpha = 0.82f), fontSize = 12.sp)
+                Text(
+                    V6ReceiveUtils.generatePreview(pkg.fileData),
+                    color = Color.White.copy(alpha = 0.82f),
+                    fontSize = 12.sp
+                )
             }
             Button(onClick = onScanAnother, modifier = Modifier.fillMaxWidth()) { Text("Scan Another") }
         }

@@ -7,7 +7,6 @@ import com.superqr.android.vision.v6.diagnostic.*
 import com.superqr.android.vision.v6.model.*
 import com.superqr.android.vision.v6.tracking.V6TemporalTracker
 import com.superqr.android.vision.v6.transport.V6Transport
-import com.superqr.android.vision.v6.transport.V6TransportError
 import com.superqr.android.vision.v6.transport.V6TransportFrame
 import org.opencv.android.OpenCVLoader
 import org.opencv.core.*
@@ -15,6 +14,36 @@ import org.opencv.geometry.Geometry
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import kotlin.math.roundToInt
+
+private fun median5(v0: Int, v1: Int, v2: Int, v3: Int, v4: Int): Int {
+    // 3-pass bubble-min: finds the 3rd smallest = median with zero allocations.
+    var a = v0; var b = v1; var c = v2; var d = v3; var e = v4
+    // Pass 1: bubble minimum of all 5 to a.
+    if (a > b) { val t = a; a = b; b = t }
+    if (a > c) { val t = a; a = c; c = t }
+    if (a > d) { val t = a; a = d; d = t }
+    if (a > e) { val t = a; a = e; e = t }
+    // Pass 2: bubble minimum of b,c,d,e to b.
+    if (b > c) { val t = b; b = c; c = t }
+    if (b > d) { val t = b; b = d; d = t }
+    if (b > e) { val t = b; b = e; e = t }
+    // Pass 3: bubble minimum of c,d,e to c. c is now the median.
+    if (c > d) { val t = c; c = d; d = t }
+    if (c > e) { val t = c; c = e; e = t }
+    return c
+}
+
+private data class SampleReadResult(
+    val canonicalX: Double,
+    val canonicalY: Double,
+    val pt: org.opencv.core.Point,
+    val y: Int,
+    val u: Int,
+    val v: Int,
+    val ySuccess: Boolean,
+    val uSuccess: Boolean,
+    val vSuccess: Boolean
+)
 
 class V6StaticDetector : AutoCloseable {
     private var openCvInitialized = false
@@ -237,7 +266,7 @@ class V6StaticDetector : AutoCloseable {
             
             val detectedQuadArray = initialSrcPoints.map { doubleArrayOf(it.x, it.y) }
 
-            val hArr = solveHomographySimple(
+            var finalHArr = solveHomographySimple(
                 initialSrcPoints,
                 canonicalPoints
             ) ?: run {
@@ -246,368 +275,410 @@ class V6StaticDetector : AutoCloseable {
                 recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
                 return trackedRes
             }
-            
-            val hMat = Mat(3, 3, CvType.CV_64F)
-            hMat.put(0, 0, *hArr)
 
-            Imgproc.warpPerspective(gray, warped, hMat, Size(1000.0, 1000.0), Imgproc.INTER_NEAREST)
-
-            val minMax = Core.minMaxLoc(warped)
-            val mean = Core.mean(warped)
-            val nonZero = Core.countNonZero(warped)
-            val coverage = nonZero.toDouble() / (1000.0 * 1000.0)
-            val warpMin = minMax.minVal.toInt()
-            val warpMax = minMax.maxVal.toInt()
-            val warpMean = mean.`val`[0].toInt()
-
-            if (coverage < 0.1 || warpMax == 0) {
-                val res = V6StaticResult(true, detectedQuadArray, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "WARP_INVALID: coverage=$coverage, max=$warpMax", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
-                val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
-                recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
-                return trackedRes
-            }
-
-            fun sampleMedianLuma(cx: Double, cy: Double): Int {
-                val values = mutableListOf<Int>()
-                val icx = cx.roundToInt()
-                val icy = cy.roundToInt()
-                val arr = ByteArray(1)
-                for (dy in -2..2) {
-                    for (dx in -2..2) {
-                        val px = (icx + dx).coerceIn(0, 999)
-                        val py = (icy + dy).coerceIn(0, 999)
-                        warped.get(py, px, arr)
-                        values.add(arr[0].toInt() and 0xFF)
-                    }
-                }
-                values.sort()
-                return values[12]
-            }
-
+            // ── final inverse homography (shared) ──────────────────────────
+            // TRACKED_RESAMPLED: corners from the tracker are already in
+            //   TL/TR/BR/BL order → no identity correction needed.
+            // FULL_DETECTION: anchor decoding provides the correction.
+            var finalInvHArr: DoubleArray
+            var warpMin = 0
+            var warpMax = 0
+            var warpMean = 0
+            var coverage = 1.0
+            var orientationResolved: Boolean
             val decodedCornerIds = mutableMapOf<String, String>()
             val decodedCornerBits = mutableMapOf<String, String>()
             val decodedCornerDistances = mutableMapOf<String, Int>()
             val decodedCornerMargins = mutableMapOf<String, Int>()
             val cornerMatchesMap = mutableMapOf<String, V6CornerMatch>()
             val bitSamplesMap = mutableMapOf<String, List<V6BitSample>>()
-            val anchorEvalMap = mutableMapOf<String, AnchorMatchResult>()
             val anchorKeys = listOf("TL", "TR", "BR", "BL")
 
-            for (key in anchorKeys) {
-                val core = V6Contract.getAnchorCoreBBox(key)
-                val anchorBBox = V6Contract.getAnchorBBox(key)
-                val x1 = core.x1
-                val y1 = core.y1
-                val w = core.width
-                val h = core.height
-                
-                // Robust black ring reference: sample 4 interior ring midpoints safely inside the black stroke (offset 10.0px)
-                val ringSamples = listOf(
-                    sampleMedianLuma(anchorBBox.x1 + 10.0, anchorBBox.y1 + 10.0),
-                    sampleMedianLuma(anchorBBox.x2 - 10.0, anchorBBox.y1 + 10.0),
-                    sampleMedianLuma(anchorBBox.x2 - 10.0, anchorBBox.y2 - 10.0),
-                    sampleMedianLuma(anchorBBox.x1 + 10.0, anchorBBox.y2 - 10.0)
-                )
-                val ringLuma = ringSamples.sorted()[1]
-
-                // Robust white core reference: sample 4 core quadrant centers
-                val cxTL = x1 + w * 0.25
-                val cyTL = y1 + h * 0.25
-                val cxTR = x1 + w * 0.75
-                val cyTR = y1 + h * 0.25
-                val cxBR = x1 + w * 0.75
-                val cyBR = y1 + h * 0.75
-                val cxBL = x1 + w * 0.25
-                val cyBL = y1 + h * 0.75
-
-                val medTL = sampleMedianLuma(cxTL, cyTL)
-                val medTR = sampleMedianLuma(cxTR, cyTR)
-                val medBR = sampleMedianLuma(cxBR, cyBR)
-                val medBL = sampleMedianLuma(cxBL, cyBL)
-
-                // 3 quadrants in anchor core are white, 1 is black -> sort ascending to get white core reference identity-independently
-                val sortedCore = listOf(medTL, medTR, medBR, medBL).sorted()
-                val coreWhiteRef = (sortedCore[1] + sortedCore[2] + sortedCore[3]) / 3
-                val contrast = coreWhiteRef - ringLuma
-                val threshold = (ringLuma + coreWhiteRef) / 2
-
-                // Identity-independent bit convention: BLACK = 1 (< threshold), WHITE = 0 (>= threshold)
-                val bTL = if (medTL < threshold) 1 else 0
-                val bTR = if (medTR < threshold) 1 else 0
-                val bBR = if (medBR < threshold) 1 else 0
-                val bBL = if (medBL < threshold) 1 else 0
-
-                val bitSamplesList = listOf(
-                    V6BitSample("TL", cxTL, cyTL, medTL, ringLuma, coreWhiteRef, threshold, bTL),
-                    V6BitSample("TR", cxTR, cyTR, medTR, ringLuma, coreWhiteRef, threshold, bTR),
-                    V6BitSample("BR", cxBR, cyBR, medBR, ringLuma, coreWhiteRef, threshold, bBR),
-                    V6BitSample("BL", cxBL, cyBL, medBL, ringLuma, coreWhiteRef, threshold, bBL)
-                )
-                bitSamplesMap[key] = bitSamplesList
-
-                val decodedBits = "$bTL$bTR$bBR$bBL"
-                decodedCornerBits[key] = decodedBits
-
-                val anchorEval = V6OrientationEvaluator.evaluateAnchorBits(key, decodedBits, contrast)
-                anchorEvalMap[key] = anchorEval
-
-                val expectedPattern = V6Contract.getAnchorIdentityPattern(key)
-                decodedCornerIds[key] = anchorEval.bestMatchId
-                decodedCornerDistances[key] = anchorEval.bestDist
-                decodedCornerMargins[key] = anchorEval.margin
-                cornerMatchesMap[key] = V6CornerMatch(
-                    expectedPattern = expectedPattern,
-                    decodedPattern = decodedBits,
-                    bestMatchId = anchorEval.bestMatchId,
-                    hammingDistance = anchorEval.bestDist,
-                    secondBestMargin = anchorEval.margin
-                )
-            }
-            
-            val orientationResolved = V6OrientationEvaluator.isOrientationResolved(anchorEvalMap)
-
-            if (!orientationResolved) {
-                val res = V6StaticResult(
-                    borderFound = true,
-                    detectedQuad = detectedQuadArray,
-                    contourArea = maxArea,
-                    decodedCornerIds = decodedCornerIds,
-                    decodedCornerBits = decodedCornerBits,
-                    decodedCornerDistances = decodedCornerDistances,
-                    decodedCornerMargins = decodedCornerMargins,
-                    bitSamples = bitSamplesMap,
-                    cornerMatches = cornerMatchesMap,
-                    orientationResolved = false,
-                    reprojectionError = Double.NaN,
-                    pilotYUVs = emptyMap(),
-                    cellAccuracy = 0.0,
-                    uncertainCells = 0,
-                    decodedCrc32 = null,
-                    expectedCrc32 = null,
-                    colorCorrect = 0,
-                    colorUncertain = 0,
-                    colorTotal = 400,
-                    confusionMatrix = null,
-                    processingTimeMs = System.currentTimeMillis() - startTime,
-                    failureReason = "Orientation invalid or ambiguous",
-                    debugImagePath = null,
-                    warpMinLuma = warpMin,
-                    warpMaxLuma = warpMax,
-                    warpMeanLuma = warpMean,
-                    warpCoverage = coverage,
-                    contoursConsidered = contoursConsidered,
-                    quadsConsidered = quadsConsidered
-                )
-                val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
-                recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
-                return trackedRes
-            }
-
-            val physicalIdToPoint = mutableMapOf<String, Point>()
-            physicalIdToPoint[decodedCornerIds["TL"]!!] = initialSrcPoints[0]
-            physicalIdToPoint[decodedCornerIds["TR"]!!] = initialSrcPoints[1]
-            physicalIdToPoint[decodedCornerIds["BR"]!!] = initialSrcPoints[2]
-            physicalIdToPoint[decodedCornerIds["BL"]!!] = initialSrcPoints[3]
-
-            val correctedSrcPoints = listOf(
-                physicalIdToPoint["TL"]!!,
-                physicalIdToPoint["TR"]!!,
-                physicalIdToPoint["BR"]!!,
-                physicalIdToPoint["BL"]!!
-            )
-            
-            val finalHArr = solveHomographySimple(
-                correctedSrcPoints,
-                canonicalPoints
-            ) ?: run {
-                val res = V6StaticResult(true, detectedQuadArray, maxArea, decodedCornerIds, decodedCornerBits, decodedCornerDistances, decodedCornerMargins, bitSamplesMap, cornerMatchesMap, false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Final Homography failed", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
-                val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
-                recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
-                return trackedRes
-            }
-            
-            val finalHMat = Mat(3, 3, CvType.CV_64F)
-            finalHMat.put(0, 0, *finalHArr)
-            Imgproc.warpPerspective(gray, warped, finalHMat, Size(1000.0, 1000.0), Imgproc.INTER_NEAREST)
-            
-            val finalInvHArr = solveHomographySimple(
-                canonicalPoints,
-                correctedSrcPoints
-            ) ?: run {
-                val res = V6StaticResult(true, detectedQuadArray, maxArea, decodedCornerIds, decodedCornerBits, decodedCornerDistances, decodedCornerMargins, bitSamplesMap, cornerMatchesMap, false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Final Inv Homography failed", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
-                val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
-                recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
-                return trackedRes
-            }
-
-            fun mapPoint(canonicalX: Double, canonicalY: Double): Point {
-                val den = finalInvHArr[6] * canonicalX + finalInvHArr[7] * canonicalY + finalInvHArr[8]
-                val x = (finalInvHArr[0] * canonicalX + finalInvHArr[1] * canonicalY + finalInvHArr[2]) / den
-                val y = (finalInvHArr[3] * canonicalX + finalInvHArr[4] * canonicalY + finalInvHArr[5]) / den
-                return Point(x, y)
-            }
-
-            data class SampleReadResult(
-                val canonicalX: Double,
-                val canonicalY: Double,
-                val pt: Point,
-                val y: Int,
-                val u: Int,
-                val v: Int,
-                val ySuccess: Boolean,
-                val uSuccess: Boolean,
-                val vSuccess: Boolean
-            )
-
-            fun sampleYUVDetailed(canonicalX: Double, canonicalY: Double): SampleReadResult {
-                val pt = mapPoint(canonicalX, canonicalY)
-                val px = pt.x.roundToInt()
-                val py = pt.y.roundToInt()
-                val ySuccess = px in 0 until width && py in 0 until height
-                val y = if (ySuccess) luma[py * width + px].toInt() and 0xFF else 128
-                var u = 128
-                var v = 128
-                var uSuccess = false
-                var vSuccess = false
-                if (chromaReader != null) {
-                    val uv = IntArray(2)
-                    if (chromaReader.read(pt.x, pt.y, uv)) {
-                        u = uv[0]
-                        v = uv[1]
-                        uSuccess = true
-                        vSuccess = true
-                    }
+            if (classificationSource == "TRACKED_RESAMPLED") {
+                // ── TRACKED_RESAMPLED V2 fast path ──────────────────────
+                // Skip warpPerspective, anchor core/ring sampling, orientation
+                // decoding, and corrected homography. The tracker already
+                // provides corners in TL/TR/BR/BL order.
+                finalInvHArr = solveHomographySimple(
+                    canonicalPoints,
+                    initialSrcPoints
+                ) ?: run {
+                    val res = V6StaticResult(true, detectedQuadArray, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "TRACKED inv homography failed", null, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
+                    val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
+                    recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
+                    return trackedRes
                 }
-                return SampleReadResult(canonicalX, canonicalY, pt, y, u, v, ySuccess, uSuccess, vSuccess)
+
+                for (key in anchorKeys) {
+                    decodedCornerIds[key] = key
+                    decodedCornerBits[key] = V6Contract.getAnchorIdentityPattern(key)
+                }
+                orientationResolved = true
+                // warp stats are not available on the fast path; coverage
+                // defaults to 1.0 and warp min/max/mean to 0.
+                coverage = 0.0
+            } else {
+                // ── FULL_DETECTION: warp + anchor + orientation ─────────
+                val hMat = Mat(3, 3, CvType.CV_64F)
+                hMat.put(0, 0, *finalHArr)
+                Imgproc.warpPerspective(gray, warped, hMat, Size(1000.0, 1000.0), Imgproc.INTER_NEAREST)
+
+                val minMax = Core.minMaxLoc(warped)
+                val mean = Core.mean(warped)
+                val nonZero = Core.countNonZero(warped)
+                coverage = nonZero.toDouble() / (1000.0 * 1000.0)
+                warpMin = minMax.minVal.toInt()
+                warpMax = minMax.maxVal.toInt()
+                warpMean = mean.`val`[0].toInt()
+
+                if (coverage < 0.1 || warpMax == 0) {
+                    val res = V6StaticResult(true, detectedQuadArray, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "WARP_INVALID: coverage=$coverage, max=$warpMax", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
+                    val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
+                    recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
+                    return trackedRes
+                }
+
+                fun sampleMedianLuma(cx: Double, cy: Double): Int {
+                    val values = mutableListOf<Int>()
+                    val icx = cx.roundToInt()
+                    val icy = cy.roundToInt()
+                    val arr = ByteArray(1)
+                    for (dy in -2..2) {
+                        for (dx in -2..2) {
+                            val px = (icx + dx).coerceIn(0, 999)
+                            val py = (icy + dy).coerceIn(0, 999)
+                            warped.get(py, px, arr)
+                            values.add(arr[0].toInt() and 0xFF)
+                        }
+                    }
+                    values.sort()
+                    return values[12]
+                }
+
+                val anchorEvalMap = mutableMapOf<String, AnchorMatchResult>()
+
+                for (key in anchorKeys) {
+                    val core = V6Contract.getAnchorCoreBBox(key)
+                    val anchorBBox = V6Contract.getAnchorBBox(key)
+                    val x1 = core.x1
+                    val y1 = core.y1
+                    val w = core.width
+                    val h = core.height
+
+                    val ringSamples = listOf(
+                        sampleMedianLuma(anchorBBox.x1 + 10.0, anchorBBox.y1 + 10.0),
+                        sampleMedianLuma(anchorBBox.x2 - 10.0, anchorBBox.y1 + 10.0),
+                        sampleMedianLuma(anchorBBox.x2 - 10.0, anchorBBox.y2 - 10.0),
+                        sampleMedianLuma(anchorBBox.x1 + 10.0, anchorBBox.y2 - 10.0)
+                    )
+                    val ringLuma = ringSamples.sorted()[1]
+
+                    val cxTL = x1 + w * 0.25
+                    val cyTL = y1 + h * 0.25
+                    val cxTR = x1 + w * 0.75
+                    val cyTR = y1 + h * 0.25
+                    val cxBR = x1 + w * 0.75
+                    val cyBR = y1 + h * 0.75
+                    val cxBL = x1 + w * 0.25
+                    val cyBL = y1 + h * 0.75
+
+                    val medTL = sampleMedianLuma(cxTL, cyTL)
+                    val medTR = sampleMedianLuma(cxTR, cyTR)
+                    val medBR = sampleMedianLuma(cxBR, cyBR)
+                    val medBL = sampleMedianLuma(cxBL, cyBL)
+
+                    val sortedCore = listOf(medTL, medTR, medBR, medBL).sorted()
+                    val coreWhiteRef = (sortedCore[1] + sortedCore[2] + sortedCore[3]) / 3
+                    val contrast = coreWhiteRef - ringLuma
+                    val threshold = (ringLuma + coreWhiteRef) / 2
+
+                    val bTL = if (medTL < threshold) 1 else 0
+                    val bTR = if (medTR < threshold) 1 else 0
+                    val bBR = if (medBR < threshold) 1 else 0
+                    val bBL = if (medBL < threshold) 1 else 0
+
+                    val bitSamplesList = listOf(
+                        V6BitSample("TL", cxTL, cyTL, medTL, ringLuma, coreWhiteRef, threshold, bTL),
+                        V6BitSample("TR", cxTR, cyTR, medTR, ringLuma, coreWhiteRef, threshold, bTR),
+                        V6BitSample("BR", cxBR, cyBR, medBR, ringLuma, coreWhiteRef, threshold, bBR),
+                        V6BitSample("BL", cxBL, cyBL, medBL, ringLuma, coreWhiteRef, threshold, bBL)
+                    )
+                    bitSamplesMap[key] = bitSamplesList
+
+                    val decodedBits = "$bTL$bTR$bBR$bBL"
+                    decodedCornerBits[key] = decodedBits
+
+                    val anchorEval = V6OrientationEvaluator.evaluateAnchorBits(key, decodedBits, contrast)
+                    anchorEvalMap[key] = anchorEval
+
+                    val expectedPattern = V6Contract.getAnchorIdentityPattern(key)
+                    decodedCornerIds[key] = anchorEval.bestMatchId
+                    decodedCornerDistances[key] = anchorEval.bestDist
+                    decodedCornerMargins[key] = anchorEval.margin
+                    cornerMatchesMap[key] = V6CornerMatch(
+                        expectedPattern = expectedPattern,
+                        decodedPattern = decodedBits,
+                        bestMatchId = anchorEval.bestMatchId,
+                        hammingDistance = anchorEval.bestDist,
+                        secondBestMargin = anchorEval.margin
+                    )
+                }
+
+                orientationResolved = V6OrientationEvaluator.isOrientationResolved(anchorEvalMap)
+
+                if (!orientationResolved) {
+                    val res = V6StaticResult(
+                        borderFound = true,
+                        detectedQuad = detectedQuadArray,
+                        contourArea = maxArea,
+                        decodedCornerIds = decodedCornerIds,
+                        decodedCornerBits = decodedCornerBits,
+                        decodedCornerDistances = decodedCornerDistances,
+                        decodedCornerMargins = decodedCornerMargins,
+                        bitSamples = bitSamplesMap,
+                        cornerMatches = cornerMatchesMap,
+                        orientationResolved = false,
+                        reprojectionError = Double.NaN,
+                        pilotYUVs = emptyMap(),
+                        cellAccuracy = 0.0,
+                        uncertainCells = 0,
+                        decodedCrc32 = null,
+                        expectedCrc32 = null,
+                        colorCorrect = 0,
+                        colorUncertain = 0,
+                        colorTotal = 400,
+                        confusionMatrix = null,
+                        processingTimeMs = System.currentTimeMillis() - startTime,
+                        failureReason = "Orientation invalid or ambiguous",
+                        debugImagePath = null,
+                        warpMinLuma = warpMin,
+                        warpMaxLuma = warpMax,
+                        warpMeanLuma = warpMean,
+                        warpCoverage = coverage,
+                        contoursConsidered = contoursConsidered,
+                        quadsConsidered = quadsConsidered
+                    )
+                    val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
+                    recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
+                    return trackedRes
+                }
+
+                val physicalIdToPoint = mutableMapOf<String, Point>()
+                physicalIdToPoint[decodedCornerIds["TL"]!!] = initialSrcPoints[0]
+                physicalIdToPoint[decodedCornerIds["TR"]!!] = initialSrcPoints[1]
+                physicalIdToPoint[decodedCornerIds["BR"]!!] = initialSrcPoints[2]
+                physicalIdToPoint[decodedCornerIds["BL"]!!] = initialSrcPoints[3]
+
+                val correctedSrcPoints = listOf(
+                    physicalIdToPoint["TL"]!!,
+                    physicalIdToPoint["TR"]!!,
+                    physicalIdToPoint["BR"]!!,
+                    physicalIdToPoint["BL"]!!
+                )
+
+                finalHArr = solveHomographySimple(
+                    correctedSrcPoints,
+                    canonicalPoints
+                ) ?: run {
+                    val res = V6StaticResult(true, detectedQuadArray, maxArea, decodedCornerIds, decodedCornerBits, decodedCornerDistances, decodedCornerMargins, bitSamplesMap, cornerMatchesMap, false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Final Homography failed", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
+                    val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
+                    recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
+                    return trackedRes
+                }
+
+                val finalHMat = Mat(3, 3, CvType.CV_64F)
+                finalHMat.put(0, 0, *finalHArr)
+                Imgproc.warpPerspective(gray, warped, finalHMat, Size(1000.0, 1000.0), Imgproc.INTER_NEAREST)
+
+                finalInvHArr = solveHomographySimple(
+                    canonicalPoints,
+                    correctedSrcPoints
+                ) ?: run {
+                    val res = V6StaticResult(true, detectedQuadArray, maxArea, decodedCornerIds, decodedCornerBits, decodedCornerDistances, decodedCornerMargins, bitSamplesMap, cornerMatchesMap, false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Final Inv Homography failed", null, warpMinLuma = warpMin, warpMaxLuma = warpMax, warpMeanLuma = warpMean, warpCoverage = coverage, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
+                    val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
+                    recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
+                    return trackedRes
+                }
             }
 
+            // ── reusable arrays for allocation-free sampling ───────────
+            val h = finalInvHArr
+            val h0 = h[0]; val h1 = h[1]; val h2 = h[2]
+            val h3 = h[3]; val h4 = h[4]; val h5 = h[5]
+            val h6 = h[6]; val h7 = h[7]; val h8 = h[8]
+            val chromaBuf = IntArray(2)  // single reusable chroma buffer
+
+            // Maps one canonical point → two output doubles (image coords).
+            fun mapCanonical(cx: Double, cy: Double, out: DoubleArray) {
+                val den = h6 * cx + h7 * cy + h8
+                out[0] = (h0 * cx + h1 * cy + h2) / den
+                out[1] = (h3 * cx + h4 * cy + h5) / den
+            }
+
+            // ── allocation-free 5-sample probe ──────────────────────────
+            // Saves canonical coords, mapped coords, Y, U, V, and success
+            // flags into pre-sized arrays.  index = 0..4.
+            val probeCanX  = DoubleArray(5)   // canonical X
+            val probeCanY  = DoubleArray(5)   // canonical Y
+            val probeMapX  = DoubleArray(5)   // mapped camera X
+            val probeMapY  = DoubleArray(5)   // mapped camera Y
+            val probeY     = IntArray(5)      // luma sample
+            val probeU     = IntArray(5)      // chroma U
+            val probeV     = IntArray(5)      // chroma V
+            val probeYok   = BooleanArray(5)  // ySuccess
+            val probeUok   = BooleanArray(5)  // uSuccess
+            val probeVok   = BooleanArray(5)  // vSuccess
+            val tmpXY      = DoubleArray(2)   // scratch
+
+            fun sampleProbeFast(idx: Int, canX: Double, canY: Double) {
+                probeCanX[idx] = canX
+                probeCanY[idx] = canY
+                mapCanonical(canX, canY, tmpXY)
+                val mx = tmpXY[0]; val my = tmpXY[1]
+                probeMapX[idx] = mx
+                probeMapY[idx] = my
+                val px = mx.roundToInt(); val py = my.roundToInt()
+                val ok = px in 0 until width && py in 0 until height
+                probeYok[idx] = ok
+                probeY[idx] = if (ok) luma[py * width + px].toInt() and 0xFF else 128
+                if (chromaReader != null) {
+                    val got = chromaReader.read(mx, my, chromaBuf)
+                    probeUok[idx] = got
+                    probeVok[idx] = got
+                    probeU[idx] = if (got) chromaBuf[0] else 128
+                    probeV[idx] = if (got) chromaBuf[1] else 128
+                } else {
+                    probeUok[idx] = false; probeVok[idx] = false
+                    probeU[idx] = 128; probeV[idx] = 128
+                }
+            }
+
+            // ── pilots ──────────────────────────────────────────────────
             val pilots = mutableMapOf<String, IntArray>()
             val pilotDetailsList = mutableListOf<V6PilotDiagnosticDetail>()
             val pilotNames = listOf("BLACK", "WHITE", "RED", "BLUE")
 
+            // Precompute canonical pilot probe coords.
+            data class PilotProbe(val canX: Double, val canY: Double)
             for (pilot in pilotNames) {
                 val bbox = V6Contract.getPilotCoreBBox(pilot)
-                val cx = bbox.centerX
-                val cy = bbox.centerY
-                val offset = bbox.width * 0.25
-                val detailedSamples = listOf(
-                    sampleYUVDetailed(cx, cy),
-                    sampleYUVDetailed(cx - offset, cy - offset),
-                    sampleYUVDetailed(cx + offset, cy - offset),
-                    sampleYUVDetailed(cx - offset, cy + offset),
-                    sampleYUVDetailed(cx + offset, cy + offset)
+                val pcx = bbox.centerX; val pcy = bbox.centerY
+                val poff = bbox.width * 0.25
+                val probes = arrayOf(
+                    PilotProbe(pcx, pcy),
+                    PilotProbe(pcx - poff, pcy - poff),
+                    PilotProbe(pcx + poff, pcy - poff),
+                    PilotProbe(pcx - poff, pcy + poff),
+                    PilotProbe(pcx + poff, pcy + poff)
                 )
-                val medY = detailedSamples.map { it.y }.sorted()[2]
-                val medU = detailedSamples.map { it.u }.sorted()[2]
-                val medV = detailedSamples.map { it.v }.sorted()[2]
+                for (i in 0 until 5) {
+                    sampleProbeFast(i, probes[i].canX, probes[i].canY)
+                }
+                val medY = median5(probeY[0], probeY[1], probeY[2], probeY[3], probeY[4])
+                val medU = median5(probeU[0], probeU[1], probeU[2], probeU[3], probeU[4])
+                val medV = median5(probeV[0], probeV[1], probeV[2], probeV[3], probeV[4])
                 pilots[pilot] = intArrayOf(medY, medU, medV)
 
-                val centerSample = detailedSamples[0]
-                pilotDetailsList.add(
-                    V6PilotDiagnosticDetail(
-                        pilotName = pilot,
-                        canonicalCenterX = cx,
-                        canonicalCenterY = cy,
-                        mappedCameraCenterX = centerSample.pt.x,
-                        mappedCameraCenterY = centerSample.pt.y,
-                        ySuccess = centerSample.ySuccess,
-                        uSuccess = centerSample.uSuccess,
-                        vSuccess = centerSample.vSuccess,
-                        rawSamples = detailedSamples.map { intArrayOf(it.y, it.u, it.v) },
-                        medianY = medY,
-                        medianU = medU,
-                        medianV = medV
-                    )
-                )
+                pilotDetailsList.add(V6PilotDiagnosticDetail(
+                    pilotName = pilot,
+                    canonicalCenterX = pcx, canonicalCenterY = pcy,
+                    mappedCameraCenterX = probeMapX[0],
+                    mappedCameraCenterY = probeMapY[0],
+                    ySuccess = probeYok[0], uSuccess = probeUok[0], vSuccess = probeVok[0],
+                    rawSamples = (0..4).map { intArrayOf(probeY[it], probeU[it], probeV[it]) },
+                    medianY = medY, medianU = medU, medianV = medV
+                ))
             }
 
+            // Precompute pilot array references for fast classification.
+            val pBlack = pilots["BLACK"]!!; val pWhite = pilots["WHITE"]!!
+            val pRed   = pilots["RED"]!!;   val pBlue  = pilots["BLUE"]!!
+
             fun sqDistYuv(p1: IntArray, p2: IntArray): Double {
-                val dy = p1[0] - p2[0]
-                val du = p1[1] - p2[1]
-                val dv = p1[2] - p2[2]
+                val dy = p1[0] - p2[0]; val du = p1[1] - p2[1]; val dv = p1[2] - p2[2]
                 return (dy * dy + du * du + dv * dv).toDouble()
             }
 
             val pairwisePilotDistances = mapOf(
-                "DIST_BLACK_WHITE" to sqDistYuv(pilots["BLACK"]!!, pilots["WHITE"]!!),
-                "DIST_BLACK_RED" to sqDistYuv(pilots["BLACK"]!!, pilots["RED"]!!),
-                "DIST_BLACK_BLUE" to sqDistYuv(pilots["BLACK"]!!, pilots["BLUE"]!!),
-                "DIST_WHITE_RED" to sqDistYuv(pilots["WHITE"]!!, pilots["RED"]!!),
-                "DIST_WHITE_BLUE" to sqDistYuv(pilots["WHITE"]!!, pilots["BLUE"]!!),
-                "DIST_RED_BLUE" to sqDistYuv(pilots["RED"]!!, pilots["BLUE"]!!)
+                "DIST_BLACK_WHITE" to sqDistYuv(pBlack, pWhite),
+                "DIST_BLACK_RED" to sqDistYuv(pBlack, pRed),
+                "DIST_BLACK_BLUE" to sqDistYuv(pBlack, pBlue),
+                "DIST_WHITE_RED" to sqDistYuv(pWhite, pRed),
+                "DIST_WHITE_BLUE" to sqDistYuv(pWhite, pBlue),
+                "DIST_RED_BLUE" to sqDistYuv(pRed, pBlue)
             )
 
+            // ── cell classification ─────────────────────────────────────
             val cols = V6Contract.getGridCols()
             val rows = V6Contract.getGridRows()
             val ratio = V6Contract.getCentralRegionRatio()
-            var correct = 0
-            var uncertain = 0
+            var correct = 0; var uncertain = 0
 
             val gridBBox = V6Contract.getGridBBox()
+            val gridX0 = gridBBox.x1; val gridY0 = gridBBox.y1
             val cellSize = V6Contract.getCellSize()
-            
+            val probeOffset = cellSize * ratio / 2.0
+
             val prng = Xorshift32(42)
             val decodedBytes = ByteArray(cols * rows)
             val expectedBytes = ByteArray(cols * rows)
-            
+
             val confusionMatrix = mutableMapOf<String, MutableMap<String, Int>>()
             val colorNames = arrayOf("BLACK", "WHITE", "RED", "BLUE")
             for (c in colorNames) {
                 confusionMatrix[c] = mutableMapOf("BLACK" to 0, "WHITE" to 0, "RED" to 0, "BLUE" to 0, "UNCERTAIN" to 0)
             }
-
             val cellDetailsList = mutableListOf<V6CellDiagnosticDetail>()
 
             for (r in 0 until rows) {
                 for (c in 0 until cols) {
-                    val cx = gridBBox.x1 + (c + 0.5) * cellSize
-                    val cy = gridBBox.y1 + (r + 0.5) * cellSize
-                    
-                    val offset = cellSize * ratio / 2.0
-                    val detailedSamples = listOf(
-                        sampleYUVDetailed(cx, cy),
-                        sampleYUVDetailed(cx - offset, cy - offset),
-                        sampleYUVDetailed(cx + offset, cy - offset),
-                        sampleYUVDetailed(cx - offset, cy + offset),
-                        sampleYUVDetailed(cx + offset, cy + offset)
-                    )
-                    
-                    val medY = detailedSamples.map { it.y }.sorted()[2]
-                    val medU = detailedSamples.map { it.u }.sorted()[2]
-                    val medV = detailedSamples.map { it.v }.sorted()[2]
-                    
-                    var bestDist = Double.MAX_VALUE
+                    val cx = gridX0 + (c + 0.5) * cellSize
+                    val cy = gridY0 + (r + 0.5) * cellSize
+
+                    // 5-probe sampling (allocation-free).
+                    sampleProbeFast(0, cx, cy)
+                    sampleProbeFast(1, cx - probeOffset, cy - probeOffset)
+                    sampleProbeFast(2, cx + probeOffset, cy - probeOffset)
+                    sampleProbeFast(3, cx - probeOffset, cy + probeOffset)
+                    sampleProbeFast(4, cx + probeOffset, cy + probeOffset)
+
+                    val medY = median5(probeY[0], probeY[1], probeY[2], probeY[3], probeY[4])
+                    val medU = median5(probeU[0], probeU[1], probeU[2], probeU[3], probeU[4])
+                    val medV = median5(probeV[0], probeV[1], probeV[2], probeV[3], probeV[4])
+
+                    // Nearest-neighbor classification using 4 local vars.
+                    val dyB = medY - pBlack[0]; val duB = medU - pBlack[1]; val dvB = medV - pBlack[2]
+                    val dB = (dyB * dyB + duB * duB + dvB * dvB).toDouble()
+                    val dyW = medY - pWhite[0]; val duW = medU - pWhite[1]; val dvW = medV - pWhite[2]
+                    val dW = (dyW * dyW + duW * duW + dvW * dvW).toDouble()
+                    val dyR = medY - pRed[0];   val duR = medU - pRed[1];   val dvR = medV - pRed[2]
+                    val dR = (dyR * dyR + duR * duR + dvR * dvR).toDouble()
+                    val dyL = medY - pBlue[0];  val duL = medU - pBlue[1];  val dvL = medV - pBlue[2]
+                    val dL = (dyL * dyL + duL * duL + dvL * dvL).toDouble()
+
+                    var bestDist = dB; var bestIdx = 0
+                    if (dW < bestDist) { bestDist = dW; bestIdx = 1 }
+                    if (dR < bestDist) { bestDist = dR; bestIdx = 2 }
+                    if (dL < bestDist) { bestDist = dL; bestIdx = 3 }
+
                     var secondBestDist = Double.MAX_VALUE
-                    var bestColorIdx = -1
-                    val distMap = mutableMapOf<String, Double>()
-                    
-                    for ((idx, colorName) in colorNames.withIndex()) {
-                        val p = pilots[colorName]!!
-                        val dy = medY - p[0]
-                        val du = medU - p[1]
-                        val dv = medV - p[2]
-                        val dist = (dy * dy + du * du + dv * dv).toDouble()
-                        distMap[colorName] = dist
-                        
-                        if (dist < bestDist) {
-                            secondBestDist = bestDist
-                            bestDist = dist
-                            bestColorIdx = idx
-                        } else if (dist < secondBestDist) {
-                            secondBestDist = dist
-                        }
+                    when (bestIdx) {
+                        0 -> { if (dW < secondBestDist) secondBestDist = dW; if (dR < secondBestDist) secondBestDist = dR; if (dL < secondBestDist) secondBestDist = dL }
+                        1 -> { if (dB < secondBestDist) secondBestDist = dB; if (dR < secondBestDist) secondBestDist = dR; if (dL < secondBestDist) secondBestDist = dL }
+                        2 -> { if (dB < secondBestDist) secondBestDist = dB; if (dW < secondBestDist) secondBestDist = dW; if (dL < secondBestDist) secondBestDist = dL }
+                        3 -> { if (dB < secondBestDist) secondBestDist = dB; if (dW < secondBestDist) secondBestDist = dW; if (dR < secondBestDist) secondBestDist = dR }
                     }
-                    
-                    var decodedIdx = bestColorIdx
+                    // Coerce to exactly match the map-based best/second-best logic.
+                    if (secondBestDist == Double.MAX_VALUE) secondBestDist = 0.0
+
+                    var decodedIdx = bestIdx
                     var uncertainReason = "NONE"
                     if (bestDist > 40000.0) {
-                        decodedIdx = -1
-                        uncertainReason = "DIST_EXCEEDS_MAX"
+                        decodedIdx = -1; uncertainReason = "DIST_EXCEEDS_MAX"
                     } else if (secondBestDist > 0 && bestDist / secondBestDist > 0.9) {
-                        decodedIdx = -1
-                        uncertainReason = "MARGIN_TOO_THIN"
+                        decodedIdx = -1; uncertainReason = "MARGIN_TOO_THIN"
                     }
-                    
+
                     val expectedIdx = when (mode) {
                         "black", "all-black" -> 0
                         "white", "all-white" -> 1
@@ -615,64 +686,56 @@ class V6StaticDetector : AutoCloseable {
                         "deterministic_random", "deterministic random" -> (prng.nextInt() ushr 16) and 3
                         else -> (prng.nextInt() ushr 16) and 3
                     }
-                    
+
                     val expectedName = colorNames[expectedIdx]
                     val decodedName = if (decodedIdx == -1) "UNCERTAIN" else colorNames[decodedIdx]
-                    
                     confusionMatrix[expectedName]!![decodedName] = confusionMatrix[expectedName]!![decodedName]!! + 1
-                    
-                    val status = if (decodedIdx == -1) {
-                        uncertain++
-                        "UNCERTAIN"
-                    } else if (decodedIdx == expectedIdx) {
-                        correct++
-                        "CORRECT"
-                    } else {
-                        "WRONG"
+
+                    val status = when {
+                        decodedIdx == -1 -> { uncertain++; "UNCERTAIN" }
+                        decodedIdx == expectedIdx -> { correct++; "CORRECT" }
+                        else -> "WRONG"
                     }
+                    val margin = if (secondBestDist > 0) bestDist / secondBestDist else 0.0
 
-                    val margin = if (secondBestDist > 0 && secondBestDist < Double.MAX_VALUE) bestDist / secondBestDist else 0.0
-
-                    cellDetailsList.add(
-                        V6CellDiagnosticDetail(
-                            row = r,
-                            col = c,
-                            expectedIdx = expectedIdx,
-                            expectedColor = expectedName,
-                            decodedIdx = decodedIdx,
-                            decodedColor = decodedName,
-                            status = status,
-                            classificationSource = classificationSource,
-                            canonicalCenterX = cx,
-                            canonicalCenterY = cy,
-                            canonicalSamples = detailedSamples.map { Pair(it.canonicalX, it.canonicalY) },
-                            mappedCameraSamples = detailedSamples.map { Pair(it.pt.x, it.pt.y) },
-                            yReadSuccessCount = detailedSamples.count { it.ySuccess },
-                            uReadSuccessCount = detailedSamples.count { it.uSuccess },
-                            vReadSuccessCount = detailedSamples.count { it.vSuccess },
-                            rawSamples = detailedSamples.map { intArrayOf(it.y, it.u, it.v) },
-                            medianY = medY,
-                            medianU = medU,
-                            medianV = medV,
-                            normY = medY.toDouble(),
-                            normU = medU.toDouble(),
-                            normV = medV.toDouble(),
-                            distBlack = distMap["BLACK"] ?: 0.0,
-                            distWhite = distMap["WHITE"] ?: 0.0,
-                            distRed = distMap["RED"] ?: 0.0,
-                            distBlue = distMap["BLUE"] ?: 0.0,
-                            nearestDist = bestDist,
-                            secondBestDist = if (secondBestDist == Double.MAX_VALUE) 0.0 else secondBestDist,
-                            confidenceMargin = margin,
-                            uncertainReason = uncertainReason
-                        )
+                    // Diagnostic detail (rebuild from reusable probe arrays).
+                    fun mksample(i: Int) = SampleReadResult(
+                        probeCanX[i], probeCanY[i],
+                        Point(probeMapX[i], probeMapY[i]),
+                        probeY[i], probeU[i], probeV[i],
+                        probeYok[i], probeUok[i], probeVok[i]
                     )
-                    
+                    val s0 = mksample(0); val s1 = mksample(1)
+                    val s2 = mksample(2); val s3 = mksample(3); val s4 = mksample(4)
+                    val sList = listOf(s0, s1, s2, s3, s4)
+
+                    cellDetailsList.add(V6CellDiagnosticDetail(
+                        row = r, col = c,
+                        expectedIdx = expectedIdx, expectedColor = expectedName,
+                        decodedIdx = decodedIdx, decodedColor = decodedName,
+                        status = status,
+                        classificationSource = classificationSource,
+                        canonicalCenterX = cx, canonicalCenterY = cy,
+                        canonicalSamples = sList.map { Pair(it.canonicalX, it.canonicalY) },
+                        mappedCameraSamples = sList.map { Pair(it.pt.x, it.pt.y) },
+                        yReadSuccessCount = sList.count { it.ySuccess },
+                        uReadSuccessCount = sList.count { it.uSuccess },
+                        vReadSuccessCount = sList.count { it.vSuccess },
+                        rawSamples = sList.map { intArrayOf(it.y, it.u, it.v) },
+                        medianY = medY, medianU = medU, medianV = medV,
+                        normY = medY.toDouble(), normU = medU.toDouble(), normV = medV.toDouble(),
+                        distBlack = dB, distWhite = dW, distRed = dR, distBlue = dL,
+                        nearestDist = bestDist,
+                        secondBestDist = secondBestDist,
+                        confidenceMargin = margin,
+                        uncertainReason = uncertainReason
+                    ))
+
                     decodedBytes[r * cols + c] = (if (decodedIdx == -1) 0 else decodedIdx).toByte()
                     expectedBytes[r * cols + c] = expectedIdx.toByte()
                 }
             }
-            
+
             val accuracy = correct * 100.0 / (rows * cols)
             val incorrectCount = rows * cols - correct - uncertain
             

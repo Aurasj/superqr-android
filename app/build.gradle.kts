@@ -28,6 +28,15 @@ android {
                 enable = false
             }
         }
+        create("benchmark") {
+            initWith(getByName("release"))
+            isDebuggable = false
+            matchingFallbacks += listOf("release")
+            ndk {
+                abiFilters += "arm64-v8a"
+            }
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
