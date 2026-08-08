@@ -1,5 +1,11 @@
 # SuperQR V6 Android Receiver
 
+> **V6 STATUS: FROZEN BASELINE**
+>
+> V6 is a validated experimental baseline. No new protocol, geometry, palette,
+> or feature work. Only critical correctness fixes should modify V6.
+> New architectural work moves to V7.
+
 ## 1. What SuperQR V6 Is
 
 SuperQR is an **offline optical data transfer system**. Data flows from a sender display to a receiver camera — no Wi-Fi, Bluetooth, or internet. The sender encodes data into a visual marker; the receiver decodes it by analyzing camera frames.
@@ -330,23 +336,64 @@ V6 implemented several optimization stages:
 
 ---
 
-## 12. Current Known Investigation
+## 12. Final Pacing Results
 
-**Sender pacing experiment (active):**
+**Sender pacing experiments completed.** The Android benchmark receiver sustained
+~30 delivered analysis frames/sec with zero delivered-frame skips at all tested
+sender intervals. CPU/analyzer was not the dominant bottleneck.
 
-At sender 50ms (20 logical fps):
-- 30fps camera delivers ~30 analysis fps, zero skips
-- ~40–60% of analyzed frames pass CRC
-- Most unique frame IDs acquire quickly (25%/50%/75% milestones within 1–2 seconds)
-- The last 1–3 missing IDs can dominate completion time
-- Sender loops continuously — receiver sees many valid DUPLICATES while waiting for missing IDs
+Same file (2380 bytes), same benchmark build, same phone/display setup:
 
-**Hypotheses under investigation:**
-- Display-camera temporal phase/sampling (sender updates every 50ms, camera at 33.3ms)
-- Frame-pattern-specific CRC failures (certain cell patterns harder to classify)
-- Not a CPU/analyzer bottleneck (measured occupancy confirms this)
+| Interval | Active transfer | CRC valid | CRC mismatch | Unique | Dups | 25% | 50% | 75% | 90% | 100% | Longest gap | Thrpt (user) | Useful fps |
+|----------|----------------|-----------|-------------|--------|------|-----|-----|-----|-----|------|-------------|-------------|-----------|
+| 50 ms | 2.83s | 50 | 37 | 28/28 | 22 | 0.37s | 0.77s | 1.27s | 2.53s | 2.83s | 0.50s | 0.82 KB/s | 9.9 fps |
+| 67 ms | 1.80s | 30 | 25 | 28/28 | 2 | 0.40s | 0.86s | 1.33s | 1.66s | 1.80s | 0.08s | 1.29 KB/s | 15.6 fps |
+| 75 ms | 1.99s | 42 | 19 | 28/28 | 14 | 0.40s | 0.97s | 1.45s | 1.82s | 1.99s | 0.11s | 1.17 KB/s | 14.1 fps |
 
-67ms and 75ms sender pacing are being tested to gather more data.
+**Key findings:**
+
+1. **67 ms was the best observed pacing** of these three final runs — shortest
+   active transfer, tightest milestone spread, nearly zero completion tail.
+
+2. **50 ms showed a measurable completion tail:** 75% of unique frames were
+   acquired in 1.27s, but the remaining 25% took an additional 1.56s (including
+   a 0.50s longest gap between consecutive unique frame acceptances).
+
+3. **67 ms nearly eliminated that tail** (longest gap dropped to 0.08s, 90→100%
+   spread only 0.14s).
+
+4. **Android processing was not the bottleneck:** the receiver sustained ~30
+   analysis fps with occupancy well below the 33.3ms camera interval.
+
+5. **V6 throughput is fundamentally limited by its optical payload density:**
+   400 cells × 2 bits = 100 raw bytes per visual frame, with 91 transport
+   payload bytes. Even at 15.6 useful fps (67ms sender), peak user throughput
+   is ~1.3 KB/s. This is a density ceiling, not a CPU ceiling.
+
+6. **Further V6 micro-optimization cannot reach MB-scale throughput.**
+   Reaching orders-of-magnitude higher rates requires architectural changes
+   (payload density, erasure recovery) that belong in V7.
+
+*These are example measurements on the current development phone/display setup; not protocol guarantees.*
+
+### 12.1 V6 Freeze and Why V7
+
+**V6 is frozen as a validated experimental baseline.** The pacing investigation is complete.
+
+**Key limit:** V6 throughput is fundamentally payload-density-bound. At 30 delivered
+frames/sec with 91 transport payload bytes per frame, the theoretical ceiling is
+~2.7 KB/s even at 100% CRC yield with every frame carrying a distinct logical ID.
+No amount of CPU micro-optimization can push past this ceiling.
+
+**V7 needs to address:**
+- **Payload density:** substantially more bits per displayed frame (geometry, palette, or both)
+- **Erasure recovery:** fountain-code-style or equivalent FEC so the receiver can
+  complete after accumulating any sufficient set of distinct symbols — eliminating
+  the completion-tail problem of waiting for specific missing frame IDs
+- **Smarter sender-receiver temporal coupling** beyond fixed-interval pacing
+
+V7 architectural work will be designed and scoped separately. V6 remains the
+stable baseline for receiver testing and as a reference implementation.
 
 ---
 

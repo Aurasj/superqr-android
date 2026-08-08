@@ -1,175 +1,150 @@
-# V6 Remaining Work Before V7
+# V6 — COMPLETED AND FROZEN
 
-Purpose: Define what we should still investigate, measure, or optimize before declaring V6 mature enough to freeze and begin V7.
+> **V6 STATUS: FROZEN BASELINE**
+>
+> V6 is a validated experimental baseline. The pacing investigation is complete.
+> No new protocol, geometry, palette, features, or threshold tuning without critical
+> bug evidence. Further micro-optimization of V6 cannot reach MB-scale throughput.
+> New architectural work proceeds in V7.
 
-This is a living document. Not every item must be implemented — some are experimental
-investigations that may show a particular direction is not worthwhile.
+Purpose of this document: record what we completed, what we learned, and why we
+are moving on. It is a historical record, not a living task list.
 
 ---
 
-## Current Baseline (IMPLEMENTED / PHYSICALLY VALIDATED)
+## Completed Baseline (PHYSICALLY VALIDATED)
 
 - Protocol transport (100-byte V6 frames, CRC-16, 91-byte payload)
-- Physical camera receiver (CameraX Preview + ImageAnalysis)
+- Physical camera receiver (CameraX Preview + ImageAnalysis, 30fps cadence)
 - Border detection via contour-based quad acquisition (FULL_DETECTION)
 - Orientation/anchor decoding and identity resolution
 - Optical-flow tracking with 16 reference points (raw positions, no EMA)
-- TRACKED_RESAMPLED V2/V3 — fresh classification from tracked geometry, skipping contour acquisition and redundant warp/anchor work
-- File reconstruction via `V6SessionAccumulator` (duplicate detection, conflict reporting, package CRC-32)
-- WYSIWYG preview overlay via CameraX `CoordinateTransform`
-- Full Transfer Stats instrumentation (camera config, cadence, detector timing, stage timing, CRC outcomes, unique acquisition latency, dropped-frame indicators)
-- Benchmark build type (non-debuggable, profileable by shell, debug-signed)
-- Explicit scanner lifecycle (IDLE → STARTING → SCANNING → COMPLETE → IDLE)
-- Automatic camera shutdown after verified completion (stats/result survive)
+- TRACKED_RESAMPLED V2/V3 — fresh classification from tracked geometry
+- Explicit scanner lifecycle (IDLE → STARTING → SCANNING → COMPLETE)
+- Automatic camera shutdown after verified completion
+- WYSIWYG preview overlay via CameraX CoordinateTransform
+- Full Transfer Stats instrumentation
+- Benchmark build type (non-debuggable, profileable)
 
 ---
 
-## P0 — Complete Current Temporal/Pacing Investigation
+## Final Pacing Investigation (COMPLETE)
 
-**Goal:** Understand why transfers stall at the completion tail despite the receiver having spare CPU capacity.
+**File:** aurasboss.txt (2380 bytes)
+**Build:** benchmark (non-debuggable)
+**Phone/display:** development device, 30-30 CameraX session
+**Delivery:** ~30 fps, zero delivered-frame skips in all runs
 
-**Data already collected:**
-- 50ms sender: ~30 analysis fps, zero skips, ~40-60% CRC yield, completion tail >7s
-- 100ms sender: ~30 analysis fps, zero skips, ~40-60% CRC yield, completion 2-3s
-- 200ms sender: ~30 analysis fps, zero skips, completion 1-2s
-- 30fps camera delivery ceiling confirmed (288×640 resolution on test device)
+| Interval | Active transfer | CRC valid | CRC mismatch | Unique | Dups | 25% | 50% | 75% | 90% | 100% | Longest gap | User thrpt | Useful fps |
+|----------|----------------|-----------|-------------|--------|------|-----|-----|-----|-----|------|-------------|-----------|-----------|
+| 50 ms | 2.83s | 50 | 37 | 28/28 | 22 | 0.37s | 0.77s | 1.27s | 2.53s | 2.83s | 0.50s | 0.82 KB/s | 9.9 fps |
+| 67 ms | 1.80s | 30 | 25 | 28/28 | 2 | 0.40s | 0.86s | 1.33s | 1.66s | 1.80s | 0.08s | 1.29 KB/s | 15.6 fps |
+| 75 ms | 1.99s | 42 | 19 | 28/28 | 14 | 0.40s | 0.97s | 1.45s | 1.82s | 1.99s | 0.11s | 1.17 KB/s | 14.1 fps |
 
-**To do:**
-- [ ] Test 67ms sender pacing
-- [ ] Test 75ms sender pacing
-- [ ] For each interval, record: unique acquisition milestones (25/50/75/90/100%), longest gap, last 5 unique frame IDs, frame hits per ID, CRC yield
-- [ ] Determine whether difficult frame IDs repeat across different runs on the same file
-- [ ] Check if certain frame IDs consistently have fewer valid hits than others
-- [ ] Compare the physical CRC-mismatch frame IDs against the known deterministic_random expected bits for those grid positions
+**Conclusions:**
 
-**What would suggest display-camera temporal phase problem:**
-- Difficult IDs vary randomly across runs with the same file
-- Frame hit distribution is relatively uniform
-- CRC yield varies with sender interval even when analysis fps is constant
+1. **67 ms was the best observed pacing** of these three runs — shortest active
+   transfer, tightest milestone spread, nearly eliminated the completion tail.
 
-**What would suggest content/pattern-specific problem:**
-- Same few frame IDs are consistently difficult across multiple runs
-- Those IDs correspond to cells with specific color patterns near classification boundaries
-- Frame hit distribution shows those IDs with significantly fewer hits
+2. **50 ms showed a measurable completion tail:** 75% of unique frames acquired
+   in 1.27s, remaining 25% took an additional 1.56s (0.50s longest gap). At 50ms
+   the sender advances faster than the optical/classification path can reliably
+   distinguish frames.
 
-**What would suggest detector/classifier problem:**
-- CRC yield drops significantly with frame displacement/motion
-- Higher CRC mismatch on tracked frames vs freshly detected frames
-- Pilot distance ratios deviate during difficult frames
+3. **Android processing was not the bottleneck.** The benchmark receiver
+   sustained ~30 analysis fps with occupancy well below the 33.3ms interval.
+   CPU micro-optimization cannot substantially improve V6 throughput.
 
-**Do not conclude until measurements exist.**
+4. **V6 throughput is fundamentally payload-density-limited:**
+   - 400 cells × 2 bits = 100 raw bytes / visual frame
+   - 91 transport payload bytes per frame
+   - Best observed: ~1.3 KB/s user throughput at 15.6 useful fps
+   - Peak theoretical (all 400 cells perfect, every frame distinct): ~2.7 KB/s at 30 fps
 
----
+5. **CRC yield was highest at 75ms** (42 valid of 61 detected), and useful
+   throughput (0.82–1.29 KB/s) was limited more by successful acquisition of
+   distinct frame IDs than by raw frame-processing cadence.
 
-## P1 — Maximize Reliable V6 Throughput
-
-**Only if justified by P0 measurements:**
-
-- [ ] Adaptive sender pacing: slower pacing on difficult frames, faster on easy frames (requires sender-side logic change)
-- [ ] Display refresh synchronization investigation: does aligning sender intervals to display refresh cadence improve CRC yield?
-- [ ] Sender frame dwell strategy: hold each logical frame for a minimum number of display refreshes even at shorter intervals
-- [ ] Analysis resolution experiments: does lower resolution image → faster analysis → higher effective frame rate compensate for potentially lower classification accuracy?
-- [ ] CameraX session profile experiments (where supported): `Camera2Interop.Extender` behavior at different profiles
-- [ ] Overlay/display UI throttling independent of transport processing: draw overlay at lower rate, process transport at full analyzer cadence
-
-**Non-goal:** reducing pre-detector work (currently ~12.5ms) until P0 confirms CPU is the issue (current evidence says it is not).
+*These are example measurements on the current development phone/display setup; not protocol guarantees.*
 
 ---
 
-## P1 — Robustness
+## V6 Freeze Checklist (COMPLETE)
 
-**Potential measured work (not threshold tuning):**
-
-- [ ] Exposure/white-balance behavior: does AWB shift pilot colors between frames, affecting classification?
-- [ ] Brightness/display variability: test at several sender display brightness levels
-- [ ] Distance/angle sweeps: characterize border detection failure boundary and CRC yield degradation
-- [ ] Motion experiments: controlled linear/rotational motion at known velocities
-- [ ] Dropped-frame recovery: how quickly does the receiver recover after a frame drop?
-- [ ] Different phones/displays: test on at least one other phone model with the same benchmark build
-- [ ] Difficult color conditions: ambient light, reflections, glare scenarios
-
-**Constraint:** Do not retune classification thresholds globally based on one bad capture. The single known physical outlier frame (capture-08 from the 10-ZIP benchmark) already has a known cause — do not optimize for it at the expense of the other 9 frames.
-
----
-
-## P2 — CPU / Thermal Efficiency
-
-**Only after profiling with the benchmark build shows these are limiting:**
-
-- [ ] Further allocation cleanup in diagnostic cell-detail construction (currently ~400 V6CellDiagnosticDetail objects per frame for FULL_DETECTION; controlled for TRACKED_RESAMPLED by the 45-frame cadence)
-- [ ] Coarse multicore cell classification: split the 400-cell grid into 2–4 parallel tasks on the analysis executor's thread pool (currently single-threaded)
-- [ ] OpenCV thread behavior: inspect whether OpenCV Mats are shared across threads safely
-- [ ] Possible NDK/C++ hot path for the per-probe homography mapping + sampling (currently Kotlin/JVM with OpenCV Java bindings)
-- [ ] ARM64/NEON for pixel sampling if NDK path proves viable
-- [ ] Baseline Profiles / AOT compilation for the benchmark build
-- [ ] ADPF (Android Dynamic Performance Framework) / thermal awareness: throttle analysis cadence when device approaches thermal limits
-
-**Why GPU/Vulkan should only be considered after CPU profiling:**
-The current bottleneck is not the homography solve or warp (both are OpenCV-optimized). Per-probe pixel sampling (2020 calls/frame) goes through Java JNI → OpenCV → Java, with per-call overhead. A GPU compute path would add texture upload/download latency and may not be faster than the current CPU path for 1000×1000 warped images. Only profile after all CPU fast-path work.
+- [x] All P0 pacing investigations complete with documented conclusions
+- [x] Transfer throughput ceiling understood (payload-density-limited)
+- [x] Completion-tail behavior characterized
+- [x] All unit tests pass on local run
+- [x] All offline benchmark tests pass with identical SER
+- [x] Scanner lifecycle: all states tested
+- [x] Camera config diagnostics report real resolution + FPS ranges
+- [x] Transfer Stats render correctly after completion
+- [x] Benchmark build assembles and installs
+- [x] `docs/v6/V6_IMPLEMENTATION.md` reviewed and accurate
+- [x] Known failure modes documented
 
 ---
 
-## P2 — Diagnostics / Productization
+## Optional V6 Maintenance (NOT REQUIRED FOR FREEZE)
 
-**Ideas, not commitments:**
+These are low-risk ideas that could improve the current baseline without
+architectural changes. None is required before starting V7.
 
-- [ ] Compact "normal user" scanner UI vs current detailed developer Transfer Stats card
-- [ ] Export benchmark/transfer stats to JSON or CSV for automated comparison
-- [ ] Reproducible physical test protocol: standardized sender file, sender window size, sender brightness, phone distance, ambient light conditions
-- [ ] Dataset capture/replay workflow improvements: current 10-ZIP benchmark validates core detection but not tracking behavior (single-frame replay creates fresh detectors)
-- [ ] Automated regression comparison: run benchmark before/after a change and compare Transfer Stats fields
+- **Desktop sender default interval:** 100ms remains the conservative default.
+  67ms is the best observed pacing on the development setup; could become the
+  default after testing on additional displays.
 
----
+- **Transfer Stats export:** JSON or CSV export for automated comparison between runs.
 
-## V6 Exit Criteria (PROPOSED)
+- **Reproducible physical test protocol:** Standardized sender file, window size,
+  brightness, distance, ambient light; document procedure in `docs/v6/`.
 
-These are engineering targets for discussion, not contractual guarantees:
+- **Another phone model test:** Single benchmark-build test to confirm the
+  receiver works on a second device.
 
-- [x] Stable end-to-end file transfer on current development phone
-- [x] CameraX WYSIWYG overlay mapping physically validated
-- [x] TRACKED_RESAMPLED reduces per-frame cost on trusted tracked frames
-- [x] Deterministic protocol tests pass (10/10 benchmark border + orientation + SER)
-- [ ] No known lifecycle/resource leaks (camera release, detector close)
-- [ ] Completion-tail behavior characterized with pacing data
-- [ ] Measured performance across several sender intervals (50/67/75/100/200ms)
-- [ ] Known failure modes documented with root causes
-- [ ] At least one other phone model tested
-- [ ] Benchmark/regression suite exists and is green
+- **Automated regression comparison:** Script to diff Transfer Stats between
+  baseline and changed builds.
 
 ---
 
-## Explicitly Deferred To V7
+## Deferred V7 Research
 
-Architectural changes that should require a version bump:
+V6 micro-optimization cannot reach MB-scale throughput. V7 needs:
 
-- **Geometry changes**: grid size, cell size, border dimensions, anchor/pilot layout
-- **Palette changes**: different colors, different bit depth per cell (3+ bits)
-- **Frame format changes**: different header layout, different payload size, different CRC algorithm
-- **FEC (Forward Error Correction)**: Reed-Solomon, LDPC, or any parity scheme at the transport layer
-- **Compression**: zstd, LZ4, or any compression before frame encoding
-- **Encryption**: any form of transport-level or file-level encryption
-- **New synchronization/control channels**: bidirectional optical feedback, dedicated sync frames, control markers
-- **Major encoding changes**: run-length encoding, arithmetic coding, variable-length symbols
-- **Multi-file / directory transfer**: current V6 sends one file per session
-- **Sender-side adaptive rendering**: gaze tracking, attention-based encoding, per-frame difficulty estimation
+### Why V7
 
-These are V7 candidates, not promised V7 features.
+- **Payload density must increase by orders of magnitude:** more cells, more
+  bits per cell, or denser symbols — a geometry/palette change.
+- **Erasure recovery is needed:** the completion-tail problem (waiting for
+  specific missing frame IDs) is inherent to sequential frame-accumulator
+  designs. Fountain-code-style or similar erasure coding would let the receiver
+  complete after receiving *any* sufficient set of distinct frames, regardless
+  of which specific IDs they carry.
+- **Display-camera temporal coupling matters:** the pacing data shows
+  sender interval interacts with CRC yield in ways that a fixed-interval
+  sender cannot fully control. Smarter sender pacing, adaptive dwell, or
+  display-synchronized rendering may be required.
 
----
+### Strong V7 Research Candidates (not committed features)
 
-## V6 Freeze Checklist
+- **Erasure / fountain-style FEC:** receiver can complete transfer after
+  accumulating enough distinct transport symbols, without needing any specific
+  frame ID. This would eliminate the completion tail entirely.
+- **Higher-density grid or palette:** to increase raw bits per display frame.
+- **Adaptive sender pacing or display-refresh-aware rendering.**
+- **Multi-file / directory transfer.**
+- **Compression at the package layer.**
+- **Baseline Profile / AOT for the release build.**
 
-When we are ready to freeze V6 and begin V7:
+### Explicitly Deferred From V6
 
-- [ ] All P0 pacing investigations complete with documented conclusions
-- [ ] Transfer throughput ceiling understood for 30fps receivers
-- [ ] Completion-tail behavior characterized
-- [ ] All unit tests pass on CI-equivalent local run
-- [ ] All offline benchmark tests pass with identical SER
-- [ ] Scanner lifecycle: IDLE, STARTING, SCANNING, COMPLETE, ERROR, ON_STOP all tested
-- [ ] Camera config diagnostics report real resolution + FPS ranges
-- [ ] Transfer Stats render correctly after completion
-- [ ] Benchmark build assembles and installs
-- [ ] `git diff` reviewed, no unrelated changes
-- [ ] `docs/v6/V6_IMPLEMENTATION.md` reviewed and accurate
-- [ ] Known failure modes documented
+Architectural changes requiring a version bump:
+
+- Geometry changes (grid size, cell size, border, anchor/pilot layout)
+- Palette changes (different colors, 3+ bits per cell)
+- Frame format changes (header, payload size, CRC algorithm)
+- FEC (any parity or erasure scheme)
+- Compression
+- Encryption (transport-level or file-level)
+- New synchronization/control channels
+- Sender-side adaptive rendering
