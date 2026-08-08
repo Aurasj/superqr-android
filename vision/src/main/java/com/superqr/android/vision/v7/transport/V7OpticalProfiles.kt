@@ -33,7 +33,11 @@ object V7OpticalProfiles {
 
     private val byId = all.associateBy { it.id }
     fun byId(id: Int): V7OpticalProfile? = byId[id]
-    val default: V7OpticalProfile = all[1]
+
+    // Until adaptive negotiation/FEC is promoted to production, start from the
+    // physical baseline that actually completes transfers on the supplied phone.
+    // AUTO still switches immediately when a different profile id is read.
+    val default: V7OpticalProfile = all[0]
 
     // MSB-first four monochrome profile cells.
     val profileCodeCenters = arrayOf(
