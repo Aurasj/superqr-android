@@ -76,6 +76,7 @@ class V7SamplerTest {
         assertEquals(4, validCount)
         val yArr = sampler.getYCenters()
         for (i in 0 until 4) assertEquals("Cell $i", (i * 50).toInt() and 0xFF, yArr[i])
+        assertTrue(sampler.getProbeValidityMask().all { (it.toInt() and 0xFF) == 0x01 })
     }
 
     @Test
@@ -85,6 +86,7 @@ class V7SamplerTest {
         val lumaBytes = ByteArray(480 * 640) { 128.toByte() }
         val validCount = sampler.sampleCenter1(hInv, lumaBytes, 640, 480, null)
         assertEquals(0, validCount); assertEquals(128, sampler.getYCenters()[0])
+        assertTrue(sampler.getProbeValidityMask().all { (it.toInt() and 0xFF) == 0 })
     }
 
     @Test fun `median5 with known values`() { assertEquals(20, V7HighDensitySampler.median5(10,20,5,60,30)) }
@@ -92,7 +94,7 @@ class V7SamplerTest {
     @Test fun `median5 reverse sorted`() { assertEquals(3, V7HighDensitySampler.median5(5,4,3,2,1)) }
 
     @Test
-    fun `CROSS_5 produces valid samples`() {
+    fun `CROSS_5 produces valid samples and five probe mask`() {
         val sampler = V7HighDensitySampler(); sampler.setGridSize(2, payloadBbox)
         val hInv = doubleArrayOf(1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0)
         val lumaBytes = ByteArray(1000 * 1000) { 100.toByte() }
@@ -100,5 +102,6 @@ class V7SamplerTest {
         assertEquals(4, validCount)
         for (i in 0 until 4) assertEquals(100, sampler.getYCross5()[i])
         assertTrue(sampler.getValidMask().all { it.toInt() == 1 })
+        assertTrue(sampler.getProbeValidityMask().all { (it.toInt() and 0xFF) == 0b11111 })
     }
 }
