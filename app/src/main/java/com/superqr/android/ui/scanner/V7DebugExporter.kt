@@ -196,15 +196,17 @@ object V7DebugExporter {
     }
 
     private fun buildCellsCsv(profile: V7OpticalProfile, snapshot: V7DebugSnapshot): String = buildString {
-        appendLine("index,row,col,valid,raw_symbol,stable_symbol,second_symbol,best_distance,second_distance,y,u,v")
+        appendLine("index,row,col,valid,probe_mask,raw_symbol,stable_symbol,second_symbol,best_distance,second_distance,y,u,v")
         for (i in snapshot.symbols.indices) {
             val row = i / profile.grid
             val col = i % profile.grid
             val stable = snapshot.stabilizedSymbols?.getOrNull(i)?.toInt() ?: -1
+            val probeMask = snapshot.probeValidityMask.getOrNull(i)?.toInt()?.and(0xFF) ?: 0
             append(i).append(',')
                 .append(row).append(',')
                 .append(col).append(',')
                 .append(snapshot.validMask.getOrNull(i)?.toInt() ?: 0).append(',')
+                .append(probeMask).append(',')
                 .append(snapshot.symbols[i].toInt()).append(',')
                 .append(stable).append(',')
                 .append(snapshot.secondBestSymbols.getOrNull(i)?.toInt() ?: -1).append(',')
