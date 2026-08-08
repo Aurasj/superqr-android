@@ -3,26 +3,33 @@ package com.superqr.android.vision.v7_capacity_lab
 /**
  * Allocation-light soft YUV classifier shared by the V7 lab and production receiver.
  *
- * Default behavior remains the original calibrated nearest-center classifier.
- * When production requests strongly luma-weighted 4-color operation, the classifier
- * enables a robust dense-screen path:
- * - first pass assigns every sample to a provisional color;
- * - per-color payload medians are estimated from reusable 8-bit histograms;
- * - a second pass classifies against those payload-space centers;
- * - ambiguous cells become explicit erasures instead of confident wrong symbols.
+ * Lab callers keep the original calibrated nearest-center behavior. Production
+ * four-color mode uses a frame-local payload estimator because CameraX YUV_420,
+ * display moire and view angle can make the tiny pilots differ from the large
+ * payload area. The known BLACK/WHITE/RED/BLUE topology gives us a particularly
+ * robust estimator:
  *
- * This matters for CameraX YUV_420: the pilots and payload can have slightly different
- * observed centers because chroma is subsampled and display-camera moire is spatially
- * varying. The robust median step is frame-local and never changes protocol semantics.
+ * - WHITE is the high-luma cluster;
+ * - RED has V-U strongly positive;
+ * - BLUE has U-V strongly positive;
+ * - the remaining low-luma neutral cluster is BLACK.
+ *
+ * We estimate medians from those broad groups every optical frame and classify
+ * against the resulting payload-space centers. Crucially, these medians are
+ * frame-local: they do not feed back into pilot calibration, so a bad frame cannot
+ * permanently collapse RED and BLUE for all following frames.
  */
 class V7SoftClassifier {
 
     companion object {
         const val ERASURE_MARKER: Byte = -1
-        private const val DENSE4_FINAL_MARGIN = 0.40
+
+        // The two supplied 40x40 captures show four very well separated payload
+        // clusters. 0.88 keeps genuinely ambiguous boundary samples as erasures
+        // without turning hundreds of otherwise clean cells into erasures.
+        private const val DENSE4_FINAL_MARGIN = 0.88
         private const val DENSE4_MIN_CLUSTER_SAMPLES = 16
-        private const val DENSE4_MAX_CENTER_SHIFT_Y = 48
-        private const val DENSE4_MAX_CENTER_SHIFT_UV = 72
+        private const val DENSE4_CHROMA_AXIS_MIN = 24
     }
 
     var paletteSize: Int = 4
@@ -51,11 +58,10 @@ class V7SoftClassifier {
     var vWeight: Int = 1
         private set
 
-    // Non-uniform production weighting opts into the dense four-color path. Lab
-    // callers that keep the default 1:1:1 classifier retain the old behavior.
+    // Non-uniform production weighting opts into production tuning. Lab callers
+    // that keep 1:1:1 retain the original behavior.
     private var productionWeightedMode = false
 
-    private var nearestSymbols = ByteArray(0)
     private val histY = Array(4) { IntArray(256) }
     private val histU = Array(4) { IntArray(256) }
     private val histV = Array(4) { IntArray(256) }
@@ -105,7 +111,6 @@ class V7SoftClassifier {
             secondBestSymbols = ByteArray(count)
             bestDistances = IntArray(count)
             secondBestDistances = IntArray(count)
-            nearestSymbols = ByteArray(count)
         }
     }
 
@@ -128,27 +133,15 @@ class V7SoftClassifier {
             return
         }
 
-        // Broad first pass: keep raw nearest assignments even when the final soft
-        // decision would be erased. Median payload centers are robust to a modest
-        // number of misassignments and converge far better than a slow EMA here.
-        classifyPass(
-            yArr, uArr, vArr, totalCells,
-            centers,
-            yWeight, uWeight, vWeight,
-            1.0,
-            applyErasures = false,
-        )
-
-        val refined = buildDenseFourColorMedianCenters(yArr, uArr, vArr, totalCells)
+        val refined = buildDenseFourColorPayloadCenters(yArr, uArr, vArr, totalCells)
         effectiveCenters = refined ?: centers.map { it.copyOf() }.toTypedArray()
 
-        // Empirically, dense four-color camera samples need more U discrimination
-        // than the original 10:1:1 preset to stop neutral BLACK from aliasing BLUE.
-        // Keep Y dominant, but use 10:2:1 for the final decision.
+        // Keep luma important, but retain enough chroma authority to cleanly
+        // separate RED and BLUE. The previous 10:1:1 seed could merge them.
         classifyPass(
             yArr, uArr, vArr, totalCells,
             effectiveCenters,
-            10, 2, 1,
+            6, 2, 2,
             minOf(marginThreshold, DENSE4_FINAL_MARGIN),
             applyErasures = true,
         )
@@ -202,7 +195,6 @@ class V7SoftClassifier {
                 }
             }
 
-            nearestSymbols[i] = bestIdx.toByte()
             bestDistances[i] = bestDist
             secondBestDistances[i] = secondDist
             secondBestSymbols[i] = secondIdx.toByte()
@@ -220,7 +212,15 @@ class V7SoftClassifier {
         }
     }
 
-    private fun buildDenseFourColorMedianCenters(
+    /**
+     * Estimate the four production centers directly from the current payload.
+     *
+     * This deliberately does not depend on the *current* RED/BLUE pilot centers
+     * for identity assignment. In a bad capture the old EMA could make those two
+     * centers collapse; once collapsed, nearest-center k-means could never recover.
+     * YUV's chroma axes give us stable semantic labels for this particular palette.
+     */
+    private fun buildDenseFourColorPayloadCenters(
         yArr: IntArray,
         uArr: IntArray,
         vArr: IntArray,
@@ -233,45 +233,45 @@ class V7SoftClassifier {
         }
         val counts = IntArray(4)
 
+        // WHITE is always substantially brighter than the three non-white colors.
+        // Use pilot luma only for this coarse cut; RED/BLUE identity is assigned by
+        // the signed chroma axis below and therefore cannot collapse together.
+        val brightestNonWhite = maxOf(centers[0][0], centers[2][0], centers[3][0])
+        val whiteCut = ((centers[1][0] + brightestNonWhite) / 2).coerceIn(145, 220)
+
         for (i in 0 until totalCells) {
             val y = yArr[i].coerceIn(0, 255)
             val u = uArr[i].coerceIn(0, 255)
             val v = vArr[i].coerceIn(0, 255)
-
-            // 128/128/128 is the sampler's invalid/fallback value. A real optical
-            // sample can theoretically equal it, but skipping this exact triplet
-            // is much safer than letting out-of-bounds cells bias BLACK/RED medians.
             if (y == 128 && u == 128 && v == 128) continue
 
-            val s = nearestSymbols[i].toInt()
-            if (s !in 0..3) continue
-            histY[s][y]++
-            histU[s][u]++
-            histV[s][v]++
-            counts[s]++
+            val chromaAxis = v - u
+            val symbol = when {
+                y >= whiteCut -> 1
+                chromaAxis >= DENSE4_CHROMA_AXIS_MIN -> 2       // RED
+                chromaAxis <= -DENSE4_CHROMA_AXIS_MIN -> 3      // BLUE
+                else -> 0                                        // BLACK
+            }
+
+            histY[symbol][y]++
+            histU[symbol][u]++
+            histV[symbol][v]++
+            counts[symbol]++
         }
 
         if (counts.any { it < DENSE4_MIN_CLUSTER_SAMPLES }) return null
 
         val out = Array(4) { IntArray(3) }
         for (s in 0 until 4) {
-            val candidateY = histogramMedian(histY[s], counts[s])
-            val candidateU = histogramMedian(histU[s], counts[s])
-            val candidateV = histogramMedian(histV[s], counts[s])
-            val base = centers[s]
-            out[s][0] = candidateY.coerceIn(
-                base[0] - DENSE4_MAX_CENTER_SHIFT_Y,
-                base[0] + DENSE4_MAX_CENTER_SHIFT_Y,
-            )
-            out[s][1] = candidateU.coerceIn(
-                base[1] - DENSE4_MAX_CENTER_SHIFT_UV,
-                base[1] + DENSE4_MAX_CENTER_SHIFT_UV,
-            )
-            out[s][2] = candidateV.coerceIn(
-                base[2] - DENSE4_MAX_CENTER_SHIFT_UV,
-                base[2] + DENSE4_MAX_CENTER_SHIFT_UV,
-            )
+            out[s][0] = histogramMedian(histY[s], counts[s])
+            out[s][1] = histogramMedian(histU[s], counts[s])
+            out[s][2] = histogramMedian(histV[s], counts[s])
         }
+
+        // Reject a pathological estimate instead of poisoning this optical frame.
+        if (out[1][0] - out[0][0] < 60) return null
+        if (out[2][2] - out[2][1] < DENSE4_CHROMA_AXIS_MIN) return null
+        if (out[3][1] - out[3][2] < DENSE4_CHROMA_AXIS_MIN) return null
         return out
     }
 
