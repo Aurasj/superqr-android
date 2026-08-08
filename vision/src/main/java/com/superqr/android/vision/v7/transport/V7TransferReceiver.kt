@@ -60,10 +60,11 @@ data class V7DebugSnapshot(
  * Production adaptive V7 payload decoder.
  *
  * Carrier acquisition/tracking remains the proven V6 detector. Dense payload
- * classification is tuned for CameraX YUV_420: spatially lower-resolution
- * chroma is de-emphasized for the 4-color production alphabet, CROSS_5 samples
- * distinct chroma locations, and very-high-confidence payload cells gently
- * refine the pilot-derived camera-space palette centers.
+ * classification is tuned for CameraX YUV_420. Four-color mode estimates stable
+ * frame-local payload centers without feeding them back into pilot calibration.
+ * Eight-color mode can still use gentle payload EMA. After RAW/temporal candidates,
+ * a bounded CRC-guided list decoder can recover a few confident-but-wrong soft
+ * decisions by testing their second-best symbols; CRC32 remains final authority.
  */
 class V7TransferReceiver {
     val sampler = V7HighDensitySampler()
@@ -122,10 +123,10 @@ class V7TransferReceiver {
         calibrator = V7Calibrator(profile.colorCount)
         classifier = V7SoftClassifier().also {
             it.setCellCount(profile.cellCount)
-            // 4:2:0 chroma has half spatial resolution on each axis. The four-color
-            // alphabet has strong luma separation, so favor the full-resolution Y
-            // channel. Eight colors still need substantially more chroma influence.
-            if (profile.colorCount == 4) it.setChannelWeights(10, 1, 1)
+            // Non-uniform weights opt production into the adaptive classifier.
+            // Four-color final decisions are frame-local 6:2:2; eight colors need
+            // stronger chroma participation because several symbols share luma.
+            if (profile.colorCount == 4) it.setChannelWeights(6, 2, 2)
             else it.setChannelWeights(4, 2, 2)
         }
         temporal.reset()
@@ -186,11 +187,12 @@ class V7TransferReceiver {
 
         classifyAndApplyPhysicalMask(y, u, v, validMask)
 
-        // Pilots live above the payload. Display/camera angle, moire and chroma
-        // subsampling can shift payload-space centers slightly. Use only extremely
-        // confident payload observations to perform one gentle online k-means step,
-        // then reclassify this same optical frame with the refined centers.
-        if (refinePayloadCalibration(y, u, v, validMask)) {
+        // Four-color production now has a frame-local robust payload estimator in
+        // V7SoftClassifier. Feeding those assignments back into the persistent
+        // calibrator caused the supplied 40x40 capture to collapse RED and BLUE
+        // over time. Keep pilots persistent and payload centers frame-local there.
+        // Eight-color mode still benefits from a gentle, high-confidence EMA.
+        if (activeProfile.colorCount != 4 && refinePayloadCalibration(y, u, v, validMask)) {
             calibrationCenters = calibrator.getCentersSnapshot()
             classifier.setCenters(calibrationCenters)
             classifyAndApplyPhysicalMask(y, u, v, validMask)
@@ -281,6 +283,39 @@ class V7TransferReceiver {
                         rejection = "${e.message} [$kind]"
                     }
                 }
+
+                // A complete near-miss often differs in only one or two ambiguous
+                // cells, especially in the 8-color capture. Search a bounded list
+                // of second-best alternatives before throwing the observation away.
+                // Prefer RAW when available; otherwise use the conservative
+                // TEMPORAL_FILL candidate. Do not list-decode consensus overrides.
+                if (accepted == null) {
+                    val softBase = candidates.firstOrNull { it.first == "RAW" }
+                        ?: candidates.firstOrNull { it.first == "TEMPORAL_FILL" }
+                    if (softBase != null) {
+                        val repair = V7SoftCrcListDecoder.repair(
+                            baseSymbols = softBase.second,
+                            currentBestSymbols = classifier.bestSymbols,
+                            secondBestSymbols = classifier.secondBestSymbols,
+                            bestDistances = classifier.bestDistances,
+                            secondBestDistances = classifier.secondBestDistances,
+                            profile = activeProfile,
+                        )
+                        crcCandidateAttempts += repair.attempts
+                        if (repair.frame != null && repair.repairedSymbols != null) {
+                            accepted = repair.frame
+                            crcPassed = true
+                            candidatePassed = "${softBase.first}+SOFT${repair.flips}"
+                            val repairedBytes = V7Transport.symbolsToBytes(repair.repairedSymbols, activeProfile)
+                            if (repairedBytes != null) {
+                                val crc = inspectCrc(repairedBytes)
+                                receivedCrc32 = crc.first
+                                computedCrc32 = crc.second
+                            }
+                            rejection = null
+                        }
+                    }
+                }
             }
         }
 
@@ -357,8 +392,8 @@ class V7TransferReceiver {
     }
 
     /**
-     * Online payload-space center refinement. This deliberately accepts only a
-     * small, very-high-confidence subset so it cannot chase ambiguous cells.
+     * Online payload-space center refinement for the 8-color experimental mode.
+     * Four-color production deliberately does not call this method.
      */
     private fun refinePayloadCalibration(
         y: IntArray,
