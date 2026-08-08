@@ -4,110 +4,78 @@ import com.superqr.android.vision.v6.classification.ChromaPixelReader
 import kotlin.math.roundToInt
 
 /**
- * Allocation-light high-density sampler for V7 Capacity Lab.
+ * Allocation-light high-density sampler used by production V7 and Capacity Lab.
  *
- * Supports grids 40x40 through 96x96 with two probe modes:
- * - CENTER_1: one center sample per cell
- * - CROSS_5: center + four corner probes inside the central region, median reduction
- *
- * No per-cell Kotlin object allocation. All results go into pre-allocated
- * primitive arrays.
+ * Important: payloads may be rectangular. X and Y cell pitch are therefore
+ * computed independently and CROSS_5 uses independent X/Y probe offsets.
  */
 class V7HighDensitySampler {
 
     enum class ProbeMode { CENTER_1, CROSS_5 }
 
-    /** Current grid size. */
     var gridSize: Int = 40
         private set
-
-    /** Total cell count (gridSize * gridSize). */
     var totalCells: Int = 1600
         private set
 
-    // Precomputed canonical (cx, cy) pairs for all cells, row-major.
     private var canonicalX = FloatArray(0)
     private var canonicalY = FloatArray(0)
+    private var cellWidth = 0f
+    private var cellHeight = 0f
+    private var crossOffsetX = 0f
+    private var crossOffsetY = 0f
 
-    // CROSS_5 offsets relative to cell center, in canonical units.
-    private var crossOffset = 0f
+    private var sampleY = IntArray(0)
+    private var sampleU = IntArray(0)
+    private var sampleV = IntArray(0)
+    private var sample5Y = IntArray(0)
+    private var sample5U = IntArray(0)
+    private var sample5V = IntArray(0)
+    private var validMask = ByteArray(0)
 
-    // ---- Change grid ----
+    private val probeY5 = IntArray(5)
+    private val probeU5 = IntArray(5)
+    private val probeV5 = IntArray(5)
+    private val probeValid5 = BooleanArray(5)
+    private val chromaBuf = IntArray(2)
 
     fun setGridSize(newGridSize: Int, payloadBbox: DoubleArray) {
         require(newGridSize >= 1) { "Grid size must be positive" }
-        if (newGridSize == gridSize && canonicalX.size == newGridSize * newGridSize) return
+        require(payloadBbox.size >= 4) { "payload bbox must have four values" }
+        require(payloadBbox[2] > payloadBbox[0] && payloadBbox[3] > payloadBbox[1]) { "invalid payload bbox" }
 
         gridSize = newGridSize
         totalCells = gridSize * gridSize
-
-        val cellSize = (payloadBbox[2] - payloadBbox[0]) / gridSize
-        val gridX0 = payloadBbox[0]
-        val gridY0 = payloadBbox[1]
+        cellWidth = ((payloadBbox[2] - payloadBbox[0]) / gridSize).toFloat()
+        cellHeight = ((payloadBbox[3] - payloadBbox[1]) / gridSize).toFloat()
+        crossOffsetX = cellWidth * 0.15f / 2f
+        crossOffsetY = cellHeight * 0.15f / 2f
 
         canonicalX = FloatArray(totalCells)
         canonicalY = FloatArray(totalCells)
-
         var idx = 0
         for (r in 0 until gridSize) {
-            val cy = (gridY0 + (r + 0.5f) * cellSize).toFloat()
+            val cy = (payloadBbox[1] + (r + 0.5) * cellHeight).toFloat()
             for (c in 0 until gridSize) {
-                canonicalX[idx] = (gridX0 + (c + 0.5f) * cellSize).toFloat()
+                canonicalX[idx] = (payloadBbox[0] + (c + 0.5) * cellWidth).toFloat()
                 canonicalY[idx] = cy
                 idx++
             }
         }
-
-        // CROSS_5: probe at center ± cellSize * 0.15 / 2
-        crossOffset = (cellSize * 0.15f / 2.0f).toFloat()
+        ensureSampleArrays()
     }
-
-    // ---- Sample buffers (allocated once per grid change) ----
-
-    // CENTER_1 output arrays
-    private var sampleY = IntArray(0)
-    private var sampleU = IntArray(0)
-    private var sampleV = IntArray(0)
-
-    // CROSS_5 output arrays
-    private var sample5Y = IntArray(0)
-    private var sample5U = IntArray(0)
-    private var sample5V = IntArray(0)
-
-    // Reusable per-cell scratch for CROSS_5 median computation
-    private val probeY5 = IntArray(5)
-    private val probeU5 = IntArray(5)
-    private val probeV5 = IntArray(5)
-
-    // Reusable DoubleArray for homography projection result
-    private val tmpXY = DoubleArray(2)
 
     private fun ensureSampleArrays() {
-        if (sampleY.size != totalCells) {
-            sampleY = IntArray(totalCells)
-            sampleU = IntArray(totalCells)
-            sampleV = IntArray(totalCells)
-            sample5Y = IntArray(totalCells)
-            sample5U = IntArray(totalCells)
-            sample5V = IntArray(totalCells)
-        }
+        if (sampleY.size == totalCells) return
+        sampleY = IntArray(totalCells)
+        sampleU = IntArray(totalCells)
+        sampleV = IntArray(totalCells)
+        sample5Y = IntArray(totalCells)
+        sample5U = IntArray(totalCells)
+        sample5V = IntArray(totalCells)
+        validMask = ByteArray(totalCells)
     }
 
-    // ---- Sampling methods ----
-
-    /**
-     * Sample all cells using CENTER_1 mode (single center probe).
-     *
-     * Writes results into the internal sampleY/sampleU/sampleV arrays.
-     * Returns the number of valid samples (samples where the projected
-     * coordinate fell within bounds and chroma was readable).
-     *
-     * @param homographyInv 9-element inverse homography: canonical→camera
-     * @param lumaBytes rotation-normalized luma buffer
-     * @param lumaWidth width of luma buffer
-     * @param lumaHeight height of luma buffer
-     * @param chromaReader optional chroma reader (null = Y-only sampling)
-     */
     fun sampleCenter1(
         homographyInv: DoubleArray,
         lumaBytes: ByteArray,
@@ -116,37 +84,30 @@ class V7HighDensitySampler {
         chromaReader: ChromaPixelReader?
     ): Int {
         ensureSampleArrays()
+        validMask.fill(0)
         val h = homographyInv
-        val h0 = h[0]; val h1 = h[1]; val h2 = h[2]
-        val h3 = h[3]; val h4 = h[4]; val h5 = h[5]
-        val h6 = h[6]; val h7 = h[7]; val h8 = h[8]
-
         var validCount = 0
-        val chromaBuf = IntArray(2)
 
         for (i in 0 until totalCells) {
-            val cx = canonicalX[i].toDouble()
-            val cy = canonicalY[i].toDouble()
-
-            // Homography projection: canonical → camera
-            val den = h6 * cx + h7 * cy + h8
-            val ix = (h0 * cx + h1 * cy + h2) / den
-            val iy = (h3 * cx + h4 * cy + h5) / den
-
+            val projected = project(h, canonicalX[i].toDouble(), canonicalY[i].toDouble())
+            if (projected == null) {
+                sampleY[i] = 128; sampleU[i] = 128; sampleV[i] = 128
+                continue
+            }
+            val ix = projected.first
+            val iy = projected.second
             val px = ix.roundToInt()
             val py = iy.roundToInt()
-
-            // Read Y
-            if (px in 0 until lumaWidth && py in 0 until lumaHeight) {
-                sampleY[i] = lumaBytes[py * lumaWidth + px].toInt() and 0xFF
-            } else {
-                sampleY[i] = 128
+            if (px !in 0 until lumaWidth || py !in 0 until lumaHeight) {
+                sampleY[i] = 128; sampleU[i] = 128; sampleV[i] = 128
+                continue
             }
 
-            // Read U/V
+            sampleY[i] = lumaBytes[py * lumaWidth + px].toInt() and 0xFF
             if (chromaReader != null && chromaReader.read(ix, iy, chromaBuf)) {
                 sampleU[i] = chromaBuf[0]
                 sampleV[i] = chromaBuf[1]
+                validMask[i] = 1
                 validCount++
             } else {
                 sampleU[i] = 128
@@ -156,12 +117,6 @@ class V7HighDensitySampler {
         return validCount
     }
 
-    /**
-     * Sample all cells using CROSS_5 mode (center + 4 corner probes).
-     * Uses median5 reduction per channel.
-     *
-     * Writes results into the internal sample5Y/sample5U/sample5V arrays.
-     */
     fun sampleCross5(
         homographyInv: DoubleArray,
         lumaBytes: ByteArray,
@@ -170,74 +125,84 @@ class V7HighDensitySampler {
         chromaReader: ChromaPixelReader?
     ): Int {
         ensureSampleArrays()
+        validMask.fill(0)
         val h = homographyInv
-        val h0 = h[0]; val h1 = h[1]; val h2 = h[2]
-        val h3 = h[3]; val h4 = h[4]; val h5 = h[5]
-        val h6 = h[6]; val h7 = h[7]; val h8 = h[8]
-        val offset = crossOffset.toDouble()
-
+        val ox = crossOffsetX.toDouble()
+        val oy = crossOffsetY.toDouble()
         var validCount = 0
-        val chromaBuf = IntArray(2)
 
         for (i in 0 until totalCells) {
             val cx = canonicalX[i].toDouble()
             val cy = canonicalY[i].toDouble()
-
-            // 5 probe positions
-            val probesX = doubleArrayOf(cx, cx - offset, cx + offset, cx - offset, cx + offset)
-            val probesY = doubleArrayOf(cy, cy - offset, cy - offset, cy + offset, cy + offset)
+            var validProbes = 0
 
             for (p in 0 until 5) {
-                val den = h6 * probesX[p] + h7 * probesY[p] + h8
-                val ix = (h0 * probesX[p] + h1 * probesY[p] + h2) / den
-                val iy = (h3 * probesX[p] + h4 * probesY[p] + h5) / den
-
+                val dx = when (p) { 1, 3 -> -ox; 2, 4 -> ox; else -> 0.0 }
+                val dy = when (p) { 1, 2 -> -oy; 3, 4 -> oy; else -> 0.0 }
+                val projected = project(h, cx + dx, cy + dy)
+                if (projected == null) {
+                    probeY5[p] = 128; probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = false
+                    continue
+                }
+                val ix = projected.first
+                val iy = projected.second
                 val px = ix.roundToInt()
                 val py = iy.roundToInt()
+                val inBounds = px in 0 until lumaWidth && py in 0 until lumaHeight
+                if (inBounds) probeY5[p] = lumaBytes[py * lumaWidth + px].toInt() and 0xFF else probeY5[p] = 128
 
-                if (px in 0 until lumaWidth && py in 0 until lumaHeight) {
-                    probeY5[p] = lumaBytes[py * lumaWidth + px].toInt() and 0xFF
-                } else {
-                    probeY5[p] = 128
-                }
-
-                if (chromaReader != null && chromaReader.read(ix, iy, chromaBuf)) {
+                if (inBounds && chromaReader != null && chromaReader.read(ix, iy, chromaBuf)) {
                     probeU5[p] = chromaBuf[0]
                     probeV5[p] = chromaBuf[1]
+                    probeValid5[p] = true
+                    validProbes++
                 } else {
                     probeU5[p] = 128
                     probeV5[p] = 128
+                    probeValid5[p] = false
                 }
             }
 
-            sample5Y[i] = median5(probeY5[0], probeY5[1], probeY5[2], probeY5[3], probeY5[4])
-            sample5U[i] = median5(probeU5[0], probeU5[1], probeU5[2], probeU5[3], probeU5[4])
-            sample5V[i] = median5(probeV5[0], probeV5[1], probeV5[2], probeV5[3], probeV5[4])
-            validCount++
+            // CROSS_5 is considered usable when a majority of the actual probes
+            // are valid. This prevents synthetic 128 chroma values from being
+            // mistaken for confident optical symbols.
+            if (validProbes >= 3) {
+                sample5Y[i] = medianValid5(probeY5, probeValid5)
+                sample5U[i] = medianValid5(probeU5, probeValid5)
+                sample5V[i] = medianValid5(probeV5, probeValid5)
+                validMask[i] = 1
+                validCount++
+            } else {
+                sample5Y[i] = 128; sample5U[i] = 128; sample5V[i] = 128
+            }
         }
         return validCount
     }
 
-    /**
-     * Get the Y values from the last CENTER_1 sample call.
-     * The array is owned by the sampler — do not modify.
-     */
+    private fun project(h: DoubleArray, x: Double, y: Double): Pair<Double, Double>? {
+        val den = h[6] * x + h[7] * y + h[8]
+        if (!den.isFinite() || kotlin.math.abs(den) < 1e-9) return null
+        val ix = (h[0] * x + h[1] * y + h[2]) / den
+        val iy = (h[3] * x + h[4] * y + h[5]) / den
+        if (!ix.isFinite() || !iy.isFinite()) return null
+        return ix to iy
+    }
+
     fun getYCenters(): IntArray = sampleY
     fun getUCenters(): IntArray = sampleU
     fun getVCenters(): IntArray = sampleV
-
-    /** Get the Y values from the last CROSS_5 sample call. */
     fun getYCross5(): IntArray = sample5Y
     fun getUCross5(): IntArray = sample5U
     fun getVCross5(): IntArray = sample5V
-
-    /** Get precomputed canonical X positions. */
+    fun getValidMask(): ByteArray = validMask
     fun getCanonicalX(): FloatArray = canonicalX
-    /** Get precomputed canonical Y positions. */
     fun getCanonicalY(): FloatArray = canonicalY
+    fun getCellWidth(): Float = cellWidth
+    fun getCellHeight(): Float = cellHeight
+    fun getCrossOffsetX(): Float = crossOffsetX
+    fun getCrossOffsetY(): Float = crossOffsetY
 
     companion object {
-        /** Allocation-free 5-element median via 3-pass bubble-min. */
         fun median5(v0: Int, v1: Int, v2: Int, v3: Int, v4: Int): Int {
             var a = v0; var b = v1; var c = v2; var d = v3; var e = v4
             if (a > b) { val t = a; a = b; b = t }
@@ -250,6 +215,19 @@ class V7HighDensitySampler {
             if (c > d) { val t = c; c = d; d = t }
             if (c > e) { val t = c; c = e; e = t }
             return c
+        }
+
+        private fun medianValid5(values: IntArray, valid: BooleanArray): Int {
+            val tmp = IntArray(5)
+            var n = 0
+            for (i in 0 until 5) if (valid[i]) tmp[n++] = values[i]
+            for (i in 1 until n) {
+                val v = tmp[i]
+                var j = i - 1
+                while (j >= 0 && tmp[j] > v) { tmp[j + 1] = tmp[j]; j-- }
+                tmp[j + 1] = v
+            }
+            return tmp[n / 2]
         }
     }
 }
