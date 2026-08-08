@@ -2,9 +2,7 @@ package com.superqr.android.ui.scanner
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -12,7 +10,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PointMode
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.superqr.android.ui.v6.V6PreviewOverlayGeometry
@@ -40,6 +40,7 @@ internal data class V7DebugUiState(
     val headerInvalid: Int,
     val packAttempts: Int,
     val crcAttempts: Int,
+    val crcCandidateAttempts: Int,
     val crcPass: Int,
     val crcFail: Int,
     val parserRejects: Int,
@@ -86,38 +87,34 @@ internal fun V7ScannerOverlay(
             }
 
             if (debug != null && mode != V7DebugOverlayMode.LIVE) {
-                val gridAlpha = if (mode == V7DebugOverlayMode.GRID) .62f else .28f
-                debug.gridSegments.forEach { drawLine(Color(0xFF7CB7FF).copy(alpha = gridAlpha), it.first, it.second, 1.dp.toPx()) }
+                val gridAlpha = if (mode == V7DebugOverlayMode.GRID) .68f else .24f
+                debug.gridSegments.forEach {
+                    drawLine(Color(0xFF7CB7FF).copy(alpha = gridAlpha), it.first, it.second, 1.dp.toPx())
+                }
             }
 
             when (mode) {
                 V7DebugOverlayMode.LIVE, V7DebugOverlayMode.GRID -> Unit
-                V7DebugOverlayMode.SAMPLES -> {
-                    if (debug != null) {
-                        drawPoints(debug.goodSamplePoints, PointMode.Points, Color(0xFF39D353), 2.4.dp.toPx())
-                        drawPoints(debug.lowSamplePoints, PointMode.Points, Color(0xFFF2CC60), 3.0.dp.toPx())
-                        drawPoints(debug.erasedSamplePoints, PointMode.Points, Color(0xFFFF5C5C), 3.6.dp.toPx())
-                    }
+                V7DebugOverlayMode.SAMPLES -> if (debug != null) {
+                    drawPoints(debug.goodSamplePoints, PointMode.Points, Color(0xFF39D353), 2.4.dp.toPx())
+                    drawPoints(debug.lowSamplePoints, PointMode.Points, Color(0xFFF2CC60), 3.0.dp.toPx())
+                    drawPoints(debug.erasedSamplePoints, PointMode.Points, Color(0xFFFF5C5C), 3.6.dp.toPx())
                 }
-                V7DebugOverlayMode.CLASSIFY -> {
-                    if (debug != null) {
-                        val colors = listOf(
-                            Color(0xFF343A46), Color.White, Color.Red, Color(0xFF18D45B),
-                            Color.Blue, Color.Yellow, Color.Cyan, Color.Magenta,
-                        )
-                        debug.symbolPoints.forEachIndexed { idx, points ->
-                            if (idx < colors.size) drawPoints(points, PointMode.Points, colors[idx], 4.0.dp.toPx())
-                        }
-                        drawPoints(debug.erasedSamplePoints, PointMode.Points, Color(0xFFFF5C5C), 4.8.dp.toPx())
-                        drawPoints(debug.recoveredPoints, PointMode.Points, Color(0xFF00E5FF), 5.5.dp.toPx())
+                V7DebugOverlayMode.CLASSIFY -> if (debug != null) {
+                    val colors = listOf(
+                        Color(0xFF343A46), Color.White, Color.Red, Color(0xFF18D45B),
+                        Color.Blue, Color.Yellow, Color.Cyan, Color.Magenta,
+                    )
+                    debug.symbolPoints.forEachIndexed { idx, points ->
+                        if (idx < colors.size) drawPoints(points, PointMode.Points, colors[idx], 4.0.dp.toPx())
                     }
+                    drawPoints(debug.erasedSamplePoints, PointMode.Points, Color(0xFFFF5C5C), 4.8.dp.toPx())
+                    drawPoints(debug.recoveredPoints, PointMode.Points, Color(0xFF00E5FF), 5.5.dp.toPx())
                 }
-                V7DebugOverlayMode.TRANSPORT -> {
-                    if (debug != null) {
-                        drawPoints(debug.headerPoints, PointMode.Points, Color(0xFF00E5FF), 5.0.dp.toPx())
-                        drawPoints(debug.recoveredPoints, PointMode.Points, Color(0xFF39D353), 5.0.dp.toPx())
-                        drawPoints(debug.erasedSamplePoints, PointMode.Points, Color(0xFFFF5C5C), 3.2.dp.toPx())
-                    }
+                V7DebugOverlayMode.TRANSPORT -> if (debug != null) {
+                    drawPoints(debug.headerPoints, PointMode.Points, Color(0xFF00E5FF), 5.0.dp.toPx())
+                    drawPoints(debug.recoveredPoints, PointMode.Points, Color(0xFF39D353), 5.0.dp.toPx())
+                    drawPoints(debug.erasedSamplePoints, PointMode.Points, Color(0xFFFF5C5C), 3.2.dp.toPx())
                 }
             }
         }
@@ -166,11 +163,50 @@ internal fun V7ReceiveCard(
             if (total > 0) LinearProgressIndicator(progress = { acc.getProgress().toFloat() }, modifier = Modifier.fillMaxWidth())
             Text("Cells $confident/${profile.cellCount} confident • $erasures raw erased", color = Color.White.copy(alpha = .74f), fontSize = 10.sp)
             Text("CRC $crcPass pass • $crcFail fail • skipped $skippedErasures • recovered $temporalRecovered", color = Color.White.copy(alpha = .66f), fontSize = 10.sp)
-            Text("Last ${if (lastFrame >= 0) lastFrame else "—"}${error?.let { " • $it" } ?: ""}", color = if (error == null) Color.White.copy(alpha = .6f) else Color(0xFFFF7B72), fontSize = 9.sp)
+            Text("Last ${if (lastFrame >= 0) lastFrame else "—"}${error?.let { " • $it" } ?: ""}", color = if (error == null) Color.White.copy(alpha = .6f) else Color(0xFFFF7B72), fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("Camera ${"%.1f".format(cameraFps)} fps • analysis ${"%.1f".format(analysisFps)} fps", color = Color.White.copy(alpha = .55f), fontSize = 10.sp)
         }
     }
 }
+
+@Composable
+internal fun V7OverlayStatusBar(
+    mode: V7DebugOverlayMode,
+    frozen: Boolean,
+    confident: Int,
+    total: Int,
+    crcPass: Int,
+    crcFail: Int,
+    onOpenDebug: () -> Unit,
+    onLive: () -> Unit,
+    modifier: Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(18.dp),
+        color = Color(0xE8141821),
+        tonalElevation = 2.dp,
+    ) {
+        Row(
+            Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                "${if (frozen) "FROZEN • " else ""}${mode.name} • $confident/$total • CRC $crcPass/$crcFail",
+                color = Color.White,
+                fontSize = 9.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            TextButton(onClick = onOpenDebug, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) { Text("Debug", fontSize = 9.sp) }
+            TextButton(onClick = onLive, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) { Text("Live", fontSize = 9.sp) }
+        }
+    }
+}
+
+private enum class DebugPage { OPTICAL, TRANSPORT, TOOLS }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -190,85 +226,188 @@ internal fun V7DebugPanel(
     onClose: () -> Unit,
     modifier: Modifier,
 ) {
+    var page by remember { mutableStateOf(DebugPage.OPTICAL) }
+
     Card(modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xF5141821))) {
-        Column(Modifier.padding(12.dp).heightIn(max = 560.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column {
-                    Text("LIVE DEBUG", color = Color(0xFF7CB7FF), fontWeight = FontWeight.Bold)
-                    Text(if (frozen) "FROZEN SNAPSHOT" else "real CameraX geometry + V7 decisions", color = if (frozen) Color(0xFFF2CC60) else Color.White.copy(alpha = .55f), fontSize = 9.sp)
+                    Text("LIVE DEBUG", color = Color(0xFF7CB7FF), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text(
+                        if (frozen) "FROZEN SNAPSHOT" else "overlay stays active after Close",
+                        color = if (frozen) Color(0xFFF2CC60) else Color.White.copy(alpha = .55f),
+                        fontSize = 8.sp,
+                        maxLines = 1,
+                    )
                 }
-                TextButton(onClick = onClose) { Text("Close") }
+                TextButton(onClick = onClose) { Text("Close", fontSize = 10.sp) }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                listOf(V7DebugOverlayMode.LIVE, V7DebugOverlayMode.GRID, V7DebugOverlayMode.SAMPLES).forEach { mode ->
-                    FilterChip(selected = overlayMode == mode, onClick = { onOverlayMode(mode) }, label = { Text(mode.name, fontSize = 8.sp) })
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                listOf(V7DebugOverlayMode.CLASSIFY, V7DebugOverlayMode.TRANSPORT).forEach { mode ->
-                    FilterChip(selected = overlayMode == mode, onClick = { onOverlayMode(mode) }, label = { Text(mode.name, fontSize = 8.sp) })
-                }
-            }
-
-            Text("Profile ${ui.profile.key} • id ${ui.profile.id} • ${ui.profile.grid}×${ui.profile.grid} • ${ui.profile.colorCount} colors • ${ui.profile.frameSize} B/frame", color = Color.White, fontSize = 10.sp)
-            Text("Camera ${ui.cameraState} • tracking ${ui.trackingState} • ${ui.classificationSource}", color = Color.White, fontSize = 10.sp)
-            Text("Geometry border ${ui.borderFound} • orientation ${ui.orientationResolved} • detector ${"%.2f".format(ui.detectorMs.toDouble())} ms", color = Color.White.copy(alpha = .78f), fontSize = 10.sp)
-            Text("Cells sampled ${ui.validSamples}/${ui.profile.cellCount} • confident ${ui.confident} • raw erased ${ui.erasures} • CAL ${ui.calibrated}/${ui.profile.colorCount}", color = Color.White, fontSize = 10.sp)
-
-            val t = ui.latestTransport
-            Text(
-                "Transport analyzed ${ui.analyzed} • skipped-erasure ${ui.skippedErasures} • header ${ui.headerValid} ok/${ui.headerInvalid} bad • pack ${ui.packAttempts}",
-                color = Color.White,
-                fontSize = 10.sp,
-            )
-            Text(
-                "CRC attempts ${ui.crcAttempts} • pass ${ui.crcPass} • fail ${ui.crcFail} • parser rejects ${ui.parserRejects}",
-                color = Color.White,
-                fontSize = 10.sp,
-            )
-            Text(
-                "Temporal recovered ${ui.temporalRecoveredFrames} frames • last obs ${t?.temporalObservations ?: 0} • filled ${t?.temporalFilledCells ?: 0} • remaining ${t?.remainingErasures ?: ui.erasures}",
-                color = if ((t?.temporalFilledCells ?: 0) > 0) Color(0xFF7EE787) else Color.White.copy(alpha = .75f),
-                fontSize = 10.sp,
-            )
-            t?.header?.let { h -> Text("Header session ${h.sessionId} • frame ${h.frameId}/${h.totalFrames} • payload ${h.payloadLen}", color = Color(0xFF7CB7FF), fontSize = 10.sp) }
-            t?.rejectionReason?.let { Text("Last reject: $it", color = Color(0xFFFFA657), fontSize = 9.sp) }
-
-            Text("Unique ${ui.unique} • dup ${ui.duplicates} • conflicts ${ui.conflicts}", color = Color.White.copy(alpha = .75f), fontSize = 10.sp)
-            Text("Camera ${"%.1f".format(ui.cameraFps)} fps • analysis ${"%.1f".format(ui.analysisFps)} fps • V7 ${"%.2f".format(ui.analysisMs)} ms", color = Color.White, fontSize = 10.sp)
-
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                FilterChip(selected = ui.samplerMode == V7HighDensitySampler.ProbeMode.CENTER_1, onClick = { onSampler(V7HighDensitySampler.ProbeMode.CENTER_1) }, label = { Text("CENTER_1", fontSize = 9.sp) })
-                FilterChip(selected = ui.samplerMode == V7HighDensitySampler.ProbeMode.CROSS_5, onClick = { onSampler(V7HighDensitySampler.ProbeMode.CROSS_5) }, label = { Text("CROSS_5", fontSize = 9.sp) })
-            }
-
-            var expanded by remember { mutableStateOf(false) }
-            ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
-                OutlinedTextField(
-                    value = if (ui.forcedProfile < 0) "AUTO from marker" else V7OpticalProfiles.byId(ui.forcedProfile)?.label ?: "AUTO",
-                    onValueChange = {}, readOnly = true, label = { Text("Profile detection") },
-                    modifier = Modifier.menuAnchor().fillMaxWidth(),
-                )
-                ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    DropdownMenuItem(text = { Text("AUTO from marker") }, onClick = { onForceProfile(-1); expanded = false })
-                    V7OpticalProfiles.all.forEach { p -> DropdownMenuItem(text = { Text(p.label) }, onClick = { onForceProfile(p.id); expanded = false }) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                V7DebugOverlayMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = overlayMode == mode,
+                        onClick = { onOverlayMode(mode) },
+                        label = { Text(mode.name, fontSize = 7.sp) },
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             }
 
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                OutlinedButton(onClick = onCapture, modifier = Modifier.weight(1f)) { Text("Capture", fontSize = 9.sp) }
-                OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) { Text("Share", fontSize = 9.sp) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                DebugPage.entries.forEach { p ->
+                    FilterChip(
+                        selected = page == p,
+                        onClick = { page = p },
+                        label = { Text(p.name, fontSize = 8.sp) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                OutlinedButton(onClick = onFreeze, modifier = Modifier.weight(1f)) { Text(if (frozen) "Resume" else "Freeze", fontSize = 9.sp) }
-                Button(onClick = onExport, modifier = Modifier.weight(1f)) { Text("Export ZIP", fontSize = 9.sp) }
+
+            HorizontalDivider(color = Color.White.copy(alpha = .10f))
+
+            when (page) {
+                DebugPage.OPTICAL -> OpticalPage(ui, onSampler)
+                DebugPage.TRANSPORT -> TransportPage(ui)
+                DebugPage.TOOLS -> ToolsPage(ui, frozen, onForceProfile, onLock, onUnlock, onCapture, onShare, onFreeze, onExport)
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Button(onClick = onLock, modifier = Modifier.weight(1f)) { Text("Focus & lock", fontSize = 9.sp) }
-                Button(onClick = onUnlock, modifier = Modifier.weight(1f)) { Text("Unlock", fontSize = 9.sp) }
-            }
-            Text("Focus ${ui.focusState}", color = Color.White.copy(alpha = .65f), fontSize = 9.sp)
         }
     }
+}
+
+@Composable
+private fun OpticalPage(ui: V7DebugUiState, onSampler: (V7HighDensitySampler.ProbeMode) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        MetricRow("Profile", "${ui.profile.grid}×${ui.profile.grid} • ${ui.profile.colorCount}c • id ${ui.profile.id}")
+        MetricRow("Camera", ui.cameraState)
+        MetricRow("Tracking", "${ui.trackingState} • ${ui.classificationSource}")
+        MetricRow("Geometry", "border ${yn(ui.borderFound)} • orient ${yn(ui.orientationResolved)} • ${"%.1f".format(ui.detectorMs.toDouble())} ms")
+        MetricRow("Samples", "${ui.validSamples}/${ui.profile.cellCount} • confident ${ui.confident} • erased ${ui.erasures}")
+        MetricRow("Calibration", "${ui.calibrated}/${ui.profile.colorCount}")
+        MetricRow("Performance", "cam ${"%.1f".format(ui.cameraFps)} • analysis ${"%.1f".format(ui.analysisFps)} • V7 ${"%.1f".format(ui.analysisMs)} ms")
+        Spacer(Modifier.height(2.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(selected = ui.samplerMode == V7HighDensitySampler.ProbeMode.CENTER_1, onClick = { onSampler(V7HighDensitySampler.ProbeMode.CENTER_1) }, label = { Text("CENTER_1", fontSize = 8.sp) })
+            FilterChip(selected = ui.samplerMode == V7HighDensitySampler.ProbeMode.CROSS_5, onClick = { onSampler(V7HighDensitySampler.ProbeMode.CROSS_5) }, label = { Text("CROSS_5", fontSize = 8.sp) })
+        }
+    }
+}
+
+@Composable
+private fun TransportPage(ui: V7DebugUiState) {
+    val t = ui.latestTransport
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        MetricRow("Analyzed", "${ui.analyzed} • skipped ${ui.skippedErasures}")
+        MetricRow("Header", "${ui.headerValid} ok • ${ui.headerInvalid} bad")
+        MetricRow("Packing", "${ui.packAttempts} frames")
+        MetricRow("CRC", "${ui.crcAttempts} frames • ${ui.crcCandidateAttempts} candidates")
+        MetricRow("Result", "${ui.crcPass} pass • ${ui.crcFail} fail • ${ui.parserRejects} parser")
+        MetricRow("Temporal", "${ui.temporalRecoveredFrames} pass • obs ${t?.temporalObservations ?: 0} • fill ${t?.temporalFilledCells ?: 0} • override ${t?.temporalOverriddenCells ?: 0}")
+        MetricRow("Remaining", "${t?.remainingErasures ?: ui.erasures} erasures")
+        t?.header?.let { h -> MetricRow("Current", "s${h.sessionId} • f${h.frameId}/${h.totalFrames} • ${h.payloadLen} B") }
+        MetricRow("Candidate", t?.candidatePassed ?: "—", if (t?.crcPassed == true) Color(0xFF7EE787) else Color.White.copy(alpha = .75f))
+        MetricRow("CRC pair", crcPair(t))
+        MetricRow("Session", "unique ${ui.unique} • dup ${ui.duplicates} • conflicts ${ui.conflicts}")
+        Text(
+            "Reject: ${t?.rejectionReason ?: "—"}",
+            color = if (t?.rejectionReason == null) Color.White.copy(alpha = .55f) else Color(0xFFFFA657),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 8.sp,
+            minLines = 2,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ToolsPage(
+    ui: V7DebugUiState,
+    frozen: Boolean,
+    onForceProfile: (Int) -> Unit,
+    onLock: () -> Unit,
+    onUnlock: () -> Unit,
+    onCapture: () -> Unit,
+    onShare: () -> Unit,
+    onFreeze: () -> Unit,
+    onExport: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+            OutlinedTextField(
+                value = if (ui.forcedProfile < 0) "AUTO from marker" else V7OpticalProfiles.byId(ui.forcedProfile)?.label ?: "AUTO",
+                onValueChange = {},
+                readOnly = true,
+                singleLine = true,
+                label = { Text("Profile detection", fontSize = 8.sp) },
+                textStyle = LocalTextStyle.current.copy(fontSize = 10.sp),
+                modifier = Modifier.menuAnchor().fillMaxWidth(),
+            )
+            ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                DropdownMenuItem(text = { Text("AUTO from marker") }, onClick = { onForceProfile(-1); expanded = false })
+                V7OpticalProfiles.all.forEach { p ->
+                    DropdownMenuItem(text = { Text(p.label) }, onClick = { onForceProfile(p.id); expanded = false })
+                }
+            }
+        }
+
+        MetricRow("Focus", ui.focusState)
+        TwoButtons("Focus & lock", onLock, "Unlock", onUnlock)
+        TwoButtons("Capture", onCapture, "Share", onShare, outlined = true)
+        TwoButtons(if (frozen) "Resume" else "Freeze", onFreeze, "Export ZIP", onExport, outlined = false)
+        Text(
+            "ZIP now includes events.csv, frame-summary.csv, calibration.csv and richer CRC diagnostics.",
+            color = Color.White.copy(alpha = .55f),
+            fontSize = 8.sp,
+            maxLines = 2,
+        )
+    }
+}
+
+@Composable
+private fun MetricRow(label: String, value: String, valueColor: Color = Color.White) {
+    Row(Modifier.fillMaxWidth().height(21.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Color.White.copy(alpha = .52f), fontSize = 8.sp, modifier = Modifier.width(78.dp), maxLines = 1)
+        Text(
+            value,
+            color = valueColor,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 8.sp,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun TwoButtons(
+    left: String,
+    onLeft: () -> Unit,
+    right: String,
+    onRight: () -> Unit,
+    outlined: Boolean = false,
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (outlined) {
+            OutlinedButton(onClick = onLeft, modifier = Modifier.weight(1f)) { Text(left, fontSize = 9.sp) }
+            OutlinedButton(onClick = onRight, modifier = Modifier.weight(1f)) { Text(right, fontSize = 9.sp) }
+        } else {
+            Button(onClick = onLeft, modifier = Modifier.weight(1f)) { Text(left, fontSize = 9.sp) }
+            Button(onClick = onRight, modifier = Modifier.weight(1f)) { Text(right, fontSize = 9.sp) }
+        }
+    }
+}
+
+private fun yn(value: Boolean): String = if (value) "yes" else "no"
+
+private fun crcPair(t: V7TransportDiagnostics?): String {
+    val received = t?.receivedCrc32 ?: return "—"
+    val computed = t.computedCrc32 ?: return "0x%08X / —".format(received)
+    return "0x%08X / 0x%08X".format(received, computed)
 }
