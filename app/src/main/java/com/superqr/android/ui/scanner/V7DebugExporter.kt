@@ -28,7 +28,7 @@ object V7DebugExporter {
         val classificationSource: String,
         val borderFound: Boolean,
         val orientationResolved: Boolean,
-        val detectorMs: Double,
+        val detectorMs: Number,
         val calibrated: Int,
         val validSamples: Int,
         val confidentCells: Int,
