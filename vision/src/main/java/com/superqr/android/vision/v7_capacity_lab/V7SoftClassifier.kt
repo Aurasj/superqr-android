@@ -1,16 +1,11 @@
 package com.superqr.android.vision.v7_capacity_lab
 
 /**
- * Experimental soft color classifier for the V7 Capacity Lab.
+ * Allocation-light soft YUV classifier shared by the V7 lab and production receiver.
  *
- * For each cell, computes distances to observed (calibrated) YUV centers
- * for every palette symbol. Produces best/2nd symbol, distances, margin,
- * and an explicit erasure decision.
- *
- * Thresholds are experiment-configurable. No per-cell object allocation
- * in the FAST path — results go into parallel primitive arrays.
- *
- * ERASURE_MARKER = -1. Uncertain cells are NEVER coerced to symbol 0.
+ * CameraX YUV_420 chroma is spatially lower resolution than luma. Production V7 can
+ * therefore weight Y more strongly than U/V while keeping the original distance
+ * scale (equal weights still produce the original Euclidean squared distance).
  */
 class V7SoftClassifier {
 
@@ -18,17 +13,12 @@ class V7SoftClassifier {
         const val ERASURE_MARKER: Byte = -1
     }
 
-    /** Palette size (4 or 8). */
     var paletteSize: Int = 4
         private set
 
-    /** Calibrated YUV centers: centers[symbolIdx] = IntArray(3) { Y, U, V } */
     private var centers: Array<IntArray> = emptyArray()
-
-    /** Whether each symbol has been calibrated. */
     private var calibrated: BooleanArray = BooleanArray(0)
 
-    // ---- Output arrays (allocated once) ----
     var bestSymbols: ByteArray = ByteArray(0)
         private set
     var secondBestSymbols: ByteArray = ByteArray(0)
@@ -38,17 +28,23 @@ class V7SoftClassifier {
     var secondBestDistances: IntArray = IntArray(0)
         private set
 
-    /**
-     * Distance and margin thresholds for erasure decisions.
-     *
-     * maxDistanceThreshold: if best_distance > this, cell is erased.
-     * marginThreshold: if bestDist/secondBestDist > this (when secondBestDist > 0),
-     *   cell is erased (too ambiguous).
-     */
+    /** Same semantics/scale as before; weighted distances are normalized to 3 channels. */
     var maxDistanceThreshold: Int = 40000
     var marginThreshold: Double = 0.9
 
-    // ---- Calibration ----
+    var yWeight: Int = 1
+        private set
+    var uWeight: Int = 1
+        private set
+    var vWeight: Int = 1
+        private set
+
+    fun setChannelWeights(y: Int, u: Int, v: Int) {
+        require(y > 0 && u > 0 && v > 0) { "channel weights must be positive" }
+        yWeight = y
+        uWeight = u
+        vWeight = v
+    }
 
     fun setCenters(newCenters: Array<IntArray>) {
         paletteSize = newCenters.size
@@ -63,25 +59,17 @@ class V7SoftClassifier {
         calibrated[symbolIdx] = true
     }
 
-    fun isCalibrated(symbolIdx: Int): Boolean {
-        return symbolIdx in 0 until paletteSize && calibrated[symbolIdx]
-    }
+    fun isCalibrated(symbolIdx: Int): Boolean =
+        symbolIdx in 0 until paletteSize && calibrated[symbolIdx]
 
-    fun isFullyCalibrated(): Boolean {
-        return calibrated.all { it }
-    }
+    fun isFullyCalibrated(): Boolean = calibrated.all { it }
 
     fun resetCalibration() {
         calibrated.fill(false)
         centers = Array(paletteSize) { intArrayOf(128, 128, 128) }
     }
 
-    // ---- Classification ----
-
-    private fun ensureOutputArrays() {
-        // Output arrays are sized by the sampler's totalCells; we set them
-        // from the receiver when grid size is known.
-    }
+    private fun ensureOutputArrays() = Unit
 
     fun setCellCount(count: Int) {
         if (bestSymbols.size != count) {
@@ -92,26 +80,15 @@ class V7SoftClassifier {
         }
     }
 
-    /**
-     * Classify all cells given sampled Y/U/V arrays.
-     *
-     * Writes best/2nd symbols, distances, and erasures into the output arrays.
-     * Erased cells have bestSymbols[i] = ERASURE_MARKER.
-     *
-     * @param yArr sampled Y values (size = totalCells)
-     * @param uArr sampled U values
-     * @param vArr sampled V values
-     * @param totalCells number of cells
-     */
     fun classify(yArr: IntArray, uArr: IntArray, vArr: IntArray, totalCells: Int) {
         setCellCount(totalCells)
+        val weightSum = yWeight + uWeight + vWeight
 
         for (i in 0 until totalCells) {
             val y = yArr[i]
             val u = uArr[i]
             val v = vArr[i]
 
-            // Compute distances to all calibrated centers
             var bestIdx = 0
             var bestDist = Int.MAX_VALUE
             var secondIdx = 0
@@ -123,7 +100,12 @@ class V7SoftClassifier {
                 val dy = y - c[0]
                 val du = u - c[1]
                 val dv = v - c[2]
-                val dist = dy * dy + du * du + dv * dv
+                // Normalize back to the old three-channel squared-distance scale.
+                val weighted =
+                    yWeight.toLong() * dy * dy +
+                    uWeight.toLong() * du * du +
+                    vWeight.toLong() * dv * dv
+                val dist = ((weighted * 3L) / weightSum.toLong()).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
                 if (dist < bestDist) {
                     secondIdx = bestIdx
@@ -140,22 +122,15 @@ class V7SoftClassifier {
             secondBestDistances[i] = secondDist
             secondBestSymbols[i] = secondIdx.toByte()
 
-            // Erasure decision
-            if (bestDist > maxDistanceThreshold) {
-                bestSymbols[i] = ERASURE_MARKER
-            } else if (secondDist > 0 && secondDist < Int.MAX_VALUE &&
-                bestDist.toDouble() / secondDist.toDouble() > marginThreshold) {
-                bestSymbols[i] = ERASURE_MARKER
-            } else {
-                bestSymbols[i] = bestIdx.toByte()
+            bestSymbols[i] = when {
+                bestDist > maxDistanceThreshold -> ERASURE_MARKER
+                secondDist > 0 && secondDist < Int.MAX_VALUE &&
+                    bestDist.toDouble() / secondDist.toDouble() > marginThreshold -> ERASURE_MARKER
+                else -> bestIdx.toByte()
             }
         }
     }
 
-    /**
-     * Compute confidence margin for a cell.
-     * Returns 0.0 if margin cannot be computed (single calibrated symbol, etc.).
-     */
     fun confidenceMargin(cellIdx: Int): Double {
         val best = bestDistances[cellIdx]
         val second = secondBestDistances[cellIdx]
@@ -163,6 +138,5 @@ class V7SoftClassifier {
         return best.toDouble() / second.toDouble()
     }
 
-    /** Alias for ERASURE_MARKER for consistency with protocol naming. */
     fun isErasure(cellIdx: Int): Boolean = bestSymbols[cellIdx] == ERASURE_MARKER
 }
