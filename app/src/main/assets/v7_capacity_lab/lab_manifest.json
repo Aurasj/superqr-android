@@ -1,0 +1,1964 @@
+{
+  "artifact": "lab_manifest",
+  "description": "V7 Capacity Lab \u2014 machine-readable experiment definitions. LAB-ONLY. NOT a V7 visual contract, protocol spec, or wire-format definition.",
+  "lab_version": "0.1.0-lab",
+  "lab_schema_version": 2,
+  "canvas": {
+    "width": 1000.0,
+    "height": 1000.0,
+    "coordinate_convention": "half-open [x1, y1, x2, y2]",
+    "payload_bbox": [
+      200.0,
+      200.0,
+      800.0,
+      800.0
+    ]
+  },
+  "grid_sizes": [
+    40,
+    48,
+    56,
+    64,
+    72,
+    80,
+    96
+  ],
+  "dwell_epoch_candidates": [
+    2,
+    3,
+    4
+  ],
+  "prng": {
+    "algorithm": "xorshift32",
+    "status": "LAB-ONLY \u2014 does NOT select the final V7 protocol PRNG.",
+    "state_width_bits": 32,
+    "state_type": "unsigned 32-bit integer, uint32_t",
+    "state_mask": "0xFFFFFFFF \u2014 all operations masked to 32 bits",
+    "zero_seed_rule": "seed=0 is rejected. Seed is masked with 0xFFFFFFFF before use.",
+    "seed_masking": "seed & 0xFFFFFFFF",
+    "shift_sequence": [
+      {
+        "operation": "xor",
+        "shift": "left",
+        "amount": 13,
+        "mask": "0xFFFFFFFF"
+      },
+      {
+        "operation": "xor",
+        "shift": "right",
+        "amount": 17,
+        "mask": "0xFFFFFFFF"
+      },
+      {
+        "operation": "xor",
+        "shift": "left",
+        "amount": 5,
+        "mask": "0xFFFFFFFF"
+      }
+    ],
+    "state_transition_pseudocode": "x = state\nx ^= (x << 13) & 0xFFFFFFFF\nx ^= (x >> 17) & 0xFFFFFFFF\nx ^= (x << 5) & 0xFFFFFFFF\nstate = x\nreturn x",
+    "symbol_generation": {
+      "method": "take upper 16 bits of next 32-bit output, modulo symbol_count",
+      "pseudocode": "(next_state() >> 16) % (1 << bits_per_cell)",
+      "symbol_count_formula": "1 << bits_per_cell"
+    },
+    "state_continuity_across_cells": true,
+    "state_continuity_across_data_frames": "PRNG state continues across data frames without reset. The state at the end of data frame N is the starting state for data frame N+1.",
+    "calibration_frames_consume_prng_state": false,
+    "calibration_prng_note": "Calibration frames are solid-color fills \u2014 they do NOT consume PRNG state. The PRNG is first used at the start of data frame 0 and continues from there.",
+    "reference_seeds": [
+      42,
+      7,
+      13,
+      99
+    ],
+    "v6_golden_check": {
+      "description": "Cross-validation: 20x20 grid, 4-color palette, seed=42",
+      "first_20_symbols": [
+        1,
+        2,
+        3,
+        0,
+        0,
+        2,
+        3,
+        3,
+        2,
+        1,
+        0,
+        0,
+        0,
+        3,
+        1,
+        1,
+        2,
+        0,
+        2,
+        1
+      ],
+      "symbol_crc32": "BEAFE8A7"
+    }
+  },
+  "palettes": {
+    "v6_reference_4": {
+      "name": "v6_reference_4",
+      "bits_per_cell": 2,
+      "symbol_count": 4,
+      "color_map": {
+        "0": "#000000",
+        "1": "#FFFFFF",
+        "2": "#FF0000",
+        "3": "#0000FF"
+      }
+    },
+    "candidate_8_a": {
+      "name": "candidate_8_a",
+      "bits_per_cell": 3,
+      "symbol_count": 8,
+      "color_map": {
+        "0": "#000000",
+        "1": "#FFFFFF",
+        "2": "#FF0000",
+        "3": "#00FF00",
+        "4": "#0000FF",
+        "5": "#FFFF00",
+        "6": "#00FFFF",
+        "7": "#FF00FF"
+      }
+    }
+  },
+  "layouts": {
+    "single": {
+      "name": "single",
+      "semantics": "One region (id=0) covering rows 0..grid_size, cols 0..grid_size.",
+      "by_grid_size": {
+        "40": {
+          "grid_size": 40,
+          "total_regions": 1,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 40,
+              "col_start": 0,
+              "col_end": 40,
+              "cell_count": 1600
+            }
+          ]
+        },
+        "48": {
+          "grid_size": 48,
+          "total_regions": 1,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 48,
+              "col_start": 0,
+              "col_end": 48,
+              "cell_count": 2304
+            }
+          ]
+        },
+        "56": {
+          "grid_size": 56,
+          "total_regions": 1,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 56,
+              "col_start": 0,
+              "col_end": 56,
+              "cell_count": 3136
+            }
+          ]
+        },
+        "64": {
+          "grid_size": 64,
+          "total_regions": 1,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 64,
+              "col_start": 0,
+              "col_end": 64,
+              "cell_count": 4096
+            }
+          ]
+        },
+        "72": {
+          "grid_size": 72,
+          "total_regions": 1,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 72,
+              "col_start": 0,
+              "col_end": 72,
+              "cell_count": 5184
+            }
+          ]
+        },
+        "80": {
+          "grid_size": 80,
+          "total_regions": 1,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 80,
+              "col_start": 0,
+              "col_end": 80,
+              "cell_count": 6400
+            }
+          ]
+        },
+        "96": {
+          "grid_size": 96,
+          "total_regions": 1,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 96,
+              "col_start": 0,
+              "col_end": 96,
+              "cell_count": 9216
+            }
+          ]
+        }
+      }
+    },
+    "2x2": {
+      "name": "2x2",
+      "semantics": "Four equal-quadrant regions. Split at rows//2 and cols//2. Region IDs: 0=TL, 1=TR, 2=BL, 3=BR. For odd grid dimensions, bottom and right regions get the extra row/col (integer division remainder). No lane headers, no lane IDs on wire \u2014 purely spatial subdivision.",
+      "by_grid_size": {
+        "40": {
+          "grid_size": 40,
+          "total_regions": 4,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 20,
+              "col_start": 0,
+              "col_end": 20,
+              "cell_count": 400
+            },
+            {
+              "region_id": 1,
+              "row_start": 0,
+              "row_end": 20,
+              "col_start": 20,
+              "col_end": 40,
+              "cell_count": 400
+            },
+            {
+              "region_id": 2,
+              "row_start": 20,
+              "row_end": 40,
+              "col_start": 0,
+              "col_end": 20,
+              "cell_count": 400
+            },
+            {
+              "region_id": 3,
+              "row_start": 20,
+              "row_end": 40,
+              "col_start": 20,
+              "col_end": 40,
+              "cell_count": 400
+            }
+          ]
+        },
+        "48": {
+          "grid_size": 48,
+          "total_regions": 4,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 24,
+              "col_start": 0,
+              "col_end": 24,
+              "cell_count": 576
+            },
+            {
+              "region_id": 1,
+              "row_start": 0,
+              "row_end": 24,
+              "col_start": 24,
+              "col_end": 48,
+              "cell_count": 576
+            },
+            {
+              "region_id": 2,
+              "row_start": 24,
+              "row_end": 48,
+              "col_start": 0,
+              "col_end": 24,
+              "cell_count": 576
+            },
+            {
+              "region_id": 3,
+              "row_start": 24,
+              "row_end": 48,
+              "col_start": 24,
+              "col_end": 48,
+              "cell_count": 576
+            }
+          ]
+        },
+        "56": {
+          "grid_size": 56,
+          "total_regions": 4,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 28,
+              "col_start": 0,
+              "col_end": 28,
+              "cell_count": 784
+            },
+            {
+              "region_id": 1,
+              "row_start": 0,
+              "row_end": 28,
+              "col_start": 28,
+              "col_end": 56,
+              "cell_count": 784
+            },
+            {
+              "region_id": 2,
+              "row_start": 28,
+              "row_end": 56,
+              "col_start": 0,
+              "col_end": 28,
+              "cell_count": 784
+            },
+            {
+              "region_id": 3,
+              "row_start": 28,
+              "row_end": 56,
+              "col_start": 28,
+              "col_end": 56,
+              "cell_count": 784
+            }
+          ]
+        },
+        "64": {
+          "grid_size": 64,
+          "total_regions": 4,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 32,
+              "col_start": 0,
+              "col_end": 32,
+              "cell_count": 1024
+            },
+            {
+              "region_id": 1,
+              "row_start": 0,
+              "row_end": 32,
+              "col_start": 32,
+              "col_end": 64,
+              "cell_count": 1024
+            },
+            {
+              "region_id": 2,
+              "row_start": 32,
+              "row_end": 64,
+              "col_start": 0,
+              "col_end": 32,
+              "cell_count": 1024
+            },
+            {
+              "region_id": 3,
+              "row_start": 32,
+              "row_end": 64,
+              "col_start": 32,
+              "col_end": 64,
+              "cell_count": 1024
+            }
+          ]
+        },
+        "72": {
+          "grid_size": 72,
+          "total_regions": 4,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 36,
+              "col_start": 0,
+              "col_end": 36,
+              "cell_count": 1296
+            },
+            {
+              "region_id": 1,
+              "row_start": 0,
+              "row_end": 36,
+              "col_start": 36,
+              "col_end": 72,
+              "cell_count": 1296
+            },
+            {
+              "region_id": 2,
+              "row_start": 36,
+              "row_end": 72,
+              "col_start": 0,
+              "col_end": 36,
+              "cell_count": 1296
+            },
+            {
+              "region_id": 3,
+              "row_start": 36,
+              "row_end": 72,
+              "col_start": 36,
+              "col_end": 72,
+              "cell_count": 1296
+            }
+          ]
+        },
+        "80": {
+          "grid_size": 80,
+          "total_regions": 4,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 40,
+              "col_start": 0,
+              "col_end": 40,
+              "cell_count": 1600
+            },
+            {
+              "region_id": 1,
+              "row_start": 0,
+              "row_end": 40,
+              "col_start": 40,
+              "col_end": 80,
+              "cell_count": 1600
+            },
+            {
+              "region_id": 2,
+              "row_start": 40,
+              "row_end": 80,
+              "col_start": 0,
+              "col_end": 40,
+              "cell_count": 1600
+            },
+            {
+              "region_id": 3,
+              "row_start": 40,
+              "row_end": 80,
+              "col_start": 40,
+              "col_end": 80,
+              "cell_count": 1600
+            }
+          ]
+        },
+        "96": {
+          "grid_size": 96,
+          "total_regions": 4,
+          "regions": [
+            {
+              "region_id": 0,
+              "row_start": 0,
+              "row_end": 48,
+              "col_start": 0,
+              "col_end": 48,
+              "cell_count": 2304
+            },
+            {
+              "region_id": 1,
+              "row_start": 0,
+              "row_end": 48,
+              "col_start": 48,
+              "col_end": 96,
+              "cell_count": 2304
+            },
+            {
+              "region_id": 2,
+              "row_start": 48,
+              "row_end": 96,
+              "col_start": 0,
+              "col_end": 48,
+              "cell_count": 2304
+            },
+            {
+              "region_id": 3,
+              "row_start": 48,
+              "row_end": 96,
+              "col_start": 48,
+              "col_end": 96,
+              "cell_count": 2304
+            }
+          ]
+        }
+      }
+    }
+  },
+  "frame_sequence": {
+    "sequence_order": [
+      "calibration_solid_frames",
+      "calibration_preamble_frames",
+      "data_frames"
+    ],
+    "calibration_solid_frames": {
+      "enabled_when": "profile.calibration.solid_frames == true (default: true)",
+      "frame_count": "palette.symbol_count (4 for 4-color, 8 for 8-color)",
+      "frame_contents": "Each frame is a solid fill: every cell set to the same symbol index. Frames are generated in palette index order: 0, 1, ..., symbol_count-1.",
+      "prng_consumed": false,
+      "frame_type_field": "calibration",
+      "frame_index": "sequential, starting from 0, incrementing across all frame types",
+      "logical_epoch": "base + (frame_position_in_group) * dwell_epochs"
+    },
+    "calibration_preamble_frames": {
+      "enabled_when": "profile.calibration.preamble_frames > 0 (default: 0 = disabled)",
+      "frame_count": "profile.calibration.preamble_frames",
+      "frame_contents": "Cycles through solid calibration colors: frame i uses symbol index (i % palette.symbol_count). Cycle repeats if preamble_frames > symbol_count.",
+      "prng_consumed": false,
+      "frame_type_field": "calibration"
+    },
+    "data_frames": {
+      "frame_count": "num_data_frames (caller-specified, 4 in sequence vectors)",
+      "frame_contents": "PRNG-filled symbol matrix. Each cell consumes one PRNG symbol. If reference_cell_density > 0, a boolean mask replaces every Nth cell (row-major count, starting at cell 0) with ref_color_index=0.",
+      "prng_consumed": true,
+      "prng_state": "PRNG is instantiated with profile.seed at the start of build_frame_sequence. Calibration frames do not advance PRNG state. The first PRNG call generates the first cell (row 0, col 0) of data frame 0. PRNG state continues across data frames without reset.",
+      "frame_type_field": "data"
+    },
+    "frame_index_semantics": "Monotonically increasing integer, starting at 0, assigned sequentially across ALL frames (calibration + data) in generation order.",
+    "logical_epoch_semantics": "Cumulative logical display epoch counter. Starts at 0. Increments by dwell_epochs per frame. E.g. with dwell_epochs=2: frame 0 at epoch 0, frame 1 at epoch 2, frame 2 at epoch 4, etc.",
+    "canonical_generator_behavior": "The Python Capacity Lab build_frame_sequence() produces a FINITE sequence: num_data_frames data frames preceded by optional calibration. It does NOT loop, wrap, or produce infinite streams. Desktop playback looping/wrapping is a presentation-layer concern and NOT part of the canonical lab generator semantics."
+  },
+  "calibration": {
+    "solid_frames": {
+      "enabled": true,
+      "default_enabled": true,
+      "mode": "one_frame_per_palette_symbol",
+      "frame_count": "palette.symbol_count",
+      "symbol_ordering": "ascending palette index (0, 1, ..., symbol_count-1)",
+      "frame_contents": "every cell filled with the calibration symbol index",
+      "prng_consumed": false,
+      "frame_type": "calibration"
+    },
+    "preamble": {
+      "enabled": false,
+      "default_preamble_frames": 0,
+      "mode": "cycled_solid_fill",
+      "frame_count": "profile.calibration.preamble_frames",
+      "symbol_ordering": "Cycle through palette indexes: frame i uses symbol index (i % palette.symbol_count). Cycle repeats if preamble_frames > symbol_count.",
+      "frame_contents": "every cell filled with the selected symbol index",
+      "prng_consumed": false,
+      "frame_type": "calibration"
+    },
+    "reference_cells": {
+      "enabled": false,
+      "default_density": 0,
+      "mode": "periodic_mask_overlay",
+      "density_rule": "density=0: disabled (no reference cells). density=N: every Nth cell (row-major count, starting at cell 0) becomes a reference cell.",
+      "mask_build_algorithm": "Iterate cells row-major. Maintain a zero-based counter. Cell is reference if counter % density == 0.",
+      "ref_color_index": 0,
+      "overlay_timing": "Mask is applied to each data frame AFTER PRNG generation and BEFORE hashing. Reference cells do not consume additional PRNG state.",
+      "applied_to_calibration_frames": false
+    }
+  },
+  "lab_serialization": {
+    "description": "One unsigned byte per symbol index, row-major. Each symbol index (0..symbol_count-1) is stored as a single uint8. NOT V7 wire packing \u2014 laboratory representation only.",
+    "byte_per_symbol": true,
+    "ordering": "row-major (top-to-bottom, left-to-right)",
+    "ordering_detail": "for r in 0..rows-1: for c in 0..cols-1: emit uint8(matrix[r][c])",
+    "symbol_range": "0..255",
+    "hash_functions": {
+      "symbol_crc32": "CRC32 (zlib) over lab-serialized bytes, uppercase hex",
+      "symbol_sha256": "SHA-256 over lab-serialized bytes, lowercase hex"
+    }
+  },
+  "erasure_marker": {
+    "value": -1,
+    "semantics": "Sentinel value (-1) used in received symbol matrices to indicate an unclassifiable cell. Erasures are excluded from BER denominator and numerator; counted separately by erasure_rate(). Erasures count as errors in SER."
+  },
+  "reference_profiles": {
+    "ref_40x40_v6_reference_4_seed42": {
+      "grid_size": 40,
+      "palette_name": "v6_reference_4",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_40x40_candidate_8_a_seed42": {
+      "grid_size": 40,
+      "palette_name": "candidate_8_a",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_48x48_v6_reference_4_seed42": {
+      "grid_size": 48,
+      "palette_name": "v6_reference_4",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_48x48_candidate_8_a_seed42": {
+      "grid_size": 48,
+      "palette_name": "candidate_8_a",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_56x56_v6_reference_4_seed42": {
+      "grid_size": 56,
+      "palette_name": "v6_reference_4",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_56x56_candidate_8_a_seed42": {
+      "grid_size": 56,
+      "palette_name": "candidate_8_a",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_64x64_v6_reference_4_seed42": {
+      "grid_size": 64,
+      "palette_name": "v6_reference_4",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_64x64_candidate_8_a_seed42": {
+      "grid_size": 64,
+      "palette_name": "candidate_8_a",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_72x72_v6_reference_4_seed42": {
+      "grid_size": 72,
+      "palette_name": "v6_reference_4",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_72x72_candidate_8_a_seed42": {
+      "grid_size": 72,
+      "palette_name": "candidate_8_a",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_80x80_v6_reference_4_seed42": {
+      "grid_size": 80,
+      "palette_name": "v6_reference_4",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_80x80_candidate_8_a_seed42": {
+      "grid_size": 80,
+      "palette_name": "candidate_8_a",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_96x96_v6_reference_4_seed42": {
+      "grid_size": 96,
+      "palette_name": "v6_reference_4",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    },
+    "ref_96x96_candidate_8_a_seed42": {
+      "grid_size": 96,
+      "palette_name": "candidate_8_a",
+      "layout_name": "single",
+      "seed": 42,
+      "dwell_epochs": 2,
+      "calibration": {
+        "solid_frames": true,
+        "preamble_frames": 0,
+        "reference_cell_density": 0
+      }
+    }
+  },
+  "sequence_vectors": {
+    "ref_40x40_v6_reference_4_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "e61f41d57db208c5f92a35c4ce7198570924a3fc87eeba83441fceee5d6a2865"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "504bc3fe5f1a16d3c33ae958f0542d01e4cf861071a97a6715cfd486ce7f7d6f"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "9a2366548afb2ac9284aae7fed8fc7aac01fd6a0c21e29597b8046784776b9df"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "1507e1859646ce12f12bf0ea91b8cc4c6ca0b333a461247536bda927bc8a8e0e"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 4,
+          "frame_type": "data",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "06b045348c4193e1be03a704889200afdf17ef12d38804684e2387b2b306f518"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "data",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "8b4096f231ec0e9fc8fa8ef697687265dc622b5ad4853d9cc9412e853f5946ed"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "data",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "89f7a592e12b58285e24533c8d082e3f421bc2512fe29a71cfd316c681e027b0"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "data",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "948981c001649a1a6bb1453bfdcc57f9dd96523e4c92c27ae9397ca325d28be1"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 4 calibration + 4 data frames = 12800 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "5fec3fb13f36af28451f1b1f7de99e6c0187249feff635398fcc5f411ebceaf6"
+      }
+    },
+    "ref_40x40_candidate_8_a_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "e61f41d57db208c5f92a35c4ce7198570924a3fc87eeba83441fceee5d6a2865"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "504bc3fe5f1a16d3c33ae958f0542d01e4cf861071a97a6715cfd486ce7f7d6f"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "9a2366548afb2ac9284aae7fed8fc7aac01fd6a0c21e29597b8046784776b9df"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "1507e1859646ce12f12bf0ea91b8cc4c6ca0b333a461247536bda927bc8a8e0e"
+        },
+        {
+          "frame_index": 4,
+          "frame_type": "calibration",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "afceaae5eaac0c263c0c3f662390dc53b4c5fb03ba0cb37a6dac35b6629edc41"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "calibration",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "f9b830d372ae2d769bb473fc80bb98d3b6defc9246cf48f27ea54aeba6b65491"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "calibration",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "4e13cca784f2d672db4b8cacac94e6b1de3e969bfda0420cc86d07f343dd70a7"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "calibration",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "115afa8a2feecc2161503914160ed7b141545a99e77e86a50f37811686572cf3"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 8,
+          "frame_type": "data",
+          "logical_epoch": 16,
+          "dwell_epochs": 2,
+          "symbol_sha256": "ee4a44ebbe82bb9097f15edc609ef927e2400d61a44a5c66edabf366044c279f"
+        },
+        {
+          "frame_index": 9,
+          "frame_type": "data",
+          "logical_epoch": 18,
+          "dwell_epochs": 2,
+          "symbol_sha256": "8b4847752c13bc18a7b04aed1e8b0befb66ba8024ce0db672759ba09963698e3"
+        },
+        {
+          "frame_index": 10,
+          "frame_type": "data",
+          "logical_epoch": 20,
+          "dwell_epochs": 2,
+          "symbol_sha256": "9290fe97275c7d06abd9e21e5e31d1d9c3e5c0aaa87403a2313282224954873a"
+        },
+        {
+          "frame_index": 11,
+          "frame_type": "data",
+          "logical_epoch": 22,
+          "dwell_epochs": 2,
+          "symbol_sha256": "1ac43bfd6b19fa3046dbe0bd7e4e9a7348849660b4661f2ca2fe2fed41c0dad8"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 8 calibration + 4 data frames = 19200 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "855b44bcad0d25891d8e28270bcb4b2f765a9e744e398bcaabbaf14854ee5fdb"
+      }
+    },
+    "ref_48x48_v6_reference_4_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "cfc335996cfae29fdf14fd2db7ea853366d350a5d387aa3c322616e81dacd56b"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "e91c12886f46fa53bfa4e01c9863126831e4548a4e90d8fd835d6e1406d59c79"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "b4f5ef56a5a87d35de80c331c15140bd408b739fd0229684a43d87bedd9d01ca"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "5639ad5d04d14d66527861df586b9514995f53d46210cee4d7d465a9b6231fe8"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 4,
+          "frame_type": "data",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "3dbb981d14a8c24cebd7d06cca0dc33b0e6795ab2d94538aee312c333ad7ca5e"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "data",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "6630a82b0f9cf4d0b496c16a1b5addeff74076b0b973cefdee8fd75a04d140ca"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "data",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "5043ab8531eeb25c5f72520eef8548220295568b46d3048f84891d2e6675c3d3"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "data",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "a321d1c4d868e06f417ace84537c03016508c2eb1ca451968de622e64f48e5ee"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 4 calibration + 4 data frames = 18432 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "9633ed70d247a41f3d3328b04e3530a0643fc6c0d77aa35196070a28f8a95aa0"
+      }
+    },
+    "ref_48x48_candidate_8_a_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "cfc335996cfae29fdf14fd2db7ea853366d350a5d387aa3c322616e81dacd56b"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "e91c12886f46fa53bfa4e01c9863126831e4548a4e90d8fd835d6e1406d59c79"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "b4f5ef56a5a87d35de80c331c15140bd408b739fd0229684a43d87bedd9d01ca"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "5639ad5d04d14d66527861df586b9514995f53d46210cee4d7d465a9b6231fe8"
+        },
+        {
+          "frame_index": 4,
+          "frame_type": "calibration",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "b734da61d6a7435d06db2bc4f0a08108b9ddbe2cb222c9740dd9603035d75292"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "calibration",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "9f9f5e4d4110902900ff38998b953101cfe52f063ab71cdba80bd5d9a1c17736"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "calibration",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "86cf11aff2b897b514a7231092e1b4a5b9f3e97a32da9aa3844500d88b0bc835"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "calibration",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "a344fca1fd4eb92085e3071731bbcfe8c036d1bb0011db34ea755a93822497c4"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 8,
+          "frame_type": "data",
+          "logical_epoch": 16,
+          "dwell_epochs": 2,
+          "symbol_sha256": "cc0b8f461728b805b842e7410b95fab9560636b586935bd5929d9ab39dbad65b"
+        },
+        {
+          "frame_index": 9,
+          "frame_type": "data",
+          "logical_epoch": 18,
+          "dwell_epochs": 2,
+          "symbol_sha256": "4abfdec07e07b5237721edc9fbedd877c9fb52fd609c84cdd244d2001c3ee750"
+        },
+        {
+          "frame_index": 10,
+          "frame_type": "data",
+          "logical_epoch": 20,
+          "dwell_epochs": 2,
+          "symbol_sha256": "928be57292fc4fc0de773a4396f48aa22da4a3cf3631e78164fcf5689d28debc"
+        },
+        {
+          "frame_index": 11,
+          "frame_type": "data",
+          "logical_epoch": 22,
+          "dwell_epochs": 2,
+          "symbol_sha256": "330516af0032190bc5b923156f2cbea1abbb5091f442ea44317b1a93195054b9"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 8 calibration + 4 data frames = 27648 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "36cb827eaa16e06c14fd70cac3647c8be33201875839bdd90f196858165051f8"
+      }
+    },
+    "ref_56x56_v6_reference_4_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "b00cd820a573181c37db022786eec519e6440cc3643181e0449da9c3f8f3e271"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "699722156056162c61d13bf504d371c5854a259cc5e1767342d64ecc7729b952"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "6b45bef0f7594dfc4bf22e98f289841727c35b2c8966dd058eb0215f571adc4a"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "e89fc6b3fbeb43468d5ebb4f85380406197c589c9ecf1f5f78b13060617b412e"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 4,
+          "frame_type": "data",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "78bdbdcfddfe3ef001d41283a56153cf32d9aa645a81aaa9e8b6942839f7e743"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "data",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "3e0cbfdb20abe36261cf23a69ca295dff46339c2bd9749554c93885437136841"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "data",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "d47cbc5fe180196e08b379ae0ca65a63304809fc841f2db69990a2fef4ed8128"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "data",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "5dd0f65a68d9ea8f5cced8e95086336100a54674b36564cda175521a0755d8bd"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 4 calibration + 4 data frames = 25088 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "eb81b24c50f7761548126aa8ff091dac302964601f30235f8e51ba0ec5c945c7"
+      }
+    },
+    "ref_56x56_candidate_8_a_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "b00cd820a573181c37db022786eec519e6440cc3643181e0449da9c3f8f3e271"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "699722156056162c61d13bf504d371c5854a259cc5e1767342d64ecc7729b952"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "6b45bef0f7594dfc4bf22e98f289841727c35b2c8966dd058eb0215f571adc4a"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "e89fc6b3fbeb43468d5ebb4f85380406197c589c9ecf1f5f78b13060617b412e"
+        },
+        {
+          "frame_index": 4,
+          "frame_type": "calibration",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "612655bcbdbb74f2ca205c0c311bce70829749c08d44bae918f14e90e71c7b30"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "calibration",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "67fa8ae94465fb044be93322a0c14e7055b8bd2716ecf664a7b5bb50a07d928a"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "calibration",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "cfc4fb761c5adf1a37d1f845cf825b4340e4ec863b3ddd632b9d29f3a03d8c70"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "calibration",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "b0829235a677c43574cb4e4fed1298a9af901f6c176da984b37eb5f726f8358f"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 8,
+          "frame_type": "data",
+          "logical_epoch": 16,
+          "dwell_epochs": 2,
+          "symbol_sha256": "0c615c7402def1cc17919f8ed0d70fbadc85cb58dfb79b5a5b2bb32d37ed8e31"
+        },
+        {
+          "frame_index": 9,
+          "frame_type": "data",
+          "logical_epoch": 18,
+          "dwell_epochs": 2,
+          "symbol_sha256": "43d492f49b963026480ad25c15fbe84fa2d26a65eb2496a65090e5394d886dfa"
+        },
+        {
+          "frame_index": 10,
+          "frame_type": "data",
+          "logical_epoch": 20,
+          "dwell_epochs": 2,
+          "symbol_sha256": "9d9fc9976b25b820d2ed70b312003b1b9480d6fbd9bdb8cc30e7ca30cdcb5655"
+        },
+        {
+          "frame_index": 11,
+          "frame_type": "data",
+          "logical_epoch": 22,
+          "dwell_epochs": 2,
+          "symbol_sha256": "3a4936c8cd40dc96cf6c7346b8cab25812e6e0edb277d0343ea0377567f2e909"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 8 calibration + 4 data frames = 37632 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "b9dbc52c978832fa92c313e8621bb85ac9ce49f67d1c05cb65f278ef77ab3dba"
+      }
+    },
+    "ref_64x64_v6_reference_4_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "3431383721510cf1c211de027cf958c183e16db5fabb6b230eb284c85e196aa9"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "30d6bc164ea54188aa9df0c14f20c4fbc8a155c5644bcc9ef9eb05901cb07d70"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "4539cc1fbc3c22bb131672c62f20ff87f3f587ba2d3d4c5b161c271c98c07b38"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 4,
+          "frame_type": "data",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "909354211d8bb0e2287fe69170d3af343b46d2ca7ad813c626ebac719821b148"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "data",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "9957dbbbd817294ac495a358f674c90b7d320af208e8517adf0b20f078899bd8"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "data",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "fec91ab5cffa8952fb4921a7045d08b79f50eccd8b6e0940b03239e6921bfe82"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "data",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "d287edbef8320936df5f380cc28a1bab894a95a6eef3690be8744dc03f465276"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 4 calibration + 4 data frames = 32768 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "884e9213e59336762d9cb26e3ca9575e26d691bccfbefe8d6c0b967e559919c0"
+      }
+    },
+    "ref_64x64_candidate_8_a_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "3431383721510cf1c211de027cf958c183e16db5fabb6b230eb284c85e196aa9"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "30d6bc164ea54188aa9df0c14f20c4fbc8a155c5644bcc9ef9eb05901cb07d70"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "4539cc1fbc3c22bb131672c62f20ff87f3f587ba2d3d4c5b161c271c98c07b38"
+        },
+        {
+          "frame_index": 4,
+          "frame_type": "calibration",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "39c080da1146fced48615c5577196a128f716fdb0ff952a615c0707989574eb3"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "calibration",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "fb7363f1f02c2f244c32aa8076ef7edbc2e621137542836adc1e312143968d75"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "calibration",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "300149a02cb87df26610b2e874637411f567bba9b586c90f47dc126ff203c0e8"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "calibration",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "c9ac7b0624824f844f6c7f3d50fab9741a8914e878467e8daaedca143a34d90b"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 8,
+          "frame_type": "data",
+          "logical_epoch": 16,
+          "dwell_epochs": 2,
+          "symbol_sha256": "8d30eca27406409da3731be45d9691078fe1fd3a2a0fbb309863adad2e1166f9"
+        },
+        {
+          "frame_index": 9,
+          "frame_type": "data",
+          "logical_epoch": 18,
+          "dwell_epochs": 2,
+          "symbol_sha256": "fd3cc5ae034ecbab3f0282145c832a47af3d5c93565a59fff642d4e0346fc2e2"
+        },
+        {
+          "frame_index": 10,
+          "frame_type": "data",
+          "logical_epoch": 20,
+          "dwell_epochs": 2,
+          "symbol_sha256": "bd65bb254bb92313affb08ea2cc900f9c30212a6cbfa7ff127e5b34a37bea383"
+        },
+        {
+          "frame_index": 11,
+          "frame_type": "data",
+          "logical_epoch": 22,
+          "dwell_epochs": 2,
+          "symbol_sha256": "e3c2ff168fb07af02c460132daf4dd76eb37b235c73450db01c657bcc616a2c2"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 8 calibration + 4 data frames = 49152 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "d64f5de75a9295915099c7f8125d5a8bb82f54c84a41cc415fb933dfd0220351"
+      }
+    },
+    "ref_72x72_v6_reference_4_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "523862a510945f2c2fd57aab7df19831a15603bd4a0d99c2515a79a90b3813f9"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "b815e4a5eb3a0464bd1023a8f0aecf3e5816a04e5a5d740bd391fd20513dffaf"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "6ae69783c78b800ebcca2be7edc2eba939e37dfb12dca9ba47733fa484df3b26"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "bb8611ba5211f93a3eebe3cad9bded87bacb630e2b36113158635cdbac3d4cb8"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 4,
+          "frame_type": "data",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "7151281914cdd09bdd80bfc2489a2090ac47cbcbce572e0e2c49e6a7878cddf8"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "data",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "a06677d2325b77b109614b5cec4e68160954230e0dae4352517b52d6f04112e6"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "data",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "e92575eb6ee2dd4b282d73ac4b9e583654c94fd2bbe649221dea6f8a915c2370"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "data",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "23960f3424438eed24b792547d0ded99d90941ccdbbb6dc51f757c045f726c9f"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 4 calibration + 4 data frames = 41472 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "247a8a6e6eb2f8e497c9e88195723685bb21d793419cf6a1c43308fec52e0ed0"
+      }
+    },
+    "ref_72x72_candidate_8_a_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "523862a510945f2c2fd57aab7df19831a15603bd4a0d99c2515a79a90b3813f9"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "b815e4a5eb3a0464bd1023a8f0aecf3e5816a04e5a5d740bd391fd20513dffaf"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "6ae69783c78b800ebcca2be7edc2eba939e37dfb12dca9ba47733fa484df3b26"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "bb8611ba5211f93a3eebe3cad9bded87bacb630e2b36113158635cdbac3d4cb8"
+        },
+        {
+          "frame_index": 4,
+          "frame_type": "calibration",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "f8fc82ab63c867d863fff0d8f4bbaef635177d8c2f2a2774ab3ff3dcbfd05e8a"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "calibration",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "3ae5f904af5732d304536b1e5a15fc325abca3dec76995b2cb2f72fe285fec46"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "calibration",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "c085e7b455d54ec4ae790f66aee00092423a18ae47f31003853bb40a6cd3be81"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "calibration",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "f4984e8a1c83a4e1ed54b33c12fadc893adba8ea608741b3a2ed517318fbdcab"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 8,
+          "frame_type": "data",
+          "logical_epoch": 16,
+          "dwell_epochs": 2,
+          "symbol_sha256": "4a9c75a1811c3e286e8b1597d291555e2b21be4d1fa165ab5b4b1952bef8e5c1"
+        },
+        {
+          "frame_index": 9,
+          "frame_type": "data",
+          "logical_epoch": 18,
+          "dwell_epochs": 2,
+          "symbol_sha256": "a8f733430e21a35cf9ef6a3dffbf9296ab35218ec77b198292e68bcba967483c"
+        },
+        {
+          "frame_index": 10,
+          "frame_type": "data",
+          "logical_epoch": 20,
+          "dwell_epochs": 2,
+          "symbol_sha256": "76fd76b449707f66c80b7ee7ed09ccdacd23168d0d08f403aff121f9e54ee382"
+        },
+        {
+          "frame_index": 11,
+          "frame_type": "data",
+          "logical_epoch": 22,
+          "dwell_epochs": 2,
+          "symbol_sha256": "47a3293ce0f69dbcb4470e5ecdfcf4eda41f95312454d45b054a6446d2419084"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 8 calibration + 4 data frames = 62208 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "2bbbf60d060ebf5c30675ce3f76cb0d6061f6aa852c928da1ae4bfe4646624c3"
+      }
+    },
+    "ref_80x80_v6_reference_4_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "56a43ef88ddfcd0f56f7dd973312c0e73d62f59655c01d7b4e59aaa3be8b3fb6"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "97ed17cd3058ec221e7cfffb93d03d698a8dd4609e673dd341a32d9e3ca62c7a"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "55ca862c220e39710266fd58821907224f6d4df73f2ac05cc1d89eb346a53744"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "092902283199f4896033c45c8d1a4e4a31a86afd34da025a9ea847b3702d4eec"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 4,
+          "frame_type": "data",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "6ee6c80c44a37677970aef98eac1250bbcf0b7fbd3b114f0c1c012e488717af2"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "data",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "a0dc4740c42722305048ffc0f59cfa33216f808ca80ef9f1f30ccb9e84d0626f"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "data",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "44e1bbda025fd6cd057ee4fe8b337be551975eb80d70a3f339f10d848164dcb6"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "data",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "8843dd0b43ea6a3c80fee1b4587901bc2b406b3f4fc84918eef43a62ed6dda88"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 4 calibration + 4 data frames = 51200 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "0322df9953602c557ea17a886555ecf85bde10dacf518bc923ea5f8b14a4fdb5"
+      }
+    },
+    "ref_80x80_candidate_8_a_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "56a43ef88ddfcd0f56f7dd973312c0e73d62f59655c01d7b4e59aaa3be8b3fb6"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "97ed17cd3058ec221e7cfffb93d03d698a8dd4609e673dd341a32d9e3ca62c7a"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "55ca862c220e39710266fd58821907224f6d4df73f2ac05cc1d89eb346a53744"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "092902283199f4896033c45c8d1a4e4a31a86afd34da025a9ea847b3702d4eec"
+        },
+        {
+          "frame_index": 4,
+          "frame_type": "calibration",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "62c51efd780a2f7acd9d80a09786090ed747e146a7ebd4a3346bc078143a51fb"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "calibration",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "897f4c4b3be991a36f84474a36063eb3cdf2c5e0f3ee21e5cfb108eb9d445290"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "calibration",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "923ba7366b3c2198732d1bd79e249fa058dc0d2ffed3b84cdc153a60bd5b5022"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "calibration",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "789fee29cdeab77882ffdd9762cbc3ecccd71896395dd760b7e991aa7996ab91"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 8,
+          "frame_type": "data",
+          "logical_epoch": 16,
+          "dwell_epochs": 2,
+          "symbol_sha256": "34e2f15a77f880bdf688cf3d5183a1950bbd17244844001e2996a58a7a0b344b"
+        },
+        {
+          "frame_index": 9,
+          "frame_type": "data",
+          "logical_epoch": 18,
+          "dwell_epochs": 2,
+          "symbol_sha256": "859cb4e7f7be2dda7087a9bb28480e831b77b4480a55be41336324fc34b3be20"
+        },
+        {
+          "frame_index": 10,
+          "frame_type": "data",
+          "logical_epoch": 20,
+          "dwell_epochs": 2,
+          "symbol_sha256": "ebaf8e50e4f50244ebba69187205c1949c1ec4010653049639a1163c6348d914"
+        },
+        {
+          "frame_index": 11,
+          "frame_type": "data",
+          "logical_epoch": 22,
+          "dwell_epochs": 2,
+          "symbol_sha256": "bef5a1b9a3c783a385500ae0564d06a91b0a499a296a182b8d11414a867c9a4b"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 8 calibration + 4 data frames = 76800 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "c40ac25b120fba007392a813a8e3e58e198809eb0d8c3c38cf5cad4e0c1857fb"
+      }
+    },
+    "ref_96x96_v6_reference_4_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "2d07a41ae992770085117e9815300bfd0730745883e60b24aaad5e69dfc087ae"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "f9de1ef79c9d385cf14b1a1b1fd761391f3e985ce004b1a5942cb94a9275ba17"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "c601641f59f51c98a54aaa9f551396b77ab64cbf0fd6413d4f8e841190bff46c"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "30182cc4df20ca54b81f0ee0694bd0de29c744881cf33ef01eb46248f608eb26"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 4,
+          "frame_type": "data",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "8650ed9161e130e3951b59f556d64aefb8b51b2f675e070319c8d3c90530f8d0"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "data",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "cd59322dc136b37d777ec9658bf63f5bf4bdca44cf46b82255abec9b38f8f4e0"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "data",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "a8499ae789679c357151f5aae8e29d389c961042a29b3217e183115e57466f7f"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "data",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "337a805c451deec0189770bac001be71aaf48bf895ef8a93cc123d8c92e6312c"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 4 calibration + 4 data frames = 73728 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "d5e7db4c484ab3ba8403a3570050499403a2ad8ebc3a0ac88afcec237519a45f"
+      }
+    },
+    "ref_96x96_candidate_8_a_seed42": {
+      "num_data_frames_in_sequence": 4,
+      "calibration_frames": [
+        {
+          "frame_index": 0,
+          "frame_type": "calibration",
+          "logical_epoch": 0,
+          "dwell_epochs": 2,
+          "symbol_sha256": "2d07a41ae992770085117e9815300bfd0730745883e60b24aaad5e69dfc087ae"
+        },
+        {
+          "frame_index": 1,
+          "frame_type": "calibration",
+          "logical_epoch": 2,
+          "dwell_epochs": 2,
+          "symbol_sha256": "f9de1ef79c9d385cf14b1a1b1fd761391f3e985ce004b1a5942cb94a9275ba17"
+        },
+        {
+          "frame_index": 2,
+          "frame_type": "calibration",
+          "logical_epoch": 4,
+          "dwell_epochs": 2,
+          "symbol_sha256": "c601641f59f51c98a54aaa9f551396b77ab64cbf0fd6413d4f8e841190bff46c"
+        },
+        {
+          "frame_index": 3,
+          "frame_type": "calibration",
+          "logical_epoch": 6,
+          "dwell_epochs": 2,
+          "symbol_sha256": "30182cc4df20ca54b81f0ee0694bd0de29c744881cf33ef01eb46248f608eb26"
+        },
+        {
+          "frame_index": 4,
+          "frame_type": "calibration",
+          "logical_epoch": 8,
+          "dwell_epochs": 2,
+          "symbol_sha256": "fbbca2fd6f7880ee06a1b869280860c7acfda00b112cde6139eb82d2ffabd18f"
+        },
+        {
+          "frame_index": 5,
+          "frame_type": "calibration",
+          "logical_epoch": 10,
+          "dwell_epochs": 2,
+          "symbol_sha256": "fffc8b0226eb6e30c8e5ddaf239bfaaf0f3f1a16fe824a1f2c79a2b4b5f3aa88"
+        },
+        {
+          "frame_index": 6,
+          "frame_type": "calibration",
+          "logical_epoch": 12,
+          "dwell_epochs": 2,
+          "symbol_sha256": "693c22e66981ca53d8bbd5c03e371c93b26bcdf9f4587d77987c656080dd16a9"
+        },
+        {
+          "frame_index": 7,
+          "frame_type": "calibration",
+          "logical_epoch": 14,
+          "dwell_epochs": 2,
+          "symbol_sha256": "853c27501afe894fb4220257bacf3974245f69b0e07f2aa2d3dbde23dd1667cb"
+        }
+      ],
+      "data_frames": [
+        {
+          "frame_index": 8,
+          "frame_type": "data",
+          "logical_epoch": 16,
+          "dwell_epochs": 2,
+          "symbol_sha256": "fea55f7531f0395f6b269d7cf6969140e2a459d505f57a44982501cb9557fa72"
+        },
+        {
+          "frame_index": 9,
+          "frame_type": "data",
+          "logical_epoch": 18,
+          "dwell_epochs": 2,
+          "symbol_sha256": "a627d05338286c036c72af9929e3de0ddafbcf029c1ec3aff8727706fdd4d7cb"
+        },
+        {
+          "frame_index": 10,
+          "frame_type": "data",
+          "logical_epoch": 20,
+          "dwell_epochs": 2,
+          "symbol_sha256": "7ea8516b77c4886a10b951fbebcc3ed1482977c1f932c55827ff6298b0927075"
+        },
+        {
+          "frame_index": 11,
+          "frame_type": "data",
+          "logical_epoch": 22,
+          "dwell_epochs": 2,
+          "symbol_sha256": "9b467bbdf6ae57b39a263c9c06818308b0dd3a9edd19fdaa9e4b8cbd137a782e"
+        }
+      ],
+      "sequence_symbol_sha256": {
+        "description": "SHA-256 over lab-serialized bytes of all calibration frames followed by all data frames, concatenated in generation order. Contains 8 calibration + 4 data frames = 110592 total symbols.",
+        "concatenation_order": [
+          "calibration solid frames (palette index order 0, 1, ...)",
+          "calibration preamble frames (if enabled)",
+          "data frames 0..3 (PRNG-generated)"
+        ],
+        "hash": "97d9303de2d10a59c9b39c3f4a4f359570e1f5c459a5466bb6a5522311b234ea"
+      }
+    }
+  }
+}
