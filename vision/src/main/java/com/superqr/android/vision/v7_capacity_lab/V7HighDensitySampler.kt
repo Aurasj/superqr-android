@@ -32,6 +32,8 @@ class V7HighDensitySampler {
     private var sample5U = IntArray(0)
     private var sample5V = IntArray(0)
     private var validMask = ByteArray(0)
+    // CENTER_1 uses bit 0. CROSS_5 uses bits 0..4 for center/TL/TR/BL/BR.
+    private var probeValidityMask = ByteArray(0)
 
     private val probeY5 = IntArray(5)
     private val probeU5 = IntArray(5)
@@ -74,6 +76,7 @@ class V7HighDensitySampler {
         sample5U = IntArray(totalCells)
         sample5V = IntArray(totalCells)
         validMask = ByteArray(totalCells)
+        probeValidityMask = ByteArray(totalCells)
     }
 
     fun sampleCenter1(
@@ -85,6 +88,7 @@ class V7HighDensitySampler {
     ): Int {
         ensureSampleArrays()
         validMask.fill(0)
+        probeValidityMask.fill(0)
         val h = homographyInv
         var validCount = 0
 
@@ -106,11 +110,12 @@ class V7HighDensitySampler {
             sampleY[i] = lumaBytes[py * lumaWidth + px].toInt() and 0xFF
             if (chromaReader == null) {
                 sampleU[i] = 128; sampleV[i] = 128
-                validMask[i] = 1; validCount++
+                validMask[i] = 1; probeValidityMask[i] = 1; validCount++
             } else if (chromaReader.read(ix, iy, chromaBuf)) {
                 sampleU[i] = chromaBuf[0]
                 sampleV[i] = chromaBuf[1]
                 validMask[i] = 1
+                probeValidityMask[i] = 1
                 validCount++
             } else {
                 sampleU[i] = 128
@@ -129,6 +134,7 @@ class V7HighDensitySampler {
     ): Int {
         ensureSampleArrays()
         validMask.fill(0)
+        probeValidityMask.fill(0)
         val h = homographyInv
         val ox = crossOffsetX.toDouble()
         val oy = crossOffsetY.toDouble()
@@ -138,6 +144,7 @@ class V7HighDensitySampler {
             val cx = canonicalX[i].toDouble()
             val cy = canonicalY[i].toDouble()
             var validProbes = 0
+            var probeBits = 0
 
             for (p in 0 until 5) {
                 val dx = when (p) { 1, 3 -> -ox; 2, 4 -> ox; else -> 0.0 }
@@ -159,19 +166,21 @@ class V7HighDensitySampler {
                         probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = false
                     }
                     chromaReader == null -> {
-                        probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = true; validProbes++
+                        probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = true; validProbes++; probeBits = probeBits or (1 shl p)
                     }
                     chromaReader.read(ix, iy, chromaBuf) -> {
                         probeU5[p] = chromaBuf[0]
                         probeV5[p] = chromaBuf[1]
                         probeValid5[p] = true
                         validProbes++
+                        probeBits = probeBits or (1 shl p)
                     }
                     else -> {
                         probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = false
                     }
                 }
             }
+            probeValidityMask[i] = probeBits.toByte()
 
             if (validProbes >= 3) {
                 sample5Y[i] = medianValid5(probeY5, probeValid5)
@@ -202,6 +211,7 @@ class V7HighDensitySampler {
     fun getUCross5(): IntArray = sample5U
     fun getVCross5(): IntArray = sample5V
     fun getValidMask(): ByteArray = validMask
+    fun getProbeValidityMask(): ByteArray = probeValidityMask
     fun getCanonicalX(): FloatArray = canonicalX
     fun getCanonicalY(): FloatArray = canonicalY
     fun getCellWidth(): Float = cellWidth
