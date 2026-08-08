@@ -2,6 +2,8 @@ package com.superqr.android.camera
 
 import androidx.camera.core.ImageProxy
 import com.superqr.android.vision.v6.classification.ChromaPixelReader
+import kotlin.math.floor
+import kotlin.math.roundToInt
 
 class ChromaSampleBuffers {
     val centerU = IntArray(16)
@@ -10,6 +12,17 @@ class ChromaSampleBuffers {
     val quietZoneV = IntArray(32)
 }
 
+/**
+ * Chroma reader for CameraX YUV_420_888 analysis frames.
+ *
+ * Luma is full resolution while U/V are normally one sample per 2x2 luma block.
+ * The old implementation truncated normalized coordinates to Int and then chose a
+ * single chroma texel. Near dense SuperQR cell boundaries that can pair the luma
+ * from one cell with the chroma from its neighbor. We now preserve sub-pixel
+ * coordinates through rotation and bilinearly interpolate the four surrounding
+ * chroma samples. This mirrors normal YUV upsampling much more closely while
+ * leaving the proven luma/detector path untouched.
+ */
 class ImageProxyChromaSampler(
     imageProxy: ImageProxy,
     private val buffers: ChromaSampleBuffers,
@@ -28,18 +41,31 @@ class ImageProxyChromaSampler(
         destination: IntArray,
     ): Boolean {
         require(destination.size >= 2)
-        val nx = imageX.toInt()
-        val ny = imageY.toInt()
+        if (!imageX.isFinite() || !imageY.isFinite()) return false
 
-        val (rx, ry) = FrameRotationHelper.mapNormalizedToRaw(nx, ny, rawWidth, rawHeight, rotation)
+        val raw = mapNormalizedToRaw(imageX, imageY)
+        val fullX = cropLeft.toDouble() + raw.first
+        val fullY = cropTop.toDouble() + raw.second
 
-        val chromaX = (cropLeft + rx) / 2
-        val chromaY = (cropTop + ry) / 2
-        val u = uPlane.get(chromaX, chromaY) ?: return false
-        val v = vPlane.get(chromaX, chromaY) ?: return false
+        // Chroma plane coordinates are half-resolution. Keeping .5 positions lets
+        // odd luma coordinates blend adjacent chroma samples instead of always
+        // snapping to the upper-left 2x2 block.
+        val chromaX = fullX / 2.0
+        val chromaY = fullY / 2.0
+        val u = uPlane.sampleBilinear(chromaX, chromaY) ?: return false
+        val v = vPlane.sampleBilinear(chromaX, chromaY) ?: return false
         destination[0] = u
         destination[1] = v
         return true
+    }
+
+    private fun mapNormalizedToRaw(nx: Double, ny: Double): Pair<Double, Double> {
+        return when (rotation) {
+            90 -> Pair(ny, rawHeight - 1.0 - nx)
+            180 -> Pair(rawWidth - 1.0 - nx, rawHeight - 1.0 - ny)
+            270 -> Pair(rawWidth - 1.0 - ny, nx)
+            else -> Pair(nx, ny)
+        }
     }
 
     private class PlaneReader(plane: ImageProxy.PlaneProxy) {
@@ -48,17 +74,32 @@ class ImageProxyChromaSampler(
         private val rowStride = plane.rowStride
         private val pixelStride = plane.pixelStride
 
-        fun get(column: Int, row: Int): Int? {
-            if (column < 0 || row < 0) {
-                return null
-            }
+        fun sampleBilinear(x: Double, y: Double): Int? {
+            if (!x.isFinite() || !y.isFinite() || x < 0.0 || y < 0.0) return null
 
+            val x0 = floor(x).toInt()
+            val y0 = floor(y).toInt()
+            val fx = x - x0
+            val fy = y - y0
+
+            val v00 = get(x0, y0) ?: return null
+            val v10 = get(x0 + 1, y0)
+            val v01 = get(x0, y0 + 1)
+            val v11 = get(x0 + 1, y0 + 1)
+
+            // At the final chroma row/column a neighbor can legitimately be
+            // outside the plane. Fall back to the nearest valid sample there.
+            if (v10 == null || v01 == null || v11 == null) return v00
+
+            val top = v00 * (1.0 - fx) + v10 * fx
+            val bottom = v01 * (1.0 - fx) + v11 * fx
+            return (top * (1.0 - fy) + bottom * fy).roundToInt().coerceIn(0, 255)
+        }
+
+        private fun get(column: Int, row: Int): Int? {
+            if (column < 0 || row < 0) return null
             val index = start + row * rowStride + column * pixelStride
-
-            if (index !in start until buffer.limit()) {
-                return null
-            }
-
+            if (index !in start until buffer.limit()) return null
             return buffer.get(index).toInt() and 0xFF
         }
     }
