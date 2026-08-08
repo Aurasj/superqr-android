@@ -6,8 +6,10 @@ import kotlin.math.roundToInt
 /**
  * Allocation-light high-density sampler used by production V7 and Capacity Lab.
  *
- * Payloads may be rectangular. X and Y cell pitch are therefore computed
- * independently and CROSS_5 uses independent X/Y probe offsets.
+ * Payloads may be rectangular. X and Y cell pitch are computed independently.
+ * CROSS_5 deliberately spreads probes across the central part of each cell so
+ * they land on distinct YUV_420 chroma samples instead of repeatedly reading
+ * effectively the same half-resolution chroma pixel.
  */
 class V7HighDensitySampler {
 
@@ -50,8 +52,8 @@ class V7HighDensitySampler {
         totalCells = gridSize * gridSize
         cellWidth = ((payloadBbox[2] - payloadBbox[0]) / gridSize).toFloat()
         cellHeight = ((payloadBbox[3] - payloadBbox[1]) / gridSize).toFloat()
-        crossOffsetX = cellWidth * 0.15f / 2f
-        crossOffsetY = cellHeight * 0.15f / 2f
+        crossOffsetX = cellWidth * CROSS_OFFSET_FRACTION
+        crossOffsetY = cellHeight * CROSS_OFFSET_FRACTION
 
         canonicalX = FloatArray(totalCells)
         canonicalY = FloatArray(totalCells)
@@ -220,6 +222,9 @@ class V7HighDensitySampler {
     fun getCrossOffsetY(): Float = crossOffsetY
 
     companion object {
+        /** ±22% from cell center: stays well inside the cell but reaches distinct 4:2:0 chroma samples. */
+        const val CROSS_OFFSET_FRACTION: Float = 0.22f
+
         fun median5(v0: Int, v1: Int, v2: Int, v3: Int, v4: Int): Int {
             var a = v0; var b = v1; var c = v2; var d = v3; var e = v4
             if (a > b) { val t = a; a = b; b = t }
