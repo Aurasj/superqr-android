@@ -10,6 +10,7 @@ import android.view.PixelCopy
 import androidx.core.content.FileProvider
 import com.superqr.android.vision.v7.transport.V7DebugSnapshot
 import com.superqr.android.vision.v7.transport.V7OpticalProfile
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -39,6 +40,7 @@ object V7DebugExporter {
         val headerInvalid: Int,
         val packAttempts: Int,
         val crcAttempts: Int,
+        val crcCandidateAttempts: Int,
         val crcPass: Int,
         val crcFail: Int,
         val parserRejects: Int,
@@ -104,6 +106,8 @@ object V7DebugExporter {
         previewBitmap: Bitmap?,
         report: Report,
         snapshot: V7DebugSnapshot?,
+        events: List<V7DebugEvent>,
+        frameSummaries: List<V7DebugFrameSummary>,
     ): File {
         val dir = debugDir(context)
         val zipFile = File(dir, "superqr-debug-${stamp()}.zip")
@@ -118,20 +122,31 @@ object V7DebugExporter {
                 previewBitmap.compress(Bitmap.CompressFormat.PNG, 100, zip)
                 zip.closeEntry()
             }
-            zip.putNextEntry(ZipEntry("diagnostics.json"))
-            zip.write(buildDiagnosticsJson(report, snapshot).toByteArray(Charsets.UTF_8))
-            zip.closeEntry()
+
+            zip.putText("diagnostics.json", buildDiagnosticsJson(report, snapshot, events.size, frameSummaries))
+            zip.putText("events.csv", buildEventsCsv(events))
+            zip.putText("frame-summary.csv", buildFrameSummaryCsv(frameSummaries))
 
             if (snapshot != null) {
-                zip.putNextEntry(ZipEntry("cells.csv"))
-                zip.write(buildCellsCsv(report.profile, snapshot).toByteArray(Charsets.UTF_8))
-                zip.closeEntry()
+                zip.putText("cells.csv", buildCellsCsv(report.profile, snapshot))
+                zip.putText("calibration.csv", buildCalibrationCsv(snapshot))
             }
         }
         return zipFile
     }
 
-    private fun buildDiagnosticsJson(report: Report, snapshot: V7DebugSnapshot?): String {
+    private fun ZipOutputStream.putText(name: String, text: String) {
+        putNextEntry(ZipEntry(name))
+        write(text.toByteArray(Charsets.UTF_8))
+        closeEntry()
+    }
+
+    private fun buildDiagnosticsJson(
+        report: Report,
+        snapshot: V7DebugSnapshot?,
+        eventCount: Int,
+        frameSummaries: List<V7DebugFrameSummary>,
+    ): String {
         val obj = JSONObject()
         obj.put("timestamp_ms", System.currentTimeMillis())
         obj.put("profile_key", report.profile.key)
@@ -155,7 +170,8 @@ object V7DebugExporter {
         obj.put("header_valid", report.headerValid)
         obj.put("header_invalid", report.headerInvalid)
         obj.put("pack_attempts", report.packAttempts)
-        obj.put("crc_attempts", report.crcAttempts)
+        obj.put("crc_frames_attempted", report.crcAttempts)
+        obj.put("crc_candidate_attempts", report.crcCandidateAttempts)
         obj.put("crc_pass", report.crcPass)
         obj.put("crc_fail", report.crcFail)
         obj.put("parser_rejects", report.parserRejects)
@@ -168,8 +184,42 @@ object V7DebugExporter {
         obj.put("analysis_ms", report.analysisMs)
         obj.put("focus_state", report.focusState)
         obj.put("last_error", report.lastError ?: JSONObject.NULL)
+        obj.put("history_event_count", eventCount)
+
+        val summaryJson = JSONArray()
+        frameSummaries.forEach { s ->
+            summaryJson.put(JSONObject().apply {
+                put("profile_id", s.profileId)
+                put("session_id", s.sessionId)
+                put("frame_id", s.frameId)
+                put("total_frames", s.totalFrames)
+                put("observations", s.observations)
+                put("crc_pass", s.crcPass)
+                put("crc_fail", s.crcFail)
+                put("header_only", s.headerOnly)
+                put("min_raw_erasures", s.minRawErasures)
+                put("max_raw_erasures", s.maxRawErasures)
+                put("last_candidate_passed", s.lastCandidatePassed ?: JSONObject.NULL)
+            })
+        }
+        obj.put("frame_summaries", summaryJson)
 
         snapshot?.let { snap ->
+            obj.put("classifier_max_distance", snap.maxDistanceThreshold)
+            obj.put("classifier_margin_threshold", snap.marginThreshold)
+            obj.put("inverse_homography", JSONArray(snap.finalInvHomography.toList()))
+
+            val centers = JSONArray()
+            snap.calibrationCenters.forEachIndexed { index, c ->
+                centers.put(JSONObject().apply {
+                    put("symbol", index)
+                    put("y", c.getOrElse(0) { 128 })
+                    put("u", c.getOrElse(1) { 128 })
+                    put("v", c.getOrElse(2) { 128 })
+                })
+            }
+            obj.put("calibration_centers", centers)
+
             val t = snap.transport
             val transport = JSONObject()
             transport.put("header_valid", t.headerValid)
@@ -182,7 +232,11 @@ object V7DebugExporter {
             transport.put("remaining_erasures", t.remainingErasures)
             transport.put("pack_attempted", t.packAttempted)
             transport.put("crc_attempted", t.crcAttempted)
+            transport.put("crc_candidate_attempts", t.crcCandidateAttempts)
             transport.put("crc_passed", t.crcPassed)
+            transport.put("candidate_passed", t.candidatePassed ?: JSONObject.NULL)
+            transport.put("received_crc32", t.receivedCrc32?.let { "0x%08X".format(it) } ?: JSONObject.NULL)
+            transport.put("computed_crc32", t.computedCrc32?.let { "0x%08X".format(it) } ?: JSONObject.NULL)
             transport.put("rejection_reason", t.rejectionReason ?: JSONObject.NULL)
             t.header?.let { h ->
                 transport.put("session_id", h.sessionId)
@@ -196,10 +250,11 @@ object V7DebugExporter {
     }
 
     private fun buildCellsCsv(profile: V7OpticalProfile, snapshot: V7DebugSnapshot): String = buildString {
-        appendLine("index,row,col,valid,probe_mask,raw_symbol,stable_symbol,second_symbol,best_distance,second_distance,y,u,v")
+        appendLine("index,row,col,valid,probe_mask,raw_symbol,fill_symbol,stable_symbol,second_symbol,best_distance,second_distance,y,u,v")
         for (i in snapshot.symbols.indices) {
             val row = i / profile.grid
             val col = i % profile.grid
+            val fill = snapshot.fillOnlySymbols?.getOrNull(i)?.toInt() ?: -1
             val stable = snapshot.stabilizedSymbols?.getOrNull(i)?.toInt() ?: -1
             val probeMask = snapshot.probeValidityMask.getOrNull(i)?.toInt()?.and(0xFF) ?: 0
             append(i).append(',')
@@ -208,6 +263,7 @@ object V7DebugExporter {
                 .append(snapshot.validMask.getOrNull(i)?.toInt() ?: 0).append(',')
                 .append(probeMask).append(',')
                 .append(snapshot.symbols[i].toInt()).append(',')
+                .append(fill).append(',')
                 .append(stable).append(',')
                 .append(snapshot.secondBestSymbols.getOrNull(i)?.toInt() ?: -1).append(',')
                 .append(snapshot.bestDistances.getOrNull(i) ?: -1).append(',')
@@ -217,5 +273,67 @@ object V7DebugExporter {
                 .append(snapshot.sampleV.getOrNull(i) ?: -1)
                 .appendLine()
         }
+    }
+
+    private fun buildCalibrationCsv(snapshot: V7DebugSnapshot): String = buildString {
+        appendLine("symbol,y,u,v")
+        snapshot.calibrationCenters.forEachIndexed { index, c ->
+            append(index).append(',')
+                .append(c.getOrElse(0) { 128 }).append(',')
+                .append(c.getOrElse(1) { 128 }).append(',')
+                .append(c.getOrElse(2) { 128 })
+                .appendLine()
+        }
+    }
+
+    private fun buildEventsCsv(events: List<V7DebugEvent>): String = buildString {
+        appendLine("analysis,profile_id,profile_key,session_id,frame_id,total_frames,payload_len,raw_erasures,remaining_erasures,temporal_obs,temporal_filled,temporal_overridden,header_valid,header_error,crc_candidate_attempts,crc_passed,candidate_passed,received_crc32,computed_crc32,accepted_frame,rejection")
+        for (e in events) {
+            append(e.analysisIndex).append(',')
+                .append(e.profileId).append(',')
+                .append(csv(e.profileKey)).append(',')
+                .append(e.sessionId ?: "").append(',')
+                .append(e.frameId ?: "").append(',')
+                .append(e.totalFrames ?: "").append(',')
+                .append(e.payloadLen ?: "").append(',')
+                .append(e.rawErasures).append(',')
+                .append(e.remainingErasures).append(',')
+                .append(e.temporalObservations).append(',')
+                .append(e.temporalFilled).append(',')
+                .append(e.temporalOverridden).append(',')
+                .append(e.headerValid).append(',')
+                .append(csv(e.headerError)).append(',')
+                .append(e.crcCandidateAttempts).append(',')
+                .append(e.crcPassed).append(',')
+                .append(csv(e.candidatePassed)).append(',')
+                .append(e.receivedCrc32?.let { "0x%08X".format(it) } ?: "").append(',')
+                .append(e.computedCrc32?.let { "0x%08X".format(it) } ?: "").append(',')
+                .append(e.acceptedFrameId ?: "").append(',')
+                .append(csv(e.rejectionReason))
+                .appendLine()
+        }
+    }
+
+    private fun buildFrameSummaryCsv(summaries: List<V7DebugFrameSummary>): String = buildString {
+        appendLine("profile_id,session_id,frame_id,total_frames,observations,crc_pass,crc_fail,header_only,min_raw_erasures,max_raw_erasures,last_candidate_passed")
+        for (s in summaries) {
+            append(s.profileId).append(',')
+                .append(s.sessionId).append(',')
+                .append(s.frameId).append(',')
+                .append(s.totalFrames).append(',')
+                .append(s.observations).append(',')
+                .append(s.crcPass).append(',')
+                .append(s.crcFail).append(',')
+                .append(s.headerOnly).append(',')
+                .append(s.minRawErasures).append(',')
+                .append(s.maxRawErasures).append(',')
+                .append(csv(s.lastCandidatePassed))
+                .appendLine()
+        }
+    }
+
+    private fun csv(value: String?): String {
+        if (value == null) return ""
+        return "\"${value.replace("\"", "\"\"")}\""
     }
 }
