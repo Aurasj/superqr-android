@@ -9,6 +9,10 @@ import kotlin.math.roundToInt
  * Payloads may be rectangular. X and Y cell pitch are computed independently.
  * CROSS_5 deliberately spreads probes across the central part of each cell so
  * they reach distinct YUV_420 chroma samples without approaching cell borders.
+ *
+ * Hot-path rule: no per-cell/per-probe object allocation. At 40x40 CROSS_5 the
+ * old Pair-returning projection + median scratch code created thousands of small
+ * objects every camera frame and produced avoidable GC pressure.
  */
 class V7HighDensitySampler {
 
@@ -41,6 +45,8 @@ class V7HighDensitySampler {
     private val probeV5 = IntArray(5)
     private val probeValid5 = BooleanArray(5)
     private val chromaBuf = IntArray(2)
+    private val projected = DoubleArray(2)
+    private val medianScratch = IntArray(5)
 
     fun setGridSize(newGridSize: Int, payloadBbox: DoubleArray) {
         require(newGridSize >= 1) { "Grid size must be positive" }
@@ -94,13 +100,12 @@ class V7HighDensitySampler {
         var validCount = 0
 
         for (i in 0 until totalCells) {
-            val projected = project(h, canonicalX[i].toDouble(), canonicalY[i].toDouble())
-            if (projected == null) {
+            if (!projectInto(h, canonicalX[i].toDouble(), canonicalY[i].toDouble(), projected)) {
                 sampleY[i] = 128; sampleU[i] = 128; sampleV[i] = 128
                 continue
             }
-            val ix = projected.first
-            val iy = projected.second
+            val ix = projected[0]
+            val iy = projected[1]
             val px = ix.roundToInt()
             val py = iy.roundToInt()
             if (px !in 0 until lumaWidth || py !in 0 until lumaHeight) {
@@ -150,24 +155,24 @@ class V7HighDensitySampler {
             for (p in 0 until 5) {
                 val dx = when (p) { 1, 3 -> -ox; 2, 4 -> ox; else -> 0.0 }
                 val dy = when (p) { 1, 2 -> -oy; 3, 4 -> oy; else -> 0.0 }
-                val projected = project(h, cx + dx, cy + dy)
-                if (projected == null) {
+                if (!projectInto(h, cx + dx, cy + dy, projected)) {
                     probeY5[p] = 128; probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = false
                     continue
                 }
-                val ix = projected.first
-                val iy = projected.second
+                val ix = projected[0]
+                val iy = projected[1]
                 val px = ix.roundToInt()
                 val py = iy.roundToInt()
                 val inBounds = px in 0 until lumaWidth && py in 0 until lumaHeight
-                if (inBounds) probeY5[p] = lumaBytes[py * lumaWidth + px].toInt() and 0xFF else probeY5[p] = 128
+                probeY5[p] = if (inBounds) lumaBytes[py * lumaWidth + px].toInt() and 0xFF else 128
 
                 when {
                     !inBounds -> {
                         probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = false
                     }
                     chromaReader == null -> {
-                        probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = true; validProbes++; probeBits = probeBits or (1 shl p)
+                        probeU5[p] = 128; probeV5[p] = 128; probeValid5[p] = true
+                        validProbes++; probeBits = probeBits or (1 shl p)
                     }
                     chromaReader.read(ix, iy, chromaBuf) -> {
                         probeU5[p] = chromaBuf[0]
@@ -184,9 +189,9 @@ class V7HighDensitySampler {
             probeValidityMask[i] = probeBits.toByte()
 
             if (validProbes >= 3) {
-                sample5Y[i] = medianValid5(probeY5, probeValid5)
-                sample5U[i] = medianValid5(probeU5, probeValid5)
-                sample5V[i] = medianValid5(probeV5, probeValid5)
+                sample5Y[i] = medianValid5(probeY5, probeValid5, medianScratch)
+                sample5U[i] = medianValid5(probeU5, probeValid5, medianScratch)
+                sample5V[i] = medianValid5(probeV5, probeValid5, medianScratch)
                 validMask[i] = 1
                 validCount++
             } else {
@@ -196,13 +201,16 @@ class V7HighDensitySampler {
         return validCount
     }
 
-    private fun project(h: DoubleArray, x: Double, y: Double): Pair<Double, Double>? {
+    /** Project one canonical coordinate into camera space without allocating Pair. */
+    private fun projectInto(h: DoubleArray, x: Double, y: Double, out: DoubleArray): Boolean {
         val den = h[6] * x + h[7] * y + h[8]
-        if (!den.isFinite() || kotlin.math.abs(den) < 1e-9) return null
+        if (!den.isFinite() || kotlin.math.abs(den) < 1e-9) return false
         val ix = (h[0] * x + h[1] * y + h[2]) / den
         val iy = (h[3] * x + h[4] * y + h[5]) / den
-        if (!ix.isFinite() || !iy.isFinite()) return null
-        return ix to iy
+        if (!ix.isFinite() || !iy.isFinite()) return false
+        out[0] = ix
+        out[1] = iy
+        return true
     }
 
     fun getYCenters(): IntArray = sampleY
@@ -222,9 +230,9 @@ class V7HighDensitySampler {
 
     companion object {
         /**
-         * ±14% from cell center. Measured against captured 48×48 phone footage:
-         * this was far enough to hit distinct 4:2:0 chroma samples while keeping
-         * the four-color clusters tighter than larger offsets near cell borders.
+         * ±14% from cell center. Measured against captured phone footage: this was
+         * far enough to hit distinct 4:2:0 chroma samples while remaining safely
+         * inside dense optical cells.
          */
         const val CROSS_OFFSET_FRACTION: Float = 0.14f
 
@@ -242,17 +250,16 @@ class V7HighDensitySampler {
             return c
         }
 
-        private fun medianValid5(values: IntArray, valid: BooleanArray): Int {
-            val tmp = IntArray(5)
+        private fun medianValid5(values: IntArray, valid: BooleanArray, scratch: IntArray): Int {
             var n = 0
-            for (i in 0 until 5) if (valid[i]) tmp[n++] = values[i]
+            for (i in 0 until 5) if (valid[i]) scratch[n++] = values[i]
             for (i in 1 until n) {
-                val value = tmp[i]
+                val value = scratch[i]
                 var j = i - 1
-                while (j >= 0 && tmp[j] > value) { tmp[j + 1] = tmp[j]; j-- }
-                tmp[j + 1] = value
+                while (j >= 0 && scratch[j] > value) { scratch[j + 1] = scratch[j]; j-- }
+                scratch[j + 1] = value
             }
-            return tmp[n / 2]
+            return scratch[n / 2]
         }
     }
 }
