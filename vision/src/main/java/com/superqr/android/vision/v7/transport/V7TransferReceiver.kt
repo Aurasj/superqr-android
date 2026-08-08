@@ -5,6 +5,8 @@ import com.superqr.android.vision.v6.model.V6StaticResult
 import com.superqr.android.vision.v7_capacity_lab.V7Calibrator
 import com.superqr.android.vision.v7_capacity_lab.V7HighDensitySampler
 import com.superqr.android.vision.v7_capacity_lab.V7SoftClassifier
+import java.nio.ByteBuffer
+import java.util.zip.CRC32
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -22,16 +24,21 @@ data class V7TransportDiagnostics(
     val remainingErasures: Int = 0,
     val packAttempted: Boolean = false,
     val crcAttempted: Boolean = false,
+    val crcCandidateAttempts: Int = 0,
     val crcPassed: Boolean = false,
+    val candidatePassed: String? = null,
+    val receivedCrc32: Long? = null,
+    val computedCrc32: Long? = null,
     val rejectionReason: String? = null,
 )
 
-/** Throttled deep snapshot used only while Live Debug is open. */
+/** Throttled deep snapshot used only while optical debug is requested. */
 data class V7DebugSnapshot(
     val profileId: Int,
     val grid: Int,
     val probeMode: V7HighDensitySampler.ProbeMode,
     val symbols: ByteArray,
+    val fillOnlySymbols: ByteArray?,
     val stabilizedSymbols: ByteArray?,
     val secondBestSymbols: ByteArray,
     val bestDistances: IntArray,
@@ -41,6 +48,10 @@ data class V7DebugSnapshot(
     val sampleY: IntArray,
     val sampleU: IntArray,
     val sampleV: IntArray,
+    val calibrationCenters: Array<IntArray>,
+    val maxDistanceThreshold: Int,
+    val marginThreshold: Double,
+    val finalInvHomography: DoubleArray,
     val transport: V7TransportDiagnostics,
 )
 
@@ -157,7 +168,8 @@ class V7TransferReceiver {
         }
 
         val tc0 = System.nanoTime()
-        classifier.setCenters(calibrator.getCentersSnapshot())
+        val calibrationCenters = calibrator.getCentersSnapshot()
+        classifier.setCenters(calibrationCenters)
         val y = if (probeMode == V7HighDensitySampler.ProbeMode.CENTER_1) sampler.getYCenters() else sampler.getYCross5()
         val u = if (probeMode == V7HighDensitySampler.ProbeMode.CENTER_1) sampler.getUCenters() else sampler.getUCross5()
         val v = if (probeMode == V7HighDensitySampler.ProbeMode.CENTER_1) sampler.getVCenters() else sampler.getVCross5()
@@ -182,8 +194,11 @@ class V7TransferReceiver {
         var headerError: String? = null
         var merged: V7TemporalFrameStabilizer.MergeResult? = null
         var packAttempted = false
-        var crcAttempted = false
+        var crcCandidateAttempts = 0
         var crcPassed = false
+        var candidatePassed: String? = null
+        var receivedCrc32: Long? = null
+        var computedCrc32: Long? = null
         var accepted: V7TransportFrame? = null
         var rejection: String? = null
 
@@ -202,30 +217,57 @@ class V7TransferReceiver {
             }
         }
 
-        var candidateSymbols: ByteArray = classifier.bestSymbols
         if (header != null) {
             merged = temporal.merge(header, classifier.bestSymbols)
-            candidateSymbols = merged.symbols
         }
         val remainingErasures = merged?.remainingErasures ?: rawErasures
 
-        if (headerValid && remainingErasures == 0) {
-            packAttempted = true
-            val bytes = V7Transport.symbolsToBytes(candidateSymbols, activeProfile)
-            if (bytes == null) {
-                rejection = "symbol packing failed"
-            } else {
-                crcAttempted = true
-                try {
-                    accepted = V7Transport.parseFrame(bytes, activeProfile)
-                    crcPassed = true
-                    rejection = null
-                } catch (e: V7TransportError) {
-                    rejection = e.message
+        if (headerValid) {
+            val candidates = ArrayList<Pair<String, ByteArray>>(3)
+            if (rawErasures == 0) {
+                candidates.add("RAW" to classifier.bestSymbols)
+            }
+            if (merged != null && merged.remainingErasures == 0) {
+                if (candidates.none { it.second.contentEquals(merged.fillOnlySymbols) }) {
+                    candidates.add("TEMPORAL_FILL" to merged.fillOnlySymbols)
+                }
+                if (
+                    merged.overriddenConflicts > 0 &&
+                    candidates.none { it.second.contentEquals(merged.symbols) }
+                ) {
+                    candidates.add("TEMPORAL_OVERRIDE" to merged.symbols)
                 }
             }
-        } else if (headerValid && remainingErasures > 0) {
-            rejection = "$remainingErasures erasures remain after temporal recovery"
+
+            if (candidates.isEmpty()) {
+                rejection = "$remainingErasures erasures remain after temporal recovery"
+            } else {
+                packAttempted = true
+                for ((kind, symbols) in candidates) {
+                    val bytes = V7Transport.symbolsToBytes(symbols, activeProfile)
+                    if (bytes == null) {
+                        rejection = "symbol packing failed [$kind]"
+                        continue
+                    }
+                    crcCandidateAttempts++
+                    val crc = inspectCrc(bytes)
+                    receivedCrc32 = crc.first
+                    computedCrc32 = crc.second
+                    if (crc.first != crc.second) {
+                        rejection = "frame CRC32 mismatch [$kind]"
+                        continue
+                    }
+                    try {
+                        accepted = V7Transport.parseFrame(bytes, activeProfile)
+                        crcPassed = true
+                        candidatePassed = kind
+                        rejection = null
+                        break
+                    } catch (e: V7TransportError) {
+                        rejection = "${e.message} [$kind]"
+                    }
+                }
+            }
         }
 
         val transport = V7TransportDiagnostics(
@@ -240,8 +282,12 @@ class V7TransferReceiver {
             temporalConsensusCells = merged?.consensusCells ?: 0,
             remainingErasures = remainingErasures,
             packAttempted = packAttempted,
-            crcAttempted = crcAttempted,
+            crcAttempted = crcCandidateAttempts > 0,
+            crcCandidateAttempts = crcCandidateAttempts,
             crcPassed = crcPassed,
+            candidatePassed = candidatePassed,
+            receivedCrc32 = receivedCrc32,
+            computedCrc32 = computedCrc32,
             rejectionReason = rejection,
         )
 
@@ -256,6 +302,7 @@ class V7TransferReceiver {
                 grid = activeProfile.grid,
                 probeMode = probeMode,
                 symbols = classifier.bestSymbols.copyOf(),
+                fillOnlySymbols = merged?.fillOnlySymbols?.copyOf(),
                 stabilizedSymbols = merged?.symbols?.copyOf(),
                 secondBestSymbols = classifier.secondBestSymbols.copyOf(),
                 bestDistances = classifier.bestDistances.copyOf(),
@@ -265,6 +312,10 @@ class V7TransferReceiver {
                 sampleY = y.copyOf(),
                 sampleU = u.copyOf(),
                 sampleV = v.copyOf(),
+                calibrationCenters = calibrationCenters.map { it.copyOf() }.toTypedArray(),
+                maxDistanceThreshold = classifier.maxDistanceThreshold,
+                marginThreshold = classifier.marginThreshold,
+                finalInvHomography = hInv.copyOf(),
                 transport = transport,
             )
         } else null
@@ -276,6 +327,12 @@ class V7TransferReceiver {
             accepted, rejection, transport, debugSnapshot,
             Timing(profileUs, samplingUs, classificationUs, transportUs, (System.nanoTime() - t0) / 1000)
         )
+    }
+
+    private fun inspectCrc(bytes: ByteArray): Pair<Long, Long> {
+        val expected = ByteBuffer.wrap(bytes, bytes.size - 4, 4).int.toLong() and 0xFFFFFFFFL
+        val computed = CRC32().apply { update(bytes, 0, bytes.size - 4) }.value and 0xFFFFFFFFL
+        return expected to computed
     }
 
     private fun decodeProfile(
