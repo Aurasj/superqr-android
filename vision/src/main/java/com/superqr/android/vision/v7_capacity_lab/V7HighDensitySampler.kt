@@ -8,8 +8,7 @@ import kotlin.math.roundToInt
  *
  * Payloads may be rectangular. X and Y cell pitch are computed independently.
  * CROSS_5 deliberately spreads probes across the central part of each cell so
- * they land on distinct YUV_420 chroma samples instead of repeatedly reading
- * effectively the same half-resolution chroma pixel.
+ * they reach distinct YUV_420 chroma samples without approaching cell borders.
  */
 class V7HighDensitySampler {
 
@@ -222,8 +221,12 @@ class V7HighDensitySampler {
     fun getCrossOffsetY(): Float = crossOffsetY
 
     companion object {
-        /** ±22% from cell center: stays well inside the cell but reaches distinct 4:2:0 chroma samples. */
-        const val CROSS_OFFSET_FRACTION: Float = 0.22f
+        /**
+         * ±14% from cell center. Measured against captured 48×48 phone footage:
+         * this was far enough to hit distinct 4:2:0 chroma samples while keeping
+         * the four-color clusters tighter than larger offsets near cell borders.
+         */
+        const val CROSS_OFFSET_FRACTION: Float = 0.14f
 
         fun median5(v0: Int, v1: Int, v2: Int, v3: Int, v4: Int): Int {
             var a = v0; var b = v1; var c = v2; var d = v3; var e = v4
