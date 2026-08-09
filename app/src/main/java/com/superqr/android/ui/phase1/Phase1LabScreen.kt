@@ -34,6 +34,7 @@ import com.superqr.android.camera.ImageProxyChromaSampler
 import com.superqr.android.camera.LumaFrameBuffer
 import com.superqr.android.vision.v6.contract.V6Contract
 import com.superqr.android.vision.v6.detection.V6StaticDetector
+import com.superqr.android.vision.opencv.OpenCvRuntime
 import com.superqr.android.vision.v7_capacity_lab.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.atomic.AtomicInteger
@@ -97,6 +98,7 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                 .setTargetResolution(Size(1920, 1080))
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                                 .build()
+                            val openCv = OpenCvRuntime.ensureLoaded()
                             detector = V6StaticDetector()
                             qrDecoder = V7Phase1QrDecoder()
                             val syncDecoder = V7Phase1SyncDecoder()
@@ -107,7 +109,7 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                             var gridReceiver: V7Phase1Receiver? = null
                             var deliveredFrames = 0
                             var warmupRemaining = 45
-                            var cameraLabel = "CAMERA"
+                            var cameraLabel = "CAMERA • OpenCV ${openCv.version}"
 
                             analysis!!.setAnalyzer(analysisExecutor) { image ->
                                 val arrivalNs = System.nanoTime()

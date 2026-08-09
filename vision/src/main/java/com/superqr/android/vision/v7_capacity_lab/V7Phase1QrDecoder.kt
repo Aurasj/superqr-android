@@ -1,6 +1,6 @@
 package com.superqr.android.vision.v7_capacity_lab
 
-import org.opencv.android.OpenCVLoader
+import com.superqr.android.vision.opencv.OpenCvRuntime
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.objdetect.QRCodeDetector
@@ -17,18 +17,16 @@ data class V7Phase1QrResult(
 
 /** Binary-safe OpenCV QR control decoder with a reused luma Mat. */
 class V7Phase1QrDecoder : AutoCloseable {
-    private val gray = Mat()
+    private var gray: Mat? = null
     private var detector: QRCodeDetector? = null
 
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
         val payload = decode(luma, width, height)
-            ?: return V7Phase1QrResult(false, false, null, 0, failure = "OPENCV_INIT")
         return validatePayload(payload, expectedVersion, expectedBytes)
     }
 
     fun analyzeAuto(luma: ByteArray, width: Int, height: Int, expectedBytesByVersion: Map<Int, Int>): V7Phase1QrResult {
         val payload = decode(luma, width, height)
-            ?: return V7Phase1QrResult(false, false, null, 0, failure = "OPENCV_INIT")
         if (payload.isEmpty()) return V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED")
         if (payload.size < 5) return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_HEADER")
         val version = payload[4].toInt() and 0xFF
@@ -37,18 +35,22 @@ class V7Phase1QrDecoder : AutoCloseable {
         return validatePayload(payload, version, expectedBytes)
     }
 
-    private fun decode(luma: ByteArray, width: Int, height: Int): ByteArray? {
+    private fun decode(luma: ByteArray, width: Int, height: Int): ByteArray {
         if (detector == null) {
-            if (!OpenCVLoader.initLocal()) return null
+            OpenCvRuntime.ensureLoaded()
+            gray = Mat()
             detector = QRCodeDetector()
         }
-        gray.create(height, width, CvType.CV_8UC1)
-        gray.put(0, 0, luma)
-        return detector!!.detectAndDecodeBytes(gray)
+        val target = checkNotNull(gray)
+        target.create(height, width, CvType.CV_8UC1)
+        target.put(0, 0, luma)
+        return detector!!.detectAndDecodeBytes(target)
     }
 
     override fun close() {
-        gray.release()
+        gray?.release()
+        gray = null
+        detector = null
     }
 
     companion object {

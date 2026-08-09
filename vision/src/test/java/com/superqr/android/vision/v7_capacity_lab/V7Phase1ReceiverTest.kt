@@ -11,6 +11,11 @@ class V7Phase1ReceiverTest {
     private val identity = doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
 
     @Test
+    fun qrDecoderConstructionDoesNotTouchNativeCodeBeforeRuntimeLoad() {
+        V7Phase1QrDecoder().close()
+    }
+
+    @Test
     fun packagedManifestIsCanonicalPhase1Artifact() {
         val bytes = checkNotNull(javaClass.classLoader?.getResourceAsStream("v7_phy_selection/phase1_manifest.json"))
             .use { it.readBytes() }
