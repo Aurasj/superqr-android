@@ -2,8 +2,10 @@ package com.superqr.android.vision.v7_capacity_lab
 
 import com.superqr.android.vision.v6.contract.V6Contract
 import com.superqr.android.vision.v6.detection.V6StaticDetector
+import com.superqr.android.vision.opencv.OpenCvRuntime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Test
 import java.util.zip.CRC32
 import java.security.MessageDigest
@@ -80,6 +82,14 @@ class V7Phase1ReceiverTest {
 
     @Test
     fun physical720pWhiteSurroundAcquiresContractBorderAndOpticalSync() {
+        try {
+            OpenCvRuntime.ensureLoaded()
+        } catch (failure: Throwable) {
+            // The OpenCV Android artifact has no Linux-host JNI library. The
+            // native regression runs on developer hosts that have one; CI still
+            // compiles it and runs every pure receiver/sync assertion.
+            Assume.assumeNoException("host OpenCV native library is unavailable", failure)
+        }
         V6Contract.loadAndVerifyBytes(java.io.File("src/main/assets/visual_contract.json").readBytes())
         val profile = V7Phase1GridProfile("mono_64x50_matched", 50, 64, 1, 400)
         val receiver = V7Phase1Receiver(profile)
