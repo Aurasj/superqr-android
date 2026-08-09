@@ -18,7 +18,7 @@ class V7Phase1ReceiverTest {
         val hash = MessageDigest.getInstance("SHA-256").digest(normalizedBytes).joinToString("") { "%02X".format(it) }
         val json = JSONObject(String(bytes, Charsets.UTF_8))
 
-        assertEquals("E2D7924BD90ADD3F07CE9C0580356BACD231E4B56834103A0E8516B96C054200", hash)
+        assertEquals("16DC2E1B5EAAC653FEFF462E8FDBE0029DC63BB09FDEBE22ABE26BAC283C0525", hash)
         assertEquals("LAB_ONLY_NOT_A_V7_WIRE_CONTRACT", json.getString("status"))
         assertEquals(5, json.getJSONArray("grid_profiles").length())
         assertEquals(2, json.getJSONArray("qr_controls").length())
@@ -29,9 +29,12 @@ class V7Phase1ReceiverTest {
         val profile = V7Phase1GridProfile("mono_64x50_matched", 50, 64, 1, 400)
         val receiver = V7Phase1Receiver(profile)
         val frameIndex = 37
-        val luma = render(profile, receiver.expectedSymbols(frameIndex), frameIndex)
+        val envelope = V7LabRunEnvelope(V7LabRunState.RUNNING, 1, 0xBEEF, frameIndex, 256, 3)
+        val luma = render(profile, receiver.expectedSymbols(frameIndex), envelope)
 
-        val result = receiver.analyze(identity, luma, 1000, 1000)
+        val sync = V7Phase1SyncDecoder().analyze(identity, luma, 1000, 1000)
+        assertEquals(envelope, sync.envelope)
+        val result = receiver.analyze(identity, luma, 1000, 1000, synchronizedFrameIndex = sync.envelope?.frameIndex)
 
         assertEquals(frameIndex, result.frameIndex)
         assertEquals(3200, result.observedBits)
@@ -42,29 +45,17 @@ class V7Phase1ReceiverTest {
     }
 
     @Test
-    fun repeatedIndexSurvivesOneCorruptCopyAndBitErrorIsExact() {
+    fun duplicatedSyncRejectsRollingShutterTransition() {
         val profile = V7Phase1GridProfile("mono_64x50_matched", 50, 64, 1, 400)
         val receiver = V7Phase1Receiver(profile)
         val frameIndex = 173
         val expected = receiver.expectedSymbols(frameIndex)
-        val luma = render(profile, expected, frameIndex)
-
-        // Corrupt one complete copy of the index. The other two must win.
-        fillRect(luma, 1000, 280, 145, 427, 175, 128)
-        // Flip one payload cell far from edges/probes.
-        val cellW = 800.0 / profile.cols
-        val cellH = 620.0 / profile.rows
-        val cell = 10 * profile.cols + 10
-        val value = if (expected[cell].toInt() == 0) 235 else 20
-        fillCell(luma, 1000, profile, 10, 10, cellW, cellH, value)
-
-        val result = receiver.analyze(identity, luma, 1000, 1000)
-
-        assertEquals(frameIndex, result.frameIndex)
-        assertEquals(1, result.bitErrors)
-        assertEquals(0, result.erasedBits)
-        assertEquals(1, result.byteErrors)
-        assertTrue(result.postFecValid)
+        val envelope = V7LabRunEnvelope(V7LabRunState.RUNNING, 1, 0x1234, frameIndex, 256, 3)
+        val luma = render(profile, expected, envelope)
+        drawSyncBand(luma, envelope.copy(frameIndex = frameIndex + 1), 825)
+        val sync = V7Phase1SyncDecoder().analyze(identity, luma, 1000, 1000)
+        assertEquals(null, sync.envelope)
+        assertEquals("SYNC_TRANSITION_TOP_BOTTOM_MISMATCH", sync.status)
     }
 
     @Test
@@ -73,7 +64,8 @@ class V7Phase1ReceiverTest {
         val receiver = V7Phase1Receiver(profile)
         val frameIndex = 11
         val expected = receiver.expectedSymbols(frameIndex)
-        val luma = render(profile, expected, frameIndex)
+        val envelope = V7LabRunEnvelope(V7LabRunState.RUNNING, 1, 4, frameIndex, 256, 3)
+        val luma = render(profile, expected, envelope)
         val cellW = 800.0 / profile.cols
         val cellH = 620.0 / profile.rows
         // 16 byte errors in the first 200-byte block cost 32 parity symbols;
@@ -85,7 +77,7 @@ class V7Phase1ReceiverTest {
             fillCell(luma, 1000, profile, row, col, cellW, cellH, if (expected[cell].toInt() == 0) 235 else 20)
         }
 
-        val result = receiver.analyze(identity, luma, 1000, 1000)
+        val result = receiver.analyze(identity, luma, 1000, 1000, synchronizedFrameIndex = frameIndex)
         assertEquals(16, result.byteErrors)
         assertTrue(!result.postFecValid)
     }
@@ -96,13 +88,14 @@ class V7Phase1ReceiverTest {
         val good = V7Phase1QrDecoder.validatePayload(payload, 27, 1465)
         assertTrue(good.valid)
         assertEquals(91L, good.frameIndex)
+        assertEquals(0xCAFE, good.envelope?.runToken)
 
         payload[100] = (payload[100].toInt() xor 1).toByte()
         val bad = V7Phase1QrDecoder.validatePayload(payload, 27, 1465)
-        assertEquals("crc", bad.failure)
+        assertEquals("QR_CRC", bad.failure)
     }
 
-    private fun render(profile: V7Phase1GridProfile, symbols: ByteArray, frameIndex: Int): ByteArray {
+    private fun render(profile: V7Phase1GridProfile, symbols: ByteArray, envelope: V7LabRunEnvelope): ByteArray {
         val image = ByteArray(1000 * 1000) { 235.toByte() }
         fillRect(image, 1000, 290, 110, 310, 130, 20)
         fillRect(image, 1000, 370, 110, 390, 130, 235)
@@ -112,18 +105,18 @@ class V7Phase1ReceiverTest {
             val symbol = symbols[row * profile.cols + col].toInt()
             fillCell(image, 1000, profile, row, col, cellW, cellH, if (symbol == 0) 20 else 235)
         }
-        val bits = IntArray(8) { bit -> (frameIndex shr (7 - bit)) and 1 }
-        val stripCellW = 440.0 / 24.0
-        for (repeat in 0 until 3) for (bit in 0 until 8) {
-            val cell = repeat * 8 + bit
-            fillRect(
-                image, 1000,
-                (280.0 + cell * stripCellW).toInt(), 145,
-                (280.0 + (cell + 1) * stripCellW).toInt(), 175,
-                if (bits[bit] == 0) 20 else 235,
-            )
-        }
+        drawSyncBand(image, envelope, 145)
+        drawSyncBand(image, envelope, 825)
         return image
+    }
+
+    private fun drawSyncBand(image: ByteArray, envelope: V7LabRunEnvelope, top: Int) {
+        val packet = envelope.encode()
+        for (bit in 0 until 80) {
+            val row = bit / 40; val col = bit % 40
+            val value = if (((packet[bit / 8].toInt() ushr (7 - bit % 8)) and 1) == 0) 20 else 235
+            fillRect(image, 1000, 200 + col * 15, top + row * 15, 200 + (col + 1) * 15, top + (row + 1) * 15, value)
+        }
     }
 
     private fun fillCell(
@@ -150,8 +143,10 @@ class V7Phase1ReceiverTest {
         writeLe32(payload, 10, 42)
         payload[14] = (frameBytes and 0xFF).toByte()
         payload[15] = ((frameBytes ushr 8) and 0xFF).toByte()
+        val envelope = V7LabRunEnvelope(V7LabRunState.RUNNING, 5, 0xCAFE, frameIndex, 256, 3).encode()
+        envelope.copyInto(payload, 16)
         val prng = V7LabPrng((42 xor version xor frameIndex).let { if (it == 0) 1 else it })
-        for (index in 16 until frameBytes - 4) payload[index] = (prng.next() and 0xFF).toByte()
+        for (index in 26 until frameBytes - 4) payload[index] = (prng.next() and 0xFF).toByte()
         writeLe32(payload, frameBytes - 4, CRC32().apply { update(payload, 0, frameBytes - 4) }.value.toInt())
         return payload
     }

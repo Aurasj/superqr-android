@@ -5,16 +5,19 @@ import com.superqr.android.vision.v7_capacity_lab.V7Phase1GridProfile
 import org.json.JSONObject
 
 sealed interface Phase1Profile {
+    val id: Int
     val name: String
     val usefulBytes: Int
 
     data class Grid(
+        override val id: Int,
         override val name: String,
         val receiverProfile: V7Phase1GridProfile,
         override val usefulBytes: Int,
     ) : Phase1Profile
 
     data class Qr(
+        override val id: Int,
         override val name: String,
         val version: Int,
         val frameBytes: Int,
@@ -29,12 +32,15 @@ data class Phase1Manifest(
     val referenceRefreshHz: Double,
     val seed: Int,
 ) {
+    fun profile(id: Int): Phase1Profile? = profiles.firstOrNull { it.id == id }
+
     companion object {
         fun load(context: Context): Phase1Manifest {
             val text = context.assets.open("v7_phy_selection/phase1_manifest.json")
                 .bufferedReader().use { it.readText() }
             val json = JSONObject(text)
             require(json.getString("status") == "LAB_ONLY_NOT_A_V7_WIRE_CONTRACT")
+            require(json.getInt("schema_version") >= 2)
             val profiles = mutableListOf<Phase1Profile>()
             val grid = json.getJSONArray("grid_profiles")
             for (index in 0 until grid.length()) {
@@ -42,6 +48,7 @@ data class Phase1Manifest(
                 val rawBytes = p.getInt("raw_bytes_per_frame")
                 val parityBytes = kotlin.math.ceil(rawBytes * 0.15).toInt()
                 profiles += Phase1Profile.Grid(
+                    id = profiles.size,
                     name = p.getString("name"),
                     receiverProfile = V7Phase1GridProfile(
                         name = p.getString("name"),
@@ -57,6 +64,7 @@ data class Phase1Manifest(
             for (index in 0 until qr.length()) {
                 val p = qr.getJSONObject(index)
                 profiles += Phase1Profile.Qr(
+                    id = profiles.size,
                     name = p.getString("name"),
                     version = p.getInt("version"),
                     frameBytes = p.getInt("frame_bytes"),

@@ -11,6 +11,7 @@ data class V7Phase1QrResult(
     val valid: Boolean,
     val frameIndex: Long?,
     val bytes: Int,
+    val envelope: V7LabRunEnvelope? = null,
     val failure: String? = null,
 )
 
@@ -20,14 +21,30 @@ class V7Phase1QrDecoder : AutoCloseable {
     private var detector: QRCodeDetector? = null
 
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
+        val payload = decode(luma, width, height)
+            ?: return V7Phase1QrResult(false, false, null, 0, failure = "OPENCV_INIT")
+        return validatePayload(payload, expectedVersion, expectedBytes)
+    }
+
+    fun analyzeAuto(luma: ByteArray, width: Int, height: Int, expectedBytesByVersion: Map<Int, Int>): V7Phase1QrResult {
+        val payload = decode(luma, width, height)
+            ?: return V7Phase1QrResult(false, false, null, 0, failure = "OPENCV_INIT")
+        if (payload.isEmpty()) return V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED")
+        if (payload.size < 5) return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_HEADER")
+        val version = payload[4].toInt() and 0xFF
+        val expectedBytes = expectedBytesByVersion[version]
+            ?: return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_UNSUPPORTED_VERSION")
+        return validatePayload(payload, version, expectedBytes)
+    }
+
+    private fun decode(luma: ByteArray, width: Int, height: Int): ByteArray? {
         if (detector == null) {
-            if (!OpenCVLoader.initLocal()) return V7Phase1QrResult(false, false, null, 0, "OpenCV init failed")
+            if (!OpenCVLoader.initLocal()) return null
             detector = QRCodeDetector()
         }
         gray.create(height, width, CvType.CV_8UC1)
         gray.put(0, 0, luma)
-        val payload = detector!!.detectAndDecodeBytes(gray)
-        return validatePayload(payload, expectedVersion, expectedBytes)
+        return detector!!.detectAndDecodeBytes(gray)
     }
 
     override fun close() {
@@ -36,24 +53,29 @@ class V7Phase1QrDecoder : AutoCloseable {
 
     companion object {
         fun validatePayload(payload: ByteArray, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
-            if (payload.isEmpty()) return V7Phase1QrResult(false, false, null, 0, "not decoded")
-            if (payload.size != expectedBytes) return V7Phase1QrResult(true, false, null, payload.size, "length")
-            if (payload.size < 20 || payload[0] != 'S'.code.toByte() || payload[1] != 'Q'.code.toByte() ||
+            if (payload.isEmpty()) return V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED")
+            if (payload.size != expectedBytes) return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_LENGTH")
+            if (payload.size < 30 || payload[0] != 'S'.code.toByte() || payload[1] != 'Q'.code.toByte() ||
                 payload[2] != 'P'.code.toByte() || payload[3] != '1'.code.toByte()
-            ) return V7Phase1QrResult(true, false, null, payload.size, "magic")
+            ) return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_MAGIC")
             if ((payload[4].toInt() and 0xFF) != expectedVersion || (payload[5].toInt() and 0xFF) != 1) {
-                return V7Phase1QrResult(true, false, null, payload.size, "profile")
+                return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_PROFILE")
             }
             val frameIndex = readUInt32Le(payload, 6)
             val seed = readUInt32Le(payload, 10)
             val declaredLength = (payload[14].toInt() and 0xFF) or ((payload[15].toInt() and 0xFF) shl 8)
             if (seed != 42L || declaredLength != expectedBytes) {
-                return V7Phase1QrResult(true, false, frameIndex, payload.size, "header")
+                return V7Phase1QrResult(true, false, frameIndex, payload.size, failure = "QR_HEADER")
+            }
+            val envelope = V7LabRunEnvelope.decode(payload, 16)
+                ?: return V7Phase1QrResult(true, false, frameIndex, payload.size, failure = "QR_RUN_SYNC")
+            if (envelope.frameIndex.toLong() != frameIndex) {
+                return V7Phase1QrResult(true, false, frameIndex, payload.size, envelope, "QR_INDEX_MISMATCH")
             }
             val crc = CRC32().apply { update(payload, 0, payload.size - 4) }.value
             val expectedCrc = readUInt32Le(payload, payload.size - 4)
-            if (crc != expectedCrc) return V7Phase1QrResult(true, false, frameIndex, payload.size, "crc")
-            return V7Phase1QrResult(true, true, frameIndex, payload.size)
+            if (crc != expectedCrc) return V7Phase1QrResult(true, false, frameIndex, payload.size, envelope, "QR_CRC")
+            return V7Phase1QrResult(true, true, frameIndex, payload.size, envelope)
         }
 
         private fun readUInt32Le(bytes: ByteArray, offset: Int): Long =

@@ -11,7 +11,7 @@ class Phase1ObservationRecorderTest {
     fun duplicateOpticalFrameOnlyContributesInnovativeBytesOnce() {
         val recorder = Phase1ObservationRecorder()
         val profile = Phase1Profile.Grid(
-            "mono_test", V7Phase1GridProfile("mono_test", 8, 8, 1, 8), usefulBytes = 6,
+            0, "mono_test", V7Phase1GridProfile("mono_test", 8, 8, 1, 8), usefulBytes = 6,
         )
         val now = System.nanoTime()
         repeat(2) {
@@ -29,6 +29,27 @@ class Phase1ObservationRecorderTest {
         val lines = recorder.jsonLinesForTest().map(::JSONObject)
         assertEquals(6, lines[0].getInt("innovative_bytes"))
         assertEquals(0, lines[1].getInt("innovative_bytes"))
-        assertTrue(lines.all { it.has("allocation_bytes") && it.has("post_fec_valid") })
+        assertTrue(lines.all { it.has("allocation_bytes") && it.has("post_fec_valid") && it.getBoolean("scored") })
+    }
+
+    @Test
+    fun synchronizedRunResetsPerRunCountersAndExportsFailureReasons() {
+        val recorder = Phase1ObservationRecorder()
+        val profile = Phase1Profile.Grid(
+            2, "mono_test", V7Phase1GridProfile("mono_test", 8, 8, 1, 8), usefulBytes = 6,
+        )
+        val envelope = com.superqr.android.vision.v7_capacity_lab.V7LabRunEnvelope(
+            com.superqr.android.vision.v7_capacity_lab.V7LabRunState.READY, 2, 0xBEEF, 0, 32, 2,
+        )
+        recorder.observeSender(profile, envelope, "LOCKED", "FULL_DETECTION")
+        recorder.recordFailure("SYNC_TRANSITION_TOP_BOTTOM_MISMATCH", 10, 1.0, "TRACKED", "MISMATCH")
+        val snapshot = recorder.snapshot(20)
+        assertEquals("BEEF", snapshot.runId)
+        assertEquals(32, snapshot.expectedFrames)
+        assertEquals(1, snapshot.analyzedFrames)
+        assertTrue(snapshot.failureSummary.contains("SYNC_TRANSITION"))
+        val json = JSONObject(recorder.jsonLinesForTest().single())
+        assertEquals(false, json.getBoolean("scored"))
+        assertEquals(0xBEEF, json.getInt("run_token"))
     }
 }

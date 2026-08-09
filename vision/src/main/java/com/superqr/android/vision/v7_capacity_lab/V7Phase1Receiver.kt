@@ -49,7 +49,6 @@ class V7Phase1Receiver(profile: V7Phase1GridProfile, seed: Int = 42) {
     private val projected = DoubleArray(2)
     private val chromaOut = IntArray(2)
     private val patchValues = IntArray(9)
-    private val strip = IntArray(24)
     private val pilotCenters = arrayOf(
         doubleArrayOf(300.0, 120.0), doubleArrayOf(380.0, 120.0),
         doubleArrayOf(620.0, 120.0), doubleArrayOf(700.0, 120.0),
@@ -87,12 +86,13 @@ class V7Phase1Receiver(profile: V7Phase1GridProfile, seed: Int = 42) {
         height: Int,
         chromaReader: ChromaPixelReader? = null,
         fecParityRatio: Double = 0.15,
+        synchronizedFrameIndex: Int? = null,
     ): V7Phase1GridObservation {
         require(homographyInv.size >= 9)
         samplePilots(homographyInv, luma, width, height, chromaReader)
         val blackY = pilotY[0]
         val whiteY = pilotY[1]
-        val frameIndex = decodeFrameIndex(homographyInv, luma, width, height, blackY, whiteY)
+        val frameIndex = synchronizedFrameIndex
         val cells = profile.rows * profile.cols
 
         val decoded: ByteArray
@@ -176,34 +176,6 @@ class V7Phase1Receiver(profile: V7Phase1GridProfile, seed: Int = 42) {
     }
 
     internal fun expectedSymbols(frameIndex: Int): ByteArray = expectedFrames[frameIndex]
-
-    private fun decodeFrameIndex(
-        h: DoubleArray,
-        luma: ByteArray,
-        width: Int,
-        height: Int,
-        blackY: Int,
-        whiteY: Int,
-    ): Int? {
-        if (whiteY - blackY < 32) return null
-        val threshold = (blackY + whiteY) * 0.5
-        val cellWidth = (720.0 - 280.0) / 24.0
-        for (cell in 0 until 24) {
-            val y = sampleLuma(h, 280.0 + (cell + 0.5) * cellWidth, 160.0, luma, width, height)
-            strip[cell] = if (y < 0) -1 else if (y >= threshold) 1 else 0
-        }
-        var index = 0
-        for (bit in 0 until 8) {
-            var zeros = 0
-            var ones = 0
-            for (repeat in 0 until 3) {
-                when (strip[repeat * 8 + bit]) { 0 -> zeros++; 1 -> ones++ }
-            }
-            if (maxOf(zeros, ones) < 2) return null
-            index = (index shl 1) or if (ones > zeros) 1 else 0
-        }
-        return index
-    }
 
     private fun samplePilots(
         h: DoubleArray,
