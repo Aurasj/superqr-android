@@ -47,7 +47,16 @@ internal data class V7DebugUiState(
     val temporalRecoveredFrames: Int,
     val cameraFps: Double,
     val analysisFps: Double,
+    val pipelineMs: Double,
     val analysisMs: Double,
+    val profileMs: Double,
+    val samplingMs: Double,
+    val classificationMs: Double,
+    val transportMs: Double,
+    val usefulUniqueFps: Double,
+    val decodedPayloadKiBs: Double,
+    val analysisExceptionCount: Int,
+    val lastAnalysisException: String?,
     val unique: Int,
     val duplicates: Int,
     val conflicts: Int,
@@ -150,6 +159,8 @@ internal fun V7ReceiveCard(
     temporalRecovered: Int,
     cameraFps: Double,
     analysisFps: Double,
+    usefulUniqueFps: Double,
+    decodedPayloadKiBs: Double,
     modifier: Modifier,
 ) {
     Card(modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xE6141821))) {
@@ -164,7 +175,8 @@ internal fun V7ReceiveCard(
             Text("Cells $confident/${profile.cellCount} confident • $erasures raw erased", color = Color.White.copy(alpha = .74f), fontSize = 10.sp)
             Text("CRC $crcPass pass • $crcFail fail • skipped $skippedErasures • recovered $temporalRecovered", color = Color.White.copy(alpha = .66f), fontSize = 10.sp)
             Text("Last ${if (lastFrame >= 0) lastFrame else "—"}${error?.let { " • $it" } ?: ""}", color = if (error == null) Color.White.copy(alpha = .6f) else Color(0xFFFF7B72), fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("Camera ${"%.1f".format(cameraFps)} fps • analysis ${"%.1f".format(analysisFps)} fps", color = Color.White.copy(alpha = .55f), fontSize = 10.sp)
+            Text("Cam ${"%.1f".format(cameraFps)} • ana ${"%.1f".format(analysisFps)} • useful ${"%.2f".format(usefulUniqueFps)} fps", color = Color.White.copy(alpha = .55f), fontSize = 10.sp)
+            Text("Decoded payload ${"%.2f".format(decodedPayloadKiBs)} KiB/s (pre-package)", color = Color.White.copy(alpha = .5f), fontSize = 9.sp)
         }
     }
 }
@@ -282,10 +294,18 @@ private fun OpticalPage(ui: V7DebugUiState, onSampler: (V7HighDensitySampler.Pro
         MetricRow("Profile", "${ui.profile.grid}×${ui.profile.grid} • ${ui.profile.colorCount}c • id ${ui.profile.id}")
         MetricRow("Camera", ui.cameraState)
         MetricRow("Tracking", "${ui.trackingState} • ${ui.classificationSource}")
-        MetricRow("Geometry", "border ${yn(ui.borderFound)} • orient ${yn(ui.orientationResolved)} • ${"%.1f".format(ui.detectorMs.toDouble())} ms")
-        MetricRow("Samples", "${ui.validSamples}/${ui.profile.cellCount} • confident ${ui.confident} • erased ${ui.erasures}")
+        MetricRow("Geometry", "border ${yn(ui.borderFound)} • orient ${yn(ui.orientationResolved)}")
+        MetricRow("Samples", "${ui.validSamples}/${ui.profile.cellCount} • conf ${ui.confident} • erase ${ui.erasures}")
         MetricRow("Calibration", "${ui.calibrated}/${ui.profile.colorCount}")
-        MetricRow("Performance", "cam ${"%.1f".format(ui.cameraFps)} • analysis ${"%.1f".format(ui.analysisFps)} • V7 ${"%.1f".format(ui.analysisMs)} ms")
+        MetricRow("Rates", "cam ${"%.1f".format(ui.cameraFps)} • ana ${"%.1f".format(ui.analysisFps)} • useful ${"%.2f".format(ui.usefulUniqueFps)}")
+        MetricRow("Pipeline", "pipe ${"%.1f".format(ui.pipelineMs)} • det ${"%.1f".format(ui.detectorMs.toDouble())} • V7 ${"%.1f".format(ui.analysisMs)} ms")
+        MetricRow("V7 stages", "prof ${"%.1f".format(ui.profileMs)} • samp ${"%.1f".format(ui.samplingMs)} • cls ${"%.1f".format(ui.classificationMs)} • tx ${"%.1f".format(ui.transportMs)}")
+        MetricRow("Payload", "${"%.2f".format(ui.decodedPayloadKiBs)} KiB/s pre-package")
+        MetricRow(
+            "Exceptions",
+            if (ui.analysisExceptionCount == 0) "0" else "${ui.analysisExceptionCount} • ${ui.lastAnalysisException ?: "unknown"}",
+            if (ui.analysisExceptionCount == 0) Color.White else Color(0xFFFF7B72),
+        )
         Spacer(Modifier.height(2.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             FilterChip(selected = ui.samplerMode == V7HighDensitySampler.ProbeMode.CENTER_1, onClick = { onSampler(V7HighDensitySampler.ProbeMode.CENTER_1) }, label = { Text("CENTER_1", fontSize = 8.sp) })
@@ -303,7 +323,7 @@ private fun TransportPage(ui: V7DebugUiState) {
         MetricRow("Packing", "${ui.packAttempts} frames")
         MetricRow("CRC", "${ui.crcAttempts} frames • ${ui.crcCandidateAttempts} candidates")
         MetricRow("Result", "${ui.crcPass} pass • ${ui.crcFail} fail • ${ui.parserRejects} parser")
-        MetricRow("Temporal", "${ui.temporalRecoveredFrames} pass • obs ${t?.temporalObservations ?: 0} • fill ${t?.temporalFilledCells ?: 0} • override ${t?.temporalOverriddenCells ?: 0}")
+        MetricRow("Temporal", "${ui.temporalRecoveredFrames} pass • obs ${t?.temporalObservations ?: 0} • fill ${t?.temporalFilledCells ?: 0} • over ${t?.temporalOverriddenCells ?: 0}")
         MetricRow("Remaining", "${t?.remainingErasures ?: ui.erasures} erasures")
         t?.header?.let { h -> MetricRow("Current", "s${h.sessionId} • f${h.frameId}/${h.totalFrames} • ${h.payloadLen} B") }
         MetricRow("Candidate", t?.candidatePassed ?: "—", if (t?.crcPassed == true) Color(0xFF7EE787) else Color.White.copy(alpha = .75f))
@@ -360,7 +380,7 @@ private fun ToolsPage(
         TwoButtons("Capture", onCapture, "Share", onShare, outlined = true)
         TwoButtons(if (frozen) "Resume" else "Freeze", onFreeze, "Export ZIP", onExport, outlined = false)
         Text(
-            "ZIP now includes events.csv, frame-summary.csv, calibration.csv and richer CRC diagnostics.",
+            "ZIP includes measurement schema v1, stage timings, exceptions, events, frame summaries, calibration and per-cell evidence.",
             color = Color.White.copy(alpha = .55f),
             fontSize = 8.sp,
             maxLines = 2,
