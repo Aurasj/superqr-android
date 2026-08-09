@@ -4,6 +4,47 @@ SuperQR Android is the receiver for offline screen-to-camera file transfer.
 
 The user-facing app is a **single V7 scanner**. It reuses the physically validated V6 carrier detector/geometry as an internal acquisition foundation; there is no separate V6/V7 scanner mode in the product.
 
+## Fresh clone — Windows
+
+Prerequisites:
+
+- Git for Windows;
+- Android Studio;
+- Android SDK Platform 37;
+- JDK 17, or an Android Studio embedded JDK compatible with the project;
+- an ARM64 Android phone with USB debugging enabled for physical testing.
+
+Clone the repository:
+
+```powershell
+git clone https://github.com/Aurasj/superqr-android.git
+cd superqr-android
+```
+
+Then open the **repository root** in Android Studio. Let Gradle Sync finish and allow Android Studio to install any missing SDK components.
+
+Android Studio will create local machine state such as `local.properties`. This is intentional: `local.properties`, `.gradle/`, `.idea/` and build directories are ignored by Git and must not be copied from an old checkout or committed.
+
+No global Gradle installation is required. The repository includes `gradlew`, `gradlew.bat`, `gradle-wrapper.jar` and the pinned Gradle wrapper configuration.
+
+Verify a fresh clone from PowerShell after Android Studio/SDK setup:
+
+```powershell
+.\gradlew.bat :vision:testDebugUnitTest :app:testDebugUnitTest :app:compileDebugKotlin
+```
+
+Build a debug APK:
+
+```powershell
+.\gradlew.bat :app:assembleDebug
+```
+
+To run on a phone, select the `app` run configuration in Android Studio, select the connected ARM64 device and press **Run**.
+
+The current project uses `compileSdk = 37`, `targetSdk = 37`, `minSdk = 26`. Debug/benchmark native builds currently target `arm64-v8a` for physical-phone optical testing.
+
+This repository is self-contained for normal build/test/run workflows and does not require a sibling `superqr-protocol` or `superqr-desktop` checkout.
+
 ## Current V7 baseline
 
 - CameraX Preview + ImageAnalysis with `STRATEGY_KEEP_ONLY_LATEST`;
@@ -36,14 +77,16 @@ Configured/theoretical sender bitrate is not treated as actual file goodput.
 
 ## Build & test
 
-```bash
-./gradlew.bat :vision:testDebugUnitTest :app:testDebugUnitTest :app:compileDebugKotlin
+Windows:
+
+```powershell
+.\gradlew.bat :vision:testDebugUnitTest :app:testDebugUnitTest :app:compileDebugKotlin
 ```
 
-or assemble a debug APK with:
+Linux/macOS:
 
 ```bash
-./gradlew.bat assembleDebug
+./gradlew :vision:testDebugUnitTest :app:testDebugUnitTest :app:compileDebugKotlin
 ```
 
 ## Architecture rule
