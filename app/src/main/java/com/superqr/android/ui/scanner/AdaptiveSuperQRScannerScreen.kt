@@ -350,7 +350,14 @@ fun AdaptiveSuperQRScannerScreen(
                     val accepted = decoded.acceptedFrame
                     if (accepted != null) measurement.recordAccepted(accepted.sessionId, accepted.frameId, accepted.payload.size)
                     var pkg: V7TransferPackage? = null
-                    if (accepted != null) pkg = try { accumulator.addFrame(accepted) } catch (_: Throwable) { null }
+                    if (accepted != null) {
+                        pkg = try {
+                            accumulator.addFrame(accepted)
+                        } catch (t: Throwable) {
+                            measurement.recordException(t)
+                            null
+                        }
+                    }
 
                     val completedNs = System.nanoTime()
                     measurement.recordAnalysis(
@@ -390,7 +397,7 @@ fun AdaptiveSuperQRScannerScreen(
                         analyzedFrames = ms.analysisCompleted
 
                         val td = decoded.transport
-                        debugHistory.record(analyzedFrames, decoded.profile, td, accepted)
+                        debugHistory.record(analyzedFrames, decoded.profile, td, accepted, ms, deliveredFps)
                         if (td.headerAttempted) {
                             if (td.headerValid) headerValidCount++ else headerInvalidCount++
                         }
