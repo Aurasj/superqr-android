@@ -1,11 +1,12 @@
 package com.superqr.android.ui.scanner
 
+import com.superqr.android.camera.V7MeasurementTracker
 import com.superqr.android.vision.v7.transport.V7OpticalProfile
 import com.superqr.android.vision.v7.transport.V7TransportDiagnostics
 import com.superqr.android.vision.v7.transport.V7TransportFrame
 import java.util.ArrayDeque
 
-/** One compact analysis event for post-mortem optical debugging. */
+/** One compact analysis event for post-mortem optical + performance debugging. */
 data class V7DebugEvent(
     val analysisIndex: Int,
     val profileId: Int,
@@ -14,6 +15,17 @@ data class V7DebugEvent(
     val frameId: Int?,
     val totalFrames: Int?,
     val payloadLen: Int?,
+    val cameraDeliveredFps: Double,
+    val analysisFps: Double,
+    val pipelineMs: Double,
+    val detectorMs: Double,
+    val v7TotalMs: Double,
+    val v7ProfileMs: Double,
+    val v7SamplingMs: Double,
+    val v7ClassificationMs: Double,
+    val v7TransportMs: Double,
+    val usefulUniqueFps: Double,
+    val decodedPayloadKiBs: Double,
     val rawErasures: Int,
     val remainingErasures: Int,
     val temporalObservations: Int,
@@ -59,6 +71,8 @@ class V7DebugHistory(private val capacity: Int = 512) {
         profile: V7OpticalProfile,
         transport: V7TransportDiagnostics,
         accepted: V7TransportFrame?,
+        measurement: V7MeasurementTracker.Snapshot,
+        cameraDeliveredFps: Double,
     ) {
         val h = transport.header
         if (events.size >= capacity) events.removeFirst()
@@ -71,6 +85,17 @@ class V7DebugHistory(private val capacity: Int = 512) {
                 frameId = h?.frameId,
                 totalFrames = h?.totalFrames,
                 payloadLen = h?.payloadLen,
+                cameraDeliveredFps = cameraDeliveredFps,
+                analysisFps = measurement.analysisFps,
+                pipelineMs = measurement.pipelineMs,
+                detectorMs = measurement.detectorMs,
+                v7TotalMs = measurement.v7TotalMs,
+                v7ProfileMs = measurement.v7ProfileMs,
+                v7SamplingMs = measurement.v7SamplingMs,
+                v7ClassificationMs = measurement.v7ClassificationMs,
+                v7TransportMs = measurement.v7TransportMs,
+                usefulUniqueFps = measurement.usefulUniqueFps,
+                decodedPayloadKiBs = measurement.decodedPayloadKiBs,
                 rawErasures = transport.rawErasures,
                 remainingErasures = transport.remainingErasures,
                 temporalObservations = transport.temporalObservations,
