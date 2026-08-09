@@ -24,20 +24,20 @@ class V7GenerationSpool(
     private var finalPackageLength: Long? = null
 
     init {
-        require(totalGenerations in 1..MAX_TRACKED_GENERATIONS)
+        require(totalGenerations in 1L..MAX_TRACKED_GENERATIONS)
         require(symbolBytes > 0)
         file.setLength(0)
     }
 
     @Synchronized
     fun writeGeneration(generationId: Long, bytes: ByteArray): Boolean {
-        if (generationId !in 0 until totalGenerations) throw V7ModemException("generation outside spool session")
-        if (bytes.isEmpty() || bytes.size > V7ModemContract.generationCapacity(symbolBytes)) {
+        if (generationId !in 0L until totalGenerations) throw V7ModemException("generation outside spool session")
+        if (bytes.isEmpty() || bytes.size.toLong() > V7ModemContract.generationCapacity(symbolBytes)) {
             throw V7ModemException("invalid completed generation length")
         }
         val index = generationId.toInt()
         if (written[index]) return false
-        val isFinal = generationId == totalGenerations - 1
+        val isFinal = generationId == totalGenerations - 1L
         if (!isFinal && bytes.size.toLong() != V7ModemContract.generationCapacity(symbolBytes)) {
             throw V7ModemException("non-final completed generation has wrong length")
         }
