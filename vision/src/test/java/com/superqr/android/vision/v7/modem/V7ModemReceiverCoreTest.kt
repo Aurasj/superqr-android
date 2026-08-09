@@ -6,6 +6,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class V7ModemReceiverCoreTest {
@@ -50,7 +51,13 @@ class V7ModemReceiverCoreTest {
         try {
             val symbolBytes = 32
             val capacity = V7ModemContract.generationCapacity(symbolBytes).toInt()
-            V7GenerationSpool(temp, totalGenerations = 2L, symbolBytes = symbolBytes).use { spool ->
+            V7GenerationSpool(
+                temp,
+                totalGenerations = 2L,
+                symbolBytes = symbolBytes,
+                maxPackageBytes = (capacity * 2L) + 1024L,
+                maxOriginalBytes = 4L * 1024L * 1024L,
+            ).use { spool ->
                 val final = ByteArray(111) { 0x6A }
                 val first = ByteArray(capacity) { (it * 7).toByte() }
                 assertTrue(spool.writeGeneration(1L, final))
@@ -73,12 +80,40 @@ class V7ModemReceiverCoreTest {
         val packageBytes = "5337504B01010000000A000A00000000000006400000000000000025400CFC472F2F2EA3A86C5CB7F8C0331B6DE80C0FD2CD013F2C01A5DD0C94A2C88DEECD507068617365322E747874746578742F706C61696E0B2E2D482D0A0C5208C8482C4E5530E20A1EE58F86C7687A18CD0FA3E5C1687948447D0000".hexBytes()
         val temp = File.createTempFile("superqr-v7-package-", ".bin")
         try {
-            V7GenerationSpool(temp, totalGenerations = 1L, symbolBytes = 304).use { spool ->
+            V7GenerationSpool(
+                temp,
+                totalGenerations = 1L,
+                symbolBytes = 304,
+                maxPackageBytes = 1024L * 1024L,
+                maxOriginalBytes = 1024L * 1024L,
+            ).use { spool ->
                 assertTrue(spool.writeGeneration(0L, packageBytes))
                 val output = ByteArrayOutputStream()
                 val metadata = spool.verifyAndDecodeTo(output)
                 assertEquals("phase2.txt", metadata.filename)
                 assertArrayEquals("SuperQR Phase 2\n".repeat(100).toByteArray(), output.toByteArray())
+            }
+        } finally {
+            temp.delete()
+        }
+    }
+
+    @Test
+    fun generationSpoolRejectsSessionThatWouldExceedConfiguredStorage() {
+        val temp = File.createTempFile("superqr-v7-limit-", ".bin")
+        try {
+            val capacity = V7ModemContract.generationCapacity(304)
+            try {
+                V7GenerationSpool(
+                    temp,
+                    totalGenerations = 5L,
+                    symbolBytes = 304,
+                    maxPackageBytes = capacity * 2L,
+                    maxOriginalBytes = capacity * 2L,
+                )
+                fail("oversized sparse spool should be rejected")
+            } catch (expected: V7ModemException) {
+                assertTrue(expected.message!!.contains("storage limit"))
             }
         } finally {
             temp.delete()
