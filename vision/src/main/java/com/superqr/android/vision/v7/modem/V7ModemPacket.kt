@@ -29,6 +29,10 @@ object V7ModemContract {
 
     fun validateGenerationShape(packet: V7ModemPacket) {
         val targetSourceCount = generationSourceCount(packet.symbolBytes)
+        val minimalSourceCount = ((packet.generationPayloadLen + packet.symbolBytes - 1L) / packet.symbolBytes).toInt()
+        if (packet.sourceCount != minimalSourceCount) {
+            throw V7ModemException("source_count is not the minimal shape for generation payload length")
+        }
         if (packet.generationId < packet.totalGenerations - 1) {
             if (packet.sourceCount != targetSourceCount || packet.generationPayloadLen != targetSourceCount.toLong() * packet.symbolBytes) {
                 throw V7ModemException("non-final generation does not match DENSE_XOR_V1 generation shape")
