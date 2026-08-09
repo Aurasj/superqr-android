@@ -118,7 +118,7 @@ class Phase1ObservationRecorder {
             .put("frame_valid", false).put("post_fec_valid", false)
             .put("raw_valid", false).put("inner_fec_valid", false)
             .put("innovative_bytes", 0).put("failure_reason", reason)
-        for ((key, value) in extra) json.put(key, value)
+        putExtras(json, extra)
         lines += json.toString()
         return snapshot(completedNs)
     }
@@ -174,7 +174,7 @@ class Phase1ObservationRecorder {
         if (failureReason != null) json.put("failure_reason", failureReason)
         addIndexes(json, "error_cells", errorCellIndexes, errorCellCount)
         addIndexes(json, "erasure_cells", erasureCellIndexes, erasureCellCount)
-        for ((key, value) in extra) json.put(key, value)
+        putExtras(json, extra)
         lines += json.toString()
         return snapshot(completedNs)
     }
@@ -219,6 +219,36 @@ class Phase1ObservationRecorder {
         val array = JSONArray()
         for (index in 0 until count) array.put(values[index])
         json.put(key, array)
+    }
+
+    /**
+     * Android's JSONObject does not recursively serialize primitive JVM arrays;
+     * a List<DoubleArray> otherwise becomes strings such as "[D@491343f" in the
+     * exported JSONL. Convert diagnostic structures explicitly so every physical
+     * campaign remains machine-readable and reproducible.
+     */
+    private fun putExtras(json: JSONObject, extra: Map<String, Any?>) {
+        for ((key, value) in extra) json.put(key, jsonValue(value))
+    }
+
+    private fun jsonValue(value: Any?): Any = when (value) {
+        null -> JSONObject.NULL
+        is JSONObject, is JSONArray, is String, is Number, is Boolean -> value
+        is DoubleArray -> JSONArray().apply { value.forEach { put(it) } }
+        is FloatArray -> JSONArray().apply { value.forEach { put(it.toDouble()) } }
+        is IntArray -> JSONArray().apply { value.forEach { put(it) } }
+        is LongArray -> JSONArray().apply { value.forEach { put(it) } }
+        is ShortArray -> JSONArray().apply { value.forEach { put(it.toInt()) } }
+        is ByteArray -> JSONArray().apply { value.forEach { put(it.toInt() and 0xFF) } }
+        is BooleanArray -> JSONArray().apply { value.forEach { put(it) } }
+        is Array<*> -> JSONArray().apply { value.forEach { put(jsonValue(it)) } }
+        is Iterable<*> -> JSONArray().apply { value.forEach { put(jsonValue(it)) } }
+        is Map<*, *> -> JSONObject().apply {
+            value.forEach { (nestedKey, nestedValue) ->
+                if (nestedKey != null) put(nestedKey.toString(), jsonValue(nestedValue))
+            }
+        }
+        else -> value.toString()
     }
 
     @Synchronized

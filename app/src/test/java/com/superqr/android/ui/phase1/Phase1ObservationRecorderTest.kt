@@ -54,6 +54,32 @@ class Phase1ObservationRecorderTest {
     }
 
     @Test
+    fun diagnosticsExportNestedPrimitiveArraysAsRealJson() {
+        val recorder = Phase1ObservationRecorder()
+        recorder.recordFailure(
+            "TEST_DIAGNOSTIC",
+            completedNs = 10,
+            pipelineMs = 1.0,
+            geometry = "SEARCH",
+            sync = "SEARCH",
+            extra = mapOf(
+                "detected_quad" to listOf(
+                    doubleArrayOf(1.5, 2.5),
+                    doubleArrayOf(3.5, 4.5),
+                ),
+                "nested" to mapOf("values" to intArrayOf(7, 8, 9)),
+            ),
+        )
+
+        val json = JSONObject(recorder.jsonLinesForTest().single())
+        val quad = json.getJSONArray("detected_quad")
+        assertEquals(2, quad.length())
+        assertEquals(1.5, quad.getJSONArray(0).getDouble(0), 0.0)
+        assertEquals(4.5, quad.getJSONArray(1).getDouble(1), 0.0)
+        assertEquals(8, json.getJSONObject("nested").getJSONArray("values").getInt(1))
+    }
+
+    @Test
     fun readyRunningDoneFlowScoresOnlyRunningPayload() {
         val recorder = Phase1ObservationRecorder()
         val profile = Phase1Profile.Grid(
