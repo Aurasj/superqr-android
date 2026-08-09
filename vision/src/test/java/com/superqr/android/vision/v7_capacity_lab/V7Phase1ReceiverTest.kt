@@ -6,6 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume
 import org.junit.Test
 import java.util.zip.CRC32
+import java.util.zip.GZIPInputStream
 import java.security.MessageDigest
 import org.json.JSONObject
 import kotlin.math.abs
@@ -229,7 +230,7 @@ class V7Phase1ReceiverTest {
         } catch (failure: Throwable) {
             Assume.assumeNoException("host OpenCV native library is unavailable", failure)
         }
-        val (luma, dimensions) = loadPgm("v7_capacity_lab/physical/galaxy-a53-monitor-600.pgm")
+        val (luma, dimensions) = loadPgm("v7_capacity_lab/physical/galaxy-a53-monitor-600.pgm.gz")
 
         V7CarrierAcquirer().use { acquirer ->
             var acquisition = acquirer.analyze(luma, dimensions.first, dimensions.second)
@@ -261,7 +262,7 @@ class V7Phase1ReceiverTest {
         } catch (failure: Throwable) {
             Assume.assumeNoException("host OpenCV native library is unavailable", failure)
         }
-        val (luma, dimensions) = loadPgm("v7_capacity_lab/physical/galaxy-a53-monitor-800-cropped.pgm")
+        val (luma, dimensions) = loadPgm("v7_capacity_lab/physical/galaxy-a53-monitor-800-cropped.pgm.gz")
 
         V7CarrierAcquirer().use { acquirer ->
             var acquisition = acquirer.analyze(luma, dimensions.first, dimensions.second)
@@ -430,7 +431,8 @@ class V7Phase1ReceiverTest {
     }
 
     private fun loadPgm(resource: String): Pair<ByteArray, Pair<Int, Int>> {
-        val bytes = checkNotNull(javaClass.classLoader?.getResourceAsStream(resource)).use { it.readBytes() }
+        val raw = checkNotNull(javaClass.classLoader?.getResourceAsStream(resource))
+        val bytes = (if (resource.endsWith(".gz")) GZIPInputStream(raw) else raw).use { it.readBytes() }
         var newlineCount = 0
         var headerEnd = -1
         for (index in bytes.indices) {
