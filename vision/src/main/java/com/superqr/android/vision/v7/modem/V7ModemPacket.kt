@@ -15,6 +15,29 @@ object V7ModemContract {
     const val DEFAULT_GENERATION_TARGET_BYTES = 128 * 1024
     private val MAGIC = byteArrayOf('S'.code.toByte(), 'Q'.code.toByte(), 'M'.code.toByte(), '7'.code.toByte())
 
+    fun generationSourceCount(symbolBytes: Int): Int {
+        require(symbolBytes > 0)
+        return minOf(MAX_SOURCE_SYMBOLS, maxOf(1, (DEFAULT_GENERATION_TARGET_BYTES + symbolBytes - 1) / symbolBytes))
+    }
+
+    fun generationCapacity(symbolBytes: Int): Long = generationSourceCount(symbolBytes).toLong() * symbolBytes
+
+    fun generationStreamOffset(generationId: Long, symbolBytes: Int): Long {
+        require(generationId >= 0)
+        return Math.multiplyExact(generationId, generationCapacity(symbolBytes))
+    }
+
+    fun validateGenerationShape(packet: V7ModemPacket) {
+        val targetSourceCount = generationSourceCount(packet.symbolBytes)
+        if (packet.generationId < packet.totalGenerations - 1) {
+            if (packet.sourceCount != targetSourceCount || packet.generationPayloadLen != targetSourceCount.toLong() * packet.symbolBytes) {
+                throw V7ModemException("non-final generation does not match DENSE_XOR_V1 generation shape")
+            }
+        } else if (packet.sourceCount > targetSourceCount) {
+            throw V7ModemException("final generation exceeds DENSE_XOR_V1 generation capacity")
+        }
+    }
+
     fun buildPacket(sessionId: Long,generationId: Long,totalGenerations: Long,symbolId: Long,sourceCount: Int,generationPayloadLen: Long,payload: ByteArray): ByteArray {
         require(sessionId in 1..0xFFFF_FFFFL); require(generationId >= 0 && generationId < totalGenerations && totalGenerations <= 0xFFFF_FFFFL); require(symbolId in 0..0xFFFF_FFFFL); require(sourceCount in 1..MAX_SOURCE_SYMBOLS); require(payload.size in 1..0xFFFF); require(generationPayloadLen in 1..sourceCount.toLong() * payload.size)
         val flags = if (symbolId < sourceCount) FLAG_SYSTEMATIC else 0
