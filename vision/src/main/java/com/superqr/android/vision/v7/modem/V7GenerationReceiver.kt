@@ -10,6 +10,7 @@ class V7GenerationReceiver(private val maxActiveGenerations:Int=4){
     private val active=LinkedHashMap<Long,State>();private val completed=BitSet();private var completedCount=0;private var sessionId:Long?=null;private var totalGenerations:Long?=null
     init{require(maxActiveGenerations in 1..16)}
     fun offer(packet:V7ModemPacket):Result{
+        V7ModemContract.validateGenerationShape(packet)
         val session=sessionId
         if(session==null){if(packet.totalGenerations>MAX_TRACKED_GENERATIONS)throw V7ModemException("generation count exceeds Android safety limit");sessionId=packet.sessionId;totalGenerations=packet.totalGenerations}else if(packet.sessionId!=session||packet.totalGenerations!=totalGenerations)throw V7ModemException("packet belongs to another modem session")
         val generationIndex=packet.generationId.toInt();if(completed[generationIndex])return Result(Status.DUPLICATE,packet.generationId,packet.sourceCount,packet.sourceCount)
