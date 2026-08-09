@@ -20,9 +20,11 @@ import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-/** Capture/share/export helpers for optical debugging. */
+/** Capture/share/export helpers for optical debugging and V7.0 measurement. */
 object V7DebugExporter {
     data class Report(
+        val measurementSchemaVersion: Int,
+        val runId: String,
         val profile: V7OpticalProfile,
         val cameraState: String,
         val trackingState: String,
@@ -50,7 +52,18 @@ object V7DebugExporter {
         val conflicts: Int,
         val cameraFps: Double,
         val analysisFps: Double,
+        val pipelineMs: Double,
         val analysisMs: Double,
+        val profileMs: Double,
+        val samplingMs: Double,
+        val classificationMs: Double,
+        val transportMs: Double,
+        val usefulUniqueFps: Double,
+        val acceptedPayloadBytes: Long,
+        val decodedPayloadKiBs: Double,
+        val measurementElapsedMs: Double,
+        val analysisExceptionCount: Int,
+        val lastAnalysisException: String?,
         val focusState: String,
         val lastError: String?,
     )
@@ -148,7 +161,10 @@ object V7DebugExporter {
         frameSummaries: List<V7DebugFrameSummary>,
     ): String {
         val obj = JSONObject()
+        obj.put("measurement_schema_version", report.measurementSchemaVersion)
+        obj.put("run_id", report.runId)
         obj.put("timestamp_ms", System.currentTimeMillis())
+        obj.put("role", "android_receiver")
         obj.put("profile_key", report.profile.key)
         obj.put("profile_id", report.profile.id)
         obj.put("grid", report.profile.grid)
@@ -179,9 +195,20 @@ object V7DebugExporter {
         obj.put("unique_frames", report.uniqueFrames)
         obj.put("duplicates", report.duplicates)
         obj.put("conflicts", report.conflicts)
-        obj.put("camera_fps", report.cameraFps)
+        obj.put("camera_delivered_fps", report.cameraFps)
         obj.put("analysis_fps", report.analysisFps)
-        obj.put("analysis_ms", report.analysisMs)
+        obj.put("pipeline_ms", report.pipelineMs)
+        obj.put("v7_total_ms", report.analysisMs)
+        obj.put("v7_profile_ms", report.profileMs)
+        obj.put("v7_sampling_ms", report.samplingMs)
+        obj.put("v7_classification_ms", report.classificationMs)
+        obj.put("v7_transport_ms", report.transportMs)
+        obj.put("useful_unique_fps", report.usefulUniqueFps)
+        obj.put("accepted_payload_bytes", report.acceptedPayloadBytes)
+        obj.put("decoded_payload_kib_s", report.decodedPayloadKiBs)
+        obj.put("session_elapsed_ms", report.measurementElapsedMs)
+        obj.put("analysis_exception_count", report.analysisExceptionCount)
+        obj.put("last_analysis_exception", report.lastAnalysisException ?: JSONObject.NULL)
         obj.put("focus_state", report.focusState)
         obj.put("last_error", report.lastError ?: JSONObject.NULL)
         obj.put("history_event_count", eventCount)
