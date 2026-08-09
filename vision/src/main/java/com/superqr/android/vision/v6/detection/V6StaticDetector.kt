@@ -46,6 +46,12 @@ private data class SampleReadResult(
 )
 
 class V6StaticDetector : AutoCloseable {
+    private data class QuadCandidate(
+        val points: Array<Point>,
+        val area: Double,
+        val contractScore: Int,
+    )
+
     private var openCvInitialized = false
     private val tracker = V6TemporalTracker()
     private lateinit var gray: Mat
@@ -53,6 +59,8 @@ class V6StaticDetector : AutoCloseable {
     private lateinit var edges: Mat
     private lateinit var hierarchy: Mat
     private lateinit var warped: Mat
+    private lateinit var acquisitionKernel: Mat
+    private val projectedSampleScratch = IntArray(9)
 
     private fun ensureOpenCvInitialized() {
         if (openCvInitialized) return
@@ -62,6 +70,7 @@ class V6StaticDetector : AutoCloseable {
         edges = Mat()
         hierarchy = Mat()
         warped = Mat()
+        acquisitionKernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
         openCvInitialized = true
     }
 
@@ -72,6 +81,7 @@ class V6StaticDetector : AutoCloseable {
             if (::edges.isInitialized) edges.release()
             if (::hierarchy.isInitialized) hierarchy.release()
             if (::warped.isInitialized) warped.release()
+            if (::acquisitionKernel.isInitialized) acquisitionKernel.release()
             openCvInitialized = false
         }
     }
@@ -114,6 +124,7 @@ class V6StaticDetector : AutoCloseable {
             var classificationSource = "FULL_DETECTION"
             var contoursConsidered = 0
             var quadsConsidered = 0
+            var largestContourArea = 0.0
 
             // ── TRACKED_RESAMPLED proactive gate ──────────────────────
             // If the tracker is locked and periodic re-detection is not
@@ -131,13 +142,23 @@ class V6StaticDetector : AutoCloseable {
                 classificationSource = "FULL_DETECTION"
 
                 Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
-                Imgproc.Canny(blurred, edges, 50.0, 150.0)
+                Imgproc.threshold(
+                    blurred,
+                    edges,
+                    0.0,
+                    255.0,
+                    Imgproc.THRESH_BINARY_INV or Imgproc.THRESH_OTSU,
+                )
+                Imgproc.morphologyEx(edges, edges, Imgproc.MORPH_CLOSE, acquisitionKernel)
 
                 val contours = ArrayList<MatOfPoint>()
-                Imgproc.findContours(edges, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+                // A physical monitor bezel encloses the on-screen carrier. RETR_EXTERNAL
+                // therefore discards the V6 border completely; retain nested contours and
+                // let the four encoded anchors identify the real carrier unambiguously.
+                Imgproc.findContours(edges, contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
 
-                class QuadCandidate(val points: Array<Point>, val area: Double, val score: Double)
                 val candidates = mutableListOf<QuadCandidate>()
+                val minimumContourArea = maxOf(1_600.0, width.toDouble() * height.toDouble() * 0.0025)
 
                 val cvContour2f = MatOfPoint2f()
                 val approxCurve = MatOfPoint2f()
@@ -145,7 +166,8 @@ class V6StaticDetector : AutoCloseable {
 
                 for (contour in contours) {
                     val area = Geometry.contourArea(contour)
-                    if (area < 10000) continue
+                    largestContourArea = maxOf(largestContourArea, area)
+                    if (area < minimumContourArea) continue
                     contoursConsidered++
 
                     contour.convertTo(cvContour2f, CvType.CV_32F)
@@ -173,7 +195,8 @@ class V6StaticDetector : AutoCloseable {
                         ptsMatOfPoint.release()
                         if (isConvex) {
                             quadsConsidered++
-                            candidates.add(QuadCandidate(pts, area, area))
+                            val contractScore = scoreCarrierContract(pts, luma, width, height)
+                            if (contractScore >= 0) candidates.add(QuadCandidate(pts, area, contractScore))
                         }
                     } else {
                         val box = Geometry.minAreaRect(cvContour2f)
@@ -182,7 +205,9 @@ class V6StaticDetector : AutoCloseable {
                             val cvPoints = arrayOfNulls<Point>(4)
                             box.points(cvPoints)
                             quadsConsidered++
-                            candidates.add(QuadCandidate(cvPoints.map { it!! }.toTypedArray(), area, area * 0.9))
+                            val points = cvPoints.map { it!! }.toTypedArray()
+                            val contractScore = scoreCarrierContract(points, luma, width, height)
+                            if (contractScore >= 0) candidates.add(QuadCandidate(points, area, contractScore))
                         }
                     }
                 }
@@ -191,7 +216,12 @@ class V6StaticDetector : AutoCloseable {
                 approxCurve.release()
                 hull.release()
 
-                val bestCandidate = candidates.maxByOrNull { it.score }
+                // Accept only a candidate that satisfies the complete, existing V6 anchor
+                // identity contract. Area is only a tie-breaker between the two edges of
+                // the same printed border. An arbitrary screen/window quad must not pin the
+                // AUTO scheduler to GRID and prevent QR-control acquisition.
+                val bestCandidate = candidates
+                    .maxWithOrNull(compareBy<QuadCandidate> { it.contractScore }.thenBy { it.area })
                 if (bestCandidate != null) {
                     bestPts = bestCandidate.points
                     maxArea = bestCandidate.area
@@ -214,7 +244,8 @@ class V6StaticDetector : AutoCloseable {
             }
 
             if (bestPts == null) {
-                val res = V6StaticResult(false, null, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Outer border not found: max valid area was ${maxArea.roundToInt()}", null, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
+                maxArea = maxOf(maxArea, largestContourArea)
+                val res = V6StaticResult(false, null, maxArea, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), false, 0.0, emptyMap(), 0.0, 0, null, null, 0, 0, 400, null, System.currentTimeMillis() - startTime, "Outer border not found: largest contour area was ${largestContourArea.roundToInt()}; quads=$quadsConsidered", null, contoursConsidered = contoursConsidered, quadsConsidered = quadsConsidered)
                 val trackedRes = tracker.processFrame(if (::gray.isInitialized) gray else null, res, null)
                 recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
                 return trackedRes
@@ -932,6 +963,93 @@ class V6StaticDetector : AutoCloseable {
                 detectorEndNs = System.nanoTime()
             )
         }
+    }
+
+    /**
+     * Scores a quadrilateral against the encoded V6 corner-anchor contract before
+     * committing to an expensive full warp. This is what distinguishes the carrier
+     * from a monitor bezel, screen edge, window, or other nested rectangle.
+     *
+     * Returns -1 unless all four anchors resolve to distinct, exact identities with
+     * the normal production contrast requirement.
+     */
+    private fun scoreCarrierContract(
+        points: Array<Point>,
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+    ): Int {
+        if (points.size != 4) return -1
+        val cx = points.map { it.x }.average()
+        val cy = points.map { it.y }.average()
+        val ordered = points.sortedBy { Math.atan2(it.y - cy, it.x - cx) }
+        val canonical = listOf(
+            Point(60.0, 60.0),
+            Point(940.0, 60.0),
+            Point(940.0, 940.0),
+            Point(60.0, 940.0),
+        )
+        val canonicalToFrame = solveHomographySimple(canonical, ordered) ?: return -1
+        val evaluations = mutableMapOf<String, AnchorMatchResult>()
+        var score = 0
+
+        for (key in listOf("TL", "TR", "BR", "BL")) {
+            val core = V6Contract.getAnchorCoreBBox(key)
+            val anchor = V6Contract.getAnchorBBox(key)
+            val ring = intArrayOf(
+                projectedMedianLuma(canonicalToFrame, anchor.x1 + 10.0, anchor.y1 + 10.0, luma, width, height),
+                projectedMedianLuma(canonicalToFrame, anchor.x2 - 10.0, anchor.y1 + 10.0, luma, width, height),
+                projectedMedianLuma(canonicalToFrame, anchor.x2 - 10.0, anchor.y2 - 10.0, luma, width, height),
+                projectedMedianLuma(canonicalToFrame, anchor.x1 + 10.0, anchor.y2 - 10.0, luma, width, height),
+            )
+            if (ring.any { it < 0 }) return -1
+            ring.sort()
+            val ringLuma = ring[1]
+
+            val coreValues = intArrayOf(
+                projectedMedianLuma(canonicalToFrame, core.x1 + core.width * 0.25, core.y1 + core.height * 0.25, luma, width, height),
+                projectedMedianLuma(canonicalToFrame, core.x1 + core.width * 0.75, core.y1 + core.height * 0.25, luma, width, height),
+                projectedMedianLuma(canonicalToFrame, core.x1 + core.width * 0.75, core.y1 + core.height * 0.75, luma, width, height),
+                projectedMedianLuma(canonicalToFrame, core.x1 + core.width * 0.25, core.y1 + core.height * 0.75, luma, width, height),
+            )
+            if (coreValues.any { it < 0 }) return -1
+            val sortedCore = coreValues.copyOf().also { it.sort() }
+            val coreWhiteRef = (sortedCore[1] + sortedCore[2] + sortedCore[3]) / 3
+            val contrast = coreWhiteRef - ringLuma
+            val threshold = (ringLuma + coreWhiteRef) / 2
+            val decodedBits = buildString(4) {
+                coreValues.forEach { append(if (it < threshold) '1' else '0') }
+            }
+            evaluations[key] = V6OrientationEvaluator.evaluateAnchorBits(key, decodedBits, contrast)
+            score += contrast
+        }
+
+        return if (V6OrientationEvaluator.isOrientationResolved(evaluations)) score else -1
+    }
+
+    private fun projectedMedianLuma(
+        homography: DoubleArray,
+        canonicalX: Double,
+        canonicalY: Double,
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+    ): Int {
+        val denominator = homography[6] * canonicalX + homography[7] * canonicalY + homography[8]
+        if (Math.abs(denominator) < 1e-9) return -1
+        val centerX = ((homography[0] * canonicalX + homography[1] * canonicalY + homography[2]) / denominator).roundToInt()
+        val centerY = ((homography[3] * canonicalX + homography[4] * canonicalY + homography[5]) / denominator).roundToInt()
+        if (centerX !in 1 until width - 1 || centerY !in 1 until height - 1) return -1
+
+        var index = 0
+        for (dy in -1..1) {
+            val rowOffset = (centerY + dy) * width
+            for (dx in -1..1) {
+                projectedSampleScratch[index++] = luma[rowOffset + centerX + dx].toInt() and 0xFF
+            }
+        }
+        projectedSampleScratch.sort()
+        return projectedSampleScratch[4]
     }
 
     private fun contourAreaOf(points: Array<Point>): Double {

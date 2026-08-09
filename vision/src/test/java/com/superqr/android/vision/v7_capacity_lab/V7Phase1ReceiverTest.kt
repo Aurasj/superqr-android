@@ -112,6 +112,63 @@ class V7Phase1ReceiverTest {
     }
 
     @Test
+    fun physicalMonitorBezelDoesNotHideNestedCarrierAndOpticalSync() {
+        try {
+            OpenCvRuntime.ensureLoaded()
+        } catch (failure: Throwable) {
+            Assume.assumeNoException("host OpenCV native library is unavailable", failure)
+        }
+        V6Contract.loadAndVerifyBytes(java.io.File("src/main/assets/visual_contract.json").readBytes())
+        val profile = V7Phase1GridProfile("mono_64x50_matched", 50, 64, 1, 400)
+        val receiver = V7Phase1Receiver(profile)
+        val envelope = V7LabRunEnvelope(V7LabRunState.RUNNING, 1, 0x6160, 17, 32, 3)
+        val canonical = renderPhysicalCarrier(profile, receiver.expectedSymbols(17), envelope)
+
+        // Real camera composition: room/background -> dark monitor bezel -> bright
+        // display -> carrier. RETR_EXTERNAL sees only the bezel and suppresses the
+        // nested SuperQR border; acquisition must search nested quads and identify
+        // the carrier by its four strict corner identities.
+        val frame = ByteArray(1280 * 720) { 170.toByte() }
+        fillRect(frame, 1280, 50, 20, 1230, 700, 18)
+        fillRect(frame, 1280, 90, 45, 1190, 675, 235)
+        val markerSize = 600
+        val offsetX = (1280 - markerSize) / 2
+        val offsetY = (720 - markerSize) / 2
+        for (y in 0 until markerSize) for (x in 0 until markerSize) {
+            frame[(offsetY + y) * 1280 + offsetX + x] =
+                canonical[(y * 1000 / markerSize) * 1000 + x * 1000 / markerSize]
+        }
+
+        V6StaticDetector().use { detector ->
+            val geometry = detector.detectGeometry(frame, 1280, 720)
+            assertTrue("nested carrier must acquire through monitor bezel: ${geometry.failureReason}", geometry.finalInvHomography != null)
+            assertTrue("nested acquisition must examine multiple quads", geometry.quadsConsidered >= 2)
+            val sync = V7Phase1SyncDecoder().analyze(geometry.finalInvHomography!!, frame, 1280, 720)
+            assertEquals(sync.status, envelope, sync.envelope)
+        }
+    }
+
+    @Test
+    fun monitorRectangleAloneIsNotAcceptedAsGridCarrier() {
+        try {
+            OpenCvRuntime.ensureLoaded()
+        } catch (failure: Throwable) {
+            Assume.assumeNoException("host OpenCV native library is unavailable", failure)
+        }
+        V6Contract.loadAndVerifyBytes(java.io.File("src/main/assets/visual_contract.json").readBytes())
+        val frame = ByteArray(1280 * 720) { 170.toByte() }
+        fillRect(frame, 1280, 50, 20, 1230, 700, 18)
+        fillRect(frame, 1280, 90, 45, 1190, 675, 235)
+
+        V6StaticDetector().use { detector ->
+            val geometry = detector.detectGeometry(frame, 1280, 720)
+            assertTrue("screen and bezel quads should be observed", geometry.quadsConsidered >= 2)
+            assertTrue("only the encoded V6 anchors may identify a grid carrier", !geometry.borderFound)
+            assertTrue(geometry.finalInvHomography == null)
+        }
+    }
+
+    @Test
     fun concentratedDamageUsesRealRs255BlockBoundary() {
         val profile = V7Phase1GridProfile("mono_64x50_matched", 50, 64, 1, 400)
         val receiver = V7Phase1Receiver(profile)

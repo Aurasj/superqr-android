@@ -144,7 +144,10 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                         val geometryDoneNs = System.nanoTime()
                                         val h = geometry.finalInvHomography
                                         if (h == null) {
-                                            scheduler.missed(Phase1AnalysisPath.GRID)
+                                            scheduler.missed(
+                                                Phase1AnalysisPath.GRID,
+                                                carrierCandidate = geometry.borderFound,
+                                            )
                                             recorder.recordFailure(
                                                 "NO_V6_GEOMETRY", geometryDoneNs,
                                                 (geometryDoneNs - arrivalNs) / 1_000_000.0,
