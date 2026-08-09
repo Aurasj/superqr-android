@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Debug
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.widget.Toast
@@ -27,8 +28,6 @@ import androidx.core.view.doOnLayout
 import com.superqr.android.camera.ChromaSampleBuffers
 import com.superqr.android.camera.ImageProxyChromaSampler
 import com.superqr.android.camera.LumaFrameBuffer
-import com.superqr.android.vision.v6.contract.V6Contract
-import com.superqr.android.vision.v6.detection.V6StaticDetector
 import com.superqr.android.vision.opencv.OpenCvRuntime
 import com.superqr.android.vision.v7_capacity_lab.*
 import java.util.concurrent.ExecutorService
@@ -65,7 +64,7 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
     DisposableEffect(permission, running) {
         val myGeneration = generation.incrementAndGet()
         var provider: ProcessCameraProvider? = null
-        var detector: V6StaticDetector? = null
+        var carrierAcquirer: V7CarrierAcquirer? = null
         var qrDecoder: V7Phase1QrDecoder? = null
         var analysis: ImageAnalysis? = null
         if (permission && running) {
@@ -75,7 +74,6 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                 if (generation.get() != myGeneration) return@addListener
                 try {
                     provider = future.get()
-                    V6Contract.loadAndVerify(context)
                     previewView.doOnLayout {
                         if (generation.get() != myGeneration) return@doOnLayout
                         try {
@@ -98,9 +96,8 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                                 .build()
                             val openCv = OpenCvRuntime.ensureLoaded()
-                            detector = V6StaticDetector()
+                            carrierAcquirer = V7CarrierAcquirer(manifest.carrierSpec)
                             qrDecoder = V7Phase1QrDecoder()
-                            val syncDecoder = V7Phase1SyncDecoder()
                             val luma = LumaFrameBuffer()
                             val chroma = ChromaSampleBuffers()
                             val chromaReader = ImageProxyChromaSampler(chroma)
@@ -140,36 +137,55 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                     }
                                     val packedNs = System.nanoTime()
                                     if (scheduler.path == Phase1AnalysisPath.GRID) {
-                                        val geometry = detector!!.detectGeometry(luma.bytes, luma.width, luma.height)
-                                        val geometryDoneNs = System.nanoTime()
-                                        val h = geometry.finalInvHomography
+                                        val acquisition = carrierAcquirer!!.analyze(luma.bytes, luma.width, luma.height)
+                                        val acquisitionDoneNs = System.nanoTime()
+                                        val h = acquisition.canonicalToImageHomography
                                         if (h == null) {
+                                            if (deliveredFrames % 30 == 0) {
+                                                Log.i(
+                                                    "SuperQR-V7Carrier",
+                                                    "source=${acquisition.source} candidates=${acquisition.candidateCount} " +
+                                                        "contours=${acquisition.contourCount} attempts=${acquisition.syncAttempts} " +
+                                                        "finderHypotheses=${acquisition.finderHypothesisCount} " +
+                                                        "best=${acquisition.bestSyncStatus} topContrast=${acquisition.sync.topContrast} " +
+                                                        "bottomContrast=${acquisition.sync.bottomContrast} " +
+                                                        "margin=${acquisition.sync.minimumCellMargin} " +
+                                                        "quad=${acquisition.detectedQuad?.joinToString { it.joinToString(prefix = "[", postfix = "]") }} " +
+                                                        "candidateSummary=${acquisition.candidateSummary}",
+                                                )
+                                            }
                                             scheduler.missed(
                                                 Phase1AnalysisPath.GRID,
-                                                carrierCandidate = geometry.borderFound,
+                                                carrierCandidate = acquisition.carrierLike,
                                             )
                                             recorder.recordFailure(
-                                                "NO_V6_GEOMETRY", geometryDoneNs,
-                                                (geometryDoneNs - arrivalNs) / 1_000_000.0,
-                                                "NO_V6_GEOMETRY", scheduler.state,
+                                                acquisition.bestSyncStatus, acquisitionDoneNs,
+                                                (acquisitionDoneNs - arrivalNs) / 1_000_000.0,
+                                                acquisition.source, acquisition.sync.status,
                                                 mapOf(
                                                     "sensor_timestamp_ns" to image.imageInfo.timestamp,
                                                     "capture_width" to luma.width, "capture_height" to luma.height,
-                                                    "analysis_path" to "GRID", "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
-                                                    "geometry_ms" to (geometryDoneNs - packedNs) / 1_000_000.0,
-                                                    "detector_failure" to geometry.failureReason,
-                                                    "contours_considered" to geometry.contoursConsidered,
-                                                    "quads_considered" to geometry.quadsConsidered,
+                                                    "analysis_path" to "GRID", "acquisition_state" to scheduler.state,
+                                                    "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
+                                                    "acquisition_ms" to (acquisitionDoneNs - packedNs) / 1_000_000.0,
+                                                    "contours_considered" to acquisition.contourCount,
+                                                    "quad_candidates" to acquisition.candidateCount,
+                                                    "sync_hypotheses_tested" to acquisition.syncAttempts,
+                                                    "best_sync_status" to acquisition.bestSyncStatus,
+                                                    "top_sync_contrast" to acquisition.sync.topContrast,
+                                                    "bottom_sync_contrast" to acquisition.sync.bottomContrast,
+                                                    "minimum_sync_cell_margin" to acquisition.sync.minimumCellMargin,
+                                                    "detected_quad" to acquisition.detectedQuad,
                                                 ),
                                             )
                                         } else {
-                                            val sync = syncDecoder.analyze(h, luma.bytes, luma.width, luma.height)
-                                            val syncDoneNs = System.nanoTime()
+                                            val sync = acquisition.sync
+                                            val syncDoneNs = acquisitionDoneNs
                                             val envelope = sync.envelope
                                             val profile = envelope?.let { manifest.profile(it.profileId) }
                                             if (envelope != null && profile is Phase1Profile.Grid) {
                                                 scheduler.locked(Phase1AnalysisPath.GRID)
-                                                recorder.observeSender(profile, envelope, sync.status, geometry.geometrySource)
+                                                recorder.observeSender(profile, envelope, sync.status, acquisition.source)
                                                 if (envelope.state == V7LabRunState.RUNNING) {
                                                     if (activeGridId != profile.id) {
                                                         gridReceiver = V7Phase1Receiver(profile.receiverProfile, manifest.seed)
@@ -193,7 +209,7 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                                         result.frameValid, result.postFecValid,
                                                         (completedNs - arrivalNs) / 1_000_000.0, allocation,
                                                         (gcCount() - gcStart).coerceAtLeast(0), envelope,
-                                                        sync.status, geometry.geometrySource, reason,
+                                                        sync.status, acquisition.source, reason,
                                                         result.errorCellIndexes, result.errorCellCount,
                                                         result.erasureCellIndexes, result.erasureCellCount,
                                                         mapOf(
@@ -201,16 +217,22 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                                             "capture_width" to luma.width, "capture_height" to luma.height,
                                                             "analysis_path" to "GRID", "acquisition_state" to scheduler.state,
                                                             "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
-                                                            "geometry_ms" to (geometryDoneNs - packedNs) / 1_000_000.0,
-                                                            "sync_ms" to (syncDoneNs - geometryDoneNs) / 1_000_000.0,
+                                                            "acquisition_ms" to (acquisitionDoneNs - packedNs) / 1_000_000.0,
+                                                            "sync_ms" to 0.0,
                                                             "payload_ms" to (completedNs - syncDoneNs) / 1_000_000.0,
                                                             "byte_errors" to result.byteErrors, "byte_erasures" to result.byteErasures,
                                                             "valid_samples" to result.validSamples, "black_y" to result.blackY, "white_y" to result.whiteY,
+                                                            "contours_considered" to acquisition.contourCount,
+                                                            "quad_candidates" to acquisition.candidateCount,
+                                                            "sync_hypotheses_tested" to acquisition.syncAttempts,
+                                                            "top_sync_contrast" to sync.topContrast,
+                                                            "bottom_sync_contrast" to sync.bottomContrast,
+                                                            "minimum_sync_cell_margin" to sync.minimumCellMargin,
                                                         ),
                                                     )
                                                 }
                                             } else {
-                                                scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
+                                                scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = acquisition.carrierLike)
                                                 val reason = when {
                                                     envelope == null -> sync.status
                                                     profile == null -> "SYNC_UNKNOWN_PROFILE_${envelope.profileId}"
@@ -218,14 +240,20 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                                 }
                                                 recorder.recordFailure(
                                                     reason, syncDoneNs, (syncDoneNs - arrivalNs) / 1_000_000.0,
-                                                    geometry.geometrySource, sync.status,
+                                                    acquisition.source, sync.status,
                                                     mapOf(
                                                         "sensor_timestamp_ns" to image.imageInfo.timestamp,
                                                         "capture_width" to luma.width, "capture_height" to luma.height,
                                                         "analysis_path" to "GRID", "acquisition_state" to scheduler.state,
                                                         "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
-                                                        "geometry_ms" to (geometryDoneNs - packedNs) / 1_000_000.0,
-                                                        "sync_ms" to (syncDoneNs - geometryDoneNs) / 1_000_000.0,
+                                                        "acquisition_ms" to (acquisitionDoneNs - packedNs) / 1_000_000.0,
+                                                        "sync_ms" to 0.0,
+                                                        "contours_considered" to acquisition.contourCount,
+                                                        "quad_candidates" to acquisition.candidateCount,
+                                                        "sync_hypotheses_tested" to acquisition.syncAttempts,
+                                                        "top_sync_contrast" to sync.topContrast,
+                                                        "bottom_sync_contrast" to sync.bottomContrast,
+                                                        "minimum_sync_cell_margin" to sync.minimumCellMargin,
                                                     ),
                                                 )
                                             }
@@ -309,7 +337,7 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
         onDispose {
             generation.incrementAndGet(); analysis?.clearAnalyzer()
             try { provider?.unbindAll() } catch (_: Throwable) {}
-            detector?.close(); qrDecoder?.close()
+            carrierAcquirer?.close(); qrDecoder?.close()
         }
     }
 

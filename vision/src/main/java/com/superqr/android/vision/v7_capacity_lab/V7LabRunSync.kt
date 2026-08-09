@@ -71,52 +71,124 @@ data class V7LabSyncResult(
     val status: String,
     val blackY: Int,
     val whiteY: Int,
+    val topContrast: Int = 0,
+    val bottomContrast: Int = 0,
+    val minimumCellMargin: Int = 0,
 )
 
+data class V7CarrierSpec(
+    val canvasSize: Double = 1000.0,
+    val borderBbox: DoubleArray = doubleArrayOf(50.0, 50.0, 950.0, 950.0),
+    val borderThickness: Double = 20.0,
+    val syncTopBbox: DoubleArray = doubleArrayOf(200.0, 145.0, 800.0, 175.0),
+    val syncBottomBbox: DoubleArray = doubleArrayOf(200.0, 825.0, 800.0, 855.0),
+    val syncRows: Int = 2,
+    val syncCols: Int = 40,
+    val candidateContourEdges: DoubleArray = doubleArrayOf(50.0, 70.0),
+) {
+    init {
+        require(borderBbox.size == 4 && syncTopBbox.size == 4 && syncBottomBbox.size == 4)
+        require(syncRows * syncCols == V7LabRunEnvelope.PACKET_BITS)
+        require(candidateContourEdges.isNotEmpty())
+    }
+}
+
 /** Decodes matching top/bottom sync bands to reject rolling-shutter transitions. */
-class V7Phase1SyncDecoder {
+class V7Phase1SyncDecoder(private val spec: V7CarrierSpec = V7CarrierSpec()) {
+    private data class BandLevels(val black: Int, val white: Int, val threshold: Double)
+
     private val projected = DoubleArray(2)
     private val patch = IntArray(9)
     private val topPacket = ByteArray(V7LabRunEnvelope.PACKET_BYTES)
     private val bottomPacket = ByteArray(V7LabRunEnvelope.PACKET_BYTES)
+    private val topSamples = IntArray(V7LabRunEnvelope.PACKET_BITS)
+    private val bottomSamples = IntArray(V7LabRunEnvelope.PACKET_BITS)
 
     fun analyze(h: DoubleArray, luma: ByteArray, width: Int, height: Int): V7LabSyncResult {
-        val black = sampleMedian(h, 300.0, 120.0, luma, width, height)
-        val white = sampleMedian(h, 380.0, 120.0, luma, width, height)
-        if (black < 0 || white < 0 || white - black < 32) {
-            return V7LabSyncResult(null, "SYNC_LOW_CONTRAST", black, white)
+        if (!sampleBand(h, luma, width, height, spec.syncTopBbox, topSamples)) {
+            return V7LabSyncResult(null, "SYNC_TOP_UNREADABLE", -1, -1)
         }
-        val threshold = (black + white) * 0.5
-        if (!decodeBand(h, luma, width, height, TOP_Y1, TOP_Y2, threshold, topPacket)) {
-            return V7LabSyncResult(null, "SYNC_TOP_UNREADABLE", black, white)
+        if (!sampleBand(h, luma, width, height, spec.syncBottomBbox, bottomSamples)) {
+            return V7LabSyncResult(null, "SYNC_BOTTOM_UNREADABLE", -1, -1)
         }
-        if (!decodeBand(h, luma, width, height, BOTTOM_Y1, BOTTOM_Y2, threshold, bottomPacket)) {
-            return V7LabSyncResult(null, "SYNC_BOTTOM_UNREADABLE", black, white)
+        val topLevels = estimateLevels(topSamples)
+            ?: return V7LabSyncResult(null, "SYNC_TOP_LOW_CONTRAST", -1, -1)
+        val bottomLevels = estimateLevels(bottomSamples)
+            ?: return V7LabSyncResult(null, "SYNC_BOTTOM_LOW_CONTRAST", -1, -1)
+        val topContrast = topLevels.white - topLevels.black
+        val bottomContrast = bottomLevels.white - bottomLevels.black
+        if (topContrast < MIN_BAND_CONTRAST || bottomContrast < MIN_BAND_CONTRAST) {
+            return V7LabSyncResult(
+                null, "SYNC_LOW_CONTRAST",
+                (topLevels.black + bottomLevels.black) / 2,
+                (topLevels.white + bottomLevels.white) / 2,
+                topContrast, bottomContrast,
+            )
         }
+        val topMargin = decodeBand(topSamples, topLevels.threshold, topPacket)
+        val bottomMargin = decodeBand(bottomSamples, bottomLevels.threshold, bottomPacket)
+        val black = (topLevels.black + bottomLevels.black) / 2
+        val white = (topLevels.white + bottomLevels.white) / 2
         val top = V7LabRunEnvelope.decode(topPacket)
-            ?: return V7LabSyncResult(null, "SYNC_TOP_CRC_OR_HEADER", black, white)
+            ?: return V7LabSyncResult(null, "SYNC_TOP_CRC_OR_HEADER", black, white, topContrast, bottomContrast, minOf(topMargin, bottomMargin))
         val bottom = V7LabRunEnvelope.decode(bottomPacket)
-            ?: return V7LabSyncResult(null, "SYNC_BOTTOM_CRC_OR_HEADER", black, white)
-        if (top != bottom) return V7LabSyncResult(null, "SYNC_TRANSITION_TOP_BOTTOM_MISMATCH", black, white)
-        return V7LabSyncResult(top, "LOCKED", black, white)
+            ?: return V7LabSyncResult(null, "SYNC_BOTTOM_CRC_OR_HEADER", black, white, topContrast, bottomContrast, minOf(topMargin, bottomMargin))
+        if (top != bottom) {
+            return V7LabSyncResult(null, "SYNC_TRANSITION_TOP_BOTTOM_MISMATCH", black, white, topContrast, bottomContrast, minOf(topMargin, bottomMargin))
+        }
+        return V7LabSyncResult(top, "LOCKED", black, white, topContrast, bottomContrast, minOf(topMargin, bottomMargin))
     }
 
-    private fun decodeBand(
-        h: DoubleArray, luma: ByteArray, width: Int, height: Int,
-        y1: Double, y2: Double, threshold: Double, output: ByteArray,
+    private fun sampleBand(
+        h: DoubleArray,
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        bbox: DoubleArray,
+        output: IntArray,
     ): Boolean {
-        output.fill(0)
-        for (bit in 0 until V7LabRunEnvelope.PACKET_BITS) {
-            val row = bit / COLS; val col = bit % COLS
-            val x = X1 + (col + 0.5) * (X2 - X1) / COLS
-            val y = y1 + (row + 0.5) * (y2 - y1) / ROWS
+        val x1 = bbox[0]; val y1 = bbox[1]; val x2 = bbox[2]; val y2 = bbox[3]
+        for (bit in output.indices) {
+            val row = bit / spec.syncCols; val col = bit % spec.syncCols
+            val x = x1 + (col + 0.5) * (x2 - x1) / spec.syncCols
+            val y = y1 + (row + 0.5) * (y2 - y1) / spec.syncRows
             val sample = sampleMedian(h, x, y, luma, width, height)
             if (sample < 0) return false
+            output[bit] = sample
+        }
+        return true
+    }
+
+    private fun estimateLevels(samples: IntArray): BandLevels? {
+        var low = samples.minOrNull() ?: return null
+        var high = samples.maxOrNull() ?: return null
+        if (high <= low) return null
+        repeat(5) {
+            val split = (low + high) * 0.5
+            var lowSum = 0; var lowCount = 0
+            var highSum = 0; var highCount = 0
+            for (sample in samples) {
+                if (sample < split) { lowSum += sample; lowCount++ }
+                else { highSum += sample; highCount++ }
+            }
+            if (lowCount < MIN_CLUSTER_CELLS || highCount < MIN_CLUSTER_CELLS) return null
+            low = lowSum / lowCount
+            high = highSum / highCount
+        }
+        return BandLevels(low, high, (low + high) * 0.5)
+    }
+
+    private fun decodeBand(samples: IntArray, threshold: Double, output: ByteArray): Int {
+        output.fill(0)
+        var minimumMargin = Int.MAX_VALUE
+        for (bit in samples.indices) {
+            val sample = samples[bit]
+            minimumMargin = minOf(minimumMargin, abs(sample - threshold).roundToInt())
             if (sample >= threshold) {
                 output[bit / 8] = (output[bit / 8].toInt() or (1 shl (7 - bit % 8))).toByte()
             }
         }
-        return true
+        return minimumMargin
     }
 
     private fun sampleMedian(h: DoubleArray, x: Double, y: Double, luma: ByteArray, width: Int, height: Int): Int {
@@ -144,9 +216,7 @@ class V7Phase1SyncDecoder {
     }
 
     companion object {
-        private const val X1 = 200.0; private const val X2 = 800.0
-        private const val TOP_Y1 = 145.0; private const val TOP_Y2 = 175.0
-        private const val BOTTOM_Y1 = 825.0; private const val BOTTOM_Y2 = 855.0
-        private const val ROWS = 2; private const val COLS = 40
+        private const val MIN_BAND_CONTRAST = 24
+        private const val MIN_CLUSTER_CELLS = 8
     }
 }

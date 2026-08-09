@@ -1,6 +1,6 @@
 {
   "artifact": "v7_phase1_phy_selection_manifest",
-  "schema_version": 2,
+  "schema_version": 3,
   "status": "LAB_ONLY_NOT_A_V7_WIRE_CONTRACT",
   "canvas_size": 1000,
   "payload_bbox": [
@@ -9,6 +9,179 @@
     900.0,
     810.0
   ],
+  "acquisition_carrier": {
+    "status": "LAB_ONLY_NOT_PRODUCTION_V7_GEOMETRY",
+    "outer_border": {
+      "bbox": [
+        50.0,
+        50.0,
+        950.0,
+        950.0
+      ],
+      "thickness": 20.0
+    },
+    "finder_patterns": [
+      {
+        "name": "TL",
+        "outer_bbox": [
+          80.0,
+          80.0,
+          180.0,
+          180.0
+        ],
+        "inner_bbox": [
+          94.0,
+          94.0,
+          166.0,
+          166.0
+        ],
+        "core_bbox": [
+          109.0,
+          109.0,
+          151.0,
+          151.0
+        ]
+      },
+      {
+        "name": "TR",
+        "outer_bbox": [
+          820.0,
+          80.0,
+          920.0,
+          180.0
+        ],
+        "inner_bbox": [
+          834.0,
+          94.0,
+          906.0,
+          166.0
+        ],
+        "core_bbox": [
+          849.0,
+          109.0,
+          891.0,
+          151.0
+        ]
+      },
+      {
+        "name": "BR",
+        "outer_bbox": [
+          820.0,
+          820.0,
+          920.0,
+          920.0
+        ],
+        "inner_bbox": [
+          834.0,
+          834.0,
+          906.0,
+          906.0
+        ],
+        "core_bbox": [
+          849.0,
+          849.0,
+          891.0,
+          891.0
+        ]
+      },
+      {
+        "name": "BL",
+        "outer_bbox": [
+          80.0,
+          820.0,
+          180.0,
+          920.0
+        ],
+        "inner_bbox": [
+          94.0,
+          834.0,
+          166.0,
+          906.0
+        ],
+        "core_bbox": [
+          109.0,
+          849.0,
+          151.0,
+          891.0
+        ]
+      }
+    ],
+    "pilots": [
+      {
+        "name": "BLACK",
+        "carrier_bbox": [
+          280.0,
+          90.0,
+          320.0,
+          130.0
+        ],
+        "carrier_color": "#FFFFFF",
+        "core_bbox": [
+          290.0,
+          100.0,
+          310.0,
+          120.0
+        ],
+        "core_color": "#000000"
+      },
+      {
+        "name": "WHITE",
+        "carrier_bbox": [
+          360.0,
+          90.0,
+          400.0,
+          130.0
+        ],
+        "carrier_color": "#000000",
+        "core_bbox": [
+          370.0,
+          100.0,
+          390.0,
+          120.0
+        ],
+        "core_color": "#FFFFFF"
+      },
+      {
+        "name": "RED",
+        "carrier_bbox": [
+          600.0,
+          90.0,
+          640.0,
+          130.0
+        ],
+        "carrier_color": "#FFFFFF",
+        "core_bbox": [
+          610.0,
+          100.0,
+          630.0,
+          120.0
+        ],
+        "core_color": "#FF0000"
+      },
+      {
+        "name": "BLUE",
+        "carrier_bbox": [
+          680.0,
+          90.0,
+          720.0,
+          130.0
+        ],
+        "carrier_color": "#FFFFFF",
+        "core_bbox": [
+          690.0,
+          100.0,
+          710.0,
+          120.0
+        ],
+        "core_color": "#0000FF"
+      }
+    ],
+    "candidate_contour_edges": [
+      50.0,
+      70.0
+    ],
+    "validation": "candidate homographies are accepted only when both optical run-envelope copies pass header/CRC and match"
+  },
   "reference_marker_px": 800,
   "reference_refresh_hz": 60.0,
   "dwell_epoch_candidates": [

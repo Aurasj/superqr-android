@@ -1,7 +1,9 @@
 package com.superqr.android.ui.phase1
 
 import android.content.Context
+import com.superqr.android.vision.v7_capacity_lab.V7CarrierSpec
 import com.superqr.android.vision.v7_capacity_lab.V7Phase1GridProfile
+import org.json.JSONArray
 import org.json.JSONObject
 
 sealed interface Phase1Profile {
@@ -31,6 +33,7 @@ data class Phase1Manifest(
     val dwellEpochs: List<Int>,
     val referenceRefreshHz: Double,
     val seed: Int,
+    val carrierSpec: V7CarrierSpec,
 ) {
     fun profile(id: Int): Phase1Profile? = profiles.firstOrNull { it.id == id }
 
@@ -40,7 +43,21 @@ data class Phase1Manifest(
                 .bufferedReader().use { it.readText() }
             val json = JSONObject(text)
             require(json.getString("status") == "LAB_ONLY_NOT_A_V7_WIRE_CONTRACT")
-            require(json.getInt("schema_version") >= 2)
+            require(json.getInt("schema_version") >= 3)
+            val acquisition = json.getJSONObject("acquisition_carrier")
+            require(acquisition.getString("status") == "LAB_ONLY_NOT_PRODUCTION_V7_GEOMETRY")
+            val border = acquisition.getJSONObject("outer_border")
+            val sync = json.getJSONObject("run_sync")
+            val carrierSpec = V7CarrierSpec(
+                canvasSize = json.getDouble("canvas_size"),
+                borderBbox = border.getJSONArray("bbox").toDoubleArray(),
+                borderThickness = border.getDouble("thickness"),
+                syncTopBbox = sync.getJSONArray("top_bbox").toDoubleArray(),
+                syncBottomBbox = sync.getJSONArray("bottom_bbox").toDoubleArray(),
+                syncRows = sync.getInt("rows"),
+                syncCols = sync.getInt("cols"),
+                candidateContourEdges = acquisition.getJSONArray("candidate_contour_edges").toDoubleArray(),
+            )
             val profiles = mutableListOf<Phase1Profile>()
             val grid = json.getJSONArray("grid_profiles")
             for (index in 0 until grid.length()) {
@@ -78,7 +95,11 @@ data class Phase1Manifest(
                 dwellEpochs = List(dwells.length()) { dwells.getInt(it) },
                 referenceRefreshHz = json.getDouble("reference_refresh_hz"),
                 seed = json.getInt("seed"),
+                carrierSpec = carrierSpec,
             )
         }
+
+        private fun JSONArray.toDoubleArray(): DoubleArray =
+            DoubleArray(length()) { index -> getDouble(index) }
     }
 }

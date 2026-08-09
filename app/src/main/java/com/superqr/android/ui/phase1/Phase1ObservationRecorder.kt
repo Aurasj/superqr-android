@@ -103,6 +103,11 @@ class Phase1ObservationRecorder {
         sync: String,
         extra: Map<String, Any?> = emptyMap(),
     ): Phase1RunSnapshot {
+        // The optical carrier intentionally disappears after DONE. Preserve the
+        // completed run summary until a different run token/profile is seen;
+        // otherwise ordinary post-campaign camera frames contaminate the final
+        // metrics and replace DONE with a misleading acquisition warning.
+        if (senderState == "DONE") return snapshot(completedNs)
         noteAnalysis(completedNs, pipelineMs)
         geometryState = geometry; syncStatus = sync; lastFailure = reason
         failureCounts[reason] = (failureCounts[reason] ?: 0) + 1

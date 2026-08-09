@@ -201,7 +201,7 @@ private fun RunCard(status: Phase1RunSnapshot, tint: Color) {
                 Text(status.profileName, color = LabText, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                 Text("RUN ${status.runId}", color = tint, fontWeight = FontWeight.Bold, fontSize = 13.sp)
             }
-            Text("${status.senderState} • ${status.syncStatus}", color = tint, fontWeight = FontWeight.Medium)
+            Text("${status.senderState} • ${displaySyncStatus(status.syncStatus)}", color = tint, fontWeight = FontWeight.Medium)
             LinearProgressIndicator(
                 progress = { status.progress.toFloat().coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth().height(7.dp),
@@ -232,9 +232,22 @@ private fun DiagnosticsCard(status: Phase1RunSnapshot) {
             Text("Geometry  ${status.geometryState}", color = LabText, fontSize = 13.sp)
             Text("Sync  ${status.syncStatus}", color = LabText, fontSize = 13.sp)
             if (failure != null) Text("Last failure  $failure", color = LabBad, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            if (failure == "V7_NO_COMPLETE_CARRIER_GEOMETRY") {
+                Text(
+                    "Frame all four corner squares. Move the phone back or select the Desktop 600 px marker.",
+                    color = LabWarn,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                )
+            }
             if (status.failureSummary.isNotBlank()) Text(status.failureSummary, color = LabMuted, fontSize = 11.sp)
         }
     }
+}
+
+private fun displaySyncStatus(status: String): String = when (status) {
+    "V7_NO_COMPLETE_CARRIER_GEOMETRY" -> "FRAME ALL 4 CORNER MARKERS"
+    else -> status
 }
 
 @Composable

@@ -80,5 +80,17 @@ class Phase1ObservationRecorderTest {
         assertEquals(1, snapshot.observations)
         assertEquals(1, snapshot.uniqueFrames)
         assertEquals(1360, snapshot.innovativeBytes)
+
+        val linesAtDone = recorder.jsonLinesForTest().size
+        recorder.recordFailure(
+            "V7_NO_COMPLETE_CARRIER_GEOMETRY", 300, 12.0,
+            "V7_SYNC_NOT_VALIDATED", "V7_NO_COMPLETE_CARRIER_GEOMETRY",
+        )
+        val stable = recorder.snapshot(400)
+        assertEquals("DONE", stable.senderState)
+        assertEquals("TRACKED_RESAMPLED", stable.geometryState)
+        assertEquals("LOCKED", stable.syncStatus)
+        assertEquals(snapshot.analyzedFrames, stable.analyzedFrames)
+        assertEquals(linesAtDone, recorder.jsonLinesForTest().size)
     }
 }
