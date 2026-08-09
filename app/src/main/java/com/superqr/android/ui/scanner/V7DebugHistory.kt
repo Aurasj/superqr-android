@@ -65,14 +65,19 @@ class V7DebugHistory(private val capacity: Int = 512) {
         events.clear()
     }
 
+    /**
+     * Measurement arguments are optional so older/internal call sites remain
+     * source-compatible while V7.0 wiring is rolled out. A missing measurement
+     * is exported as 0 rather than being guessed.
+     */
     @Synchronized
     fun record(
         analysisIndex: Int,
         profile: V7OpticalProfile,
         transport: V7TransportDiagnostics,
         accepted: V7TransportFrame?,
-        measurement: V7MeasurementTracker.Snapshot,
-        cameraDeliveredFps: Double,
+        measurement: V7MeasurementTracker.Snapshot? = null,
+        cameraDeliveredFps: Double = 0.0,
     ) {
         val h = transport.header
         if (events.size >= capacity) events.removeFirst()
@@ -86,16 +91,16 @@ class V7DebugHistory(private val capacity: Int = 512) {
                 totalFrames = h?.totalFrames,
                 payloadLen = h?.payloadLen,
                 cameraDeliveredFps = cameraDeliveredFps,
-                analysisFps = measurement.analysisFps,
-                pipelineMs = measurement.pipelineMs,
-                detectorMs = measurement.detectorMs,
-                v7TotalMs = measurement.v7TotalMs,
-                v7ProfileMs = measurement.v7ProfileMs,
-                v7SamplingMs = measurement.v7SamplingMs,
-                v7ClassificationMs = measurement.v7ClassificationMs,
-                v7TransportMs = measurement.v7TransportMs,
-                usefulUniqueFps = measurement.usefulUniqueFps,
-                decodedPayloadKiBs = measurement.decodedPayloadKiBs,
+                analysisFps = measurement?.analysisFps ?: 0.0,
+                pipelineMs = measurement?.pipelineMs ?: 0.0,
+                detectorMs = measurement?.detectorMs ?: 0.0,
+                v7TotalMs = measurement?.v7TotalMs ?: 0.0,
+                v7ProfileMs = measurement?.v7ProfileMs ?: 0.0,
+                v7SamplingMs = measurement?.v7SamplingMs ?: 0.0,
+                v7ClassificationMs = measurement?.v7ClassificationMs ?: 0.0,
+                v7TransportMs = measurement?.v7TransportMs ?: 0.0,
+                usefulUniqueFps = measurement?.usefulUniqueFps ?: 0.0,
+                decodedPayloadKiBs = measurement?.decodedPayloadKiBs ?: 0.0,
                 rawErasures = transport.rawErasures,
                 remainingErasures = transport.remainingErasures,
                 temporalObservations = transport.temporalObservations,
