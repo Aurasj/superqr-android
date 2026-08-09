@@ -3,6 +3,7 @@ package com.superqr.android.vision.v7_capacity_lab
 import com.superqr.android.vision.opencv.OpenCvRuntime
 import org.opencv.core.CvType
 import org.opencv.core.Mat
+import org.opencv.core.Rect
 import org.opencv.objdetect.QRCodeDetector
 import java.util.zip.CRC32
 
@@ -44,7 +45,16 @@ class V7Phase1QrDecoder : AutoCloseable {
         val target = checkNotNull(gray)
         target.create(height, width, CvType.CV_8UC1)
         target.put(0, 0, luma)
-        return detector!!.detectAndDecodeBytes(target)
+        // The lab guide keeps the square marker centered. Restricting OpenCV's
+        // finder scan to that square avoids searching the unused portrait or
+        // landscape bands and materially reduces V27/V40 acquisition cost.
+        val side = minOf(width, height)
+        val roi = target.submat(Rect((width - side) / 2, (height - side) / 2, side, side))
+        return try {
+            detector!!.detectAndDecodeBytes(roi)
+        } finally {
+            roi.release()
+        }
     }
 
     override fun close() {

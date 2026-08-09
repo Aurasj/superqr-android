@@ -1,5 +1,7 @@
 package com.superqr.android.vision.v7_capacity_lab
 
+import com.superqr.android.vision.v6.contract.V6Contract
+import com.superqr.android.vision.v6.detection.V6StaticDetector
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -77,6 +79,29 @@ class V7Phase1ReceiverTest {
     }
 
     @Test
+    fun physical720pWhiteSurroundAcquiresContractBorderAndOpticalSync() {
+        V6Contract.loadAndVerifyBytes(java.io.File("src/main/assets/visual_contract.json").readBytes())
+        val profile = V7Phase1GridProfile("mono_64x50_matched", 50, 64, 1, 400)
+        val receiver = V7Phase1Receiver(profile)
+        val envelope = V7LabRunEnvelope(V7LabRunState.RUNNING, 1, 0x5D84, 9, 32, 3)
+        val canonical = renderPhysicalCarrier(profile, receiver.expectedSymbols(9), envelope)
+        val frame = ByteArray(1280 * 720) { 235.toByte() }
+        val markerSize = 600
+        val offsetX = (1280 - markerSize) / 2
+        val offsetY = (720 - markerSize) / 2
+        for (y in 0 until markerSize) for (x in 0 until markerSize) {
+            frame[(offsetY + y) * 1280 + offsetX + x] = canonical[(y * 1000 / markerSize) * 1000 + x * 1000 / markerSize]
+        }
+
+        V6StaticDetector().use { detector ->
+            val geometry = detector.detectGeometry(frame, 1280, 720)
+            assertTrue("contract border and anchors must acquire: ${geometry.failureReason}", geometry.finalInvHomography != null)
+            val sync = V7Phase1SyncDecoder().analyze(geometry.finalInvHomography!!, frame, 1280, 720)
+            assertEquals(sync.status, envelope, sync.envelope)
+        }
+    }
+
+    @Test
     fun concentratedDamageUsesRealRs255BlockBoundary() {
         val profile = V7Phase1GridProfile("mono_64x50_matched", 50, 64, 1, 400)
         val receiver = V7Phase1Receiver(profile)
@@ -122,6 +147,43 @@ class V7Phase1ReceiverTest {
         for (row in 0 until profile.rows) for (col in 0 until profile.cols) {
             val symbol = symbols[row * profile.cols + col].toInt()
             fillCell(image, 1000, profile, row, col, cellW, cellH, if (symbol == 0) 20 else 235)
+        }
+        drawSyncBand(image, envelope, 145)
+        drawSyncBand(image, envelope, 825)
+        return image
+    }
+
+    private fun renderPhysicalCarrier(
+        profile: V7Phase1GridProfile, symbols: ByteArray, envelope: V7LabRunEnvelope,
+    ): ByteArray {
+        val image = ByteArray(1000 * 1000) { 235.toByte() }
+        fillRect(image, 1000, 60, 60, 940, 940, 20)
+        fillRect(image, 1000, 70, 70, 930, 930, 235)
+        val anchors = listOf(
+            intArrayOf(100, 100, 180, 180, 120, 120, 140, 140),
+            intArrayOf(820, 100, 900, 180, 860, 120, 880, 140),
+            intArrayOf(820, 820, 900, 900, 860, 860, 880, 880),
+            intArrayOf(100, 820, 180, 900, 120, 860, 140, 880),
+        )
+        val cores = listOf(
+            intArrayOf(120, 120, 160, 160), intArrayOf(840, 120, 880, 160),
+            intArrayOf(840, 840, 880, 880), intArrayOf(120, 840, 160, 880),
+        )
+        for (index in anchors.indices) {
+            val a = anchors[index]; val core = cores[index]
+            fillRect(image, 1000, a[0], a[1], a[2], a[3], 20)
+            fillRect(image, 1000, core[0], core[1], core[2], core[3], 235)
+            fillRect(image, 1000, a[4], a[5], a[6], a[7], 20)
+        }
+        fillRect(image, 1000, 280, 100, 320, 140, 235)
+        fillRect(image, 1000, 290, 110, 310, 130, 20)
+        fillRect(image, 1000, 360, 100, 400, 140, 20)
+        fillRect(image, 1000, 370, 110, 390, 130, 235)
+        val cellW = 800.0 / profile.cols
+        val cellH = 620.0 / profile.rows
+        for (row in 0 until profile.rows) for (col in 0 until profile.cols) {
+            val value = if (symbols[row * profile.cols + col].toInt() == 0) 20 else 235
+            fillCell(image, 1000, profile, row, col, cellW, cellH, value)
         }
         drawSyncBand(image, envelope, 145)
         drawSyncBand(image, envelope, 825)
