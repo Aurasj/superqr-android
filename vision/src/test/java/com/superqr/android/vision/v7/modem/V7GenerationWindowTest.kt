@@ -13,12 +13,12 @@ class V7GenerationWindowTest {
             val payload = MessageDigest.getInstance("SHA-256").digest("$generation:$symbol".toByteArray())
             return V7ModemContract.parsePacket(
                 V7ModemContract.buildPacket(
-                    sessionId = 0x11223344,
+                    sessionId = 0x11223344L,
                     generationId = generation.toLong(),
-                    totalGenerations = 8,
+                    totalGenerations = 8L,
                     symbolId = symbol.toLong(),
                     sourceCount = 4,
-                    generationPayloadLen = 128,
+                    generationPayloadLen = 128L,
                     payload = payload,
                 ),
             )
@@ -38,9 +38,9 @@ class V7GenerationWindowTest {
         val source = Array(2) { index -> MessageDigest.getInstance("SHA-256").digest("source:$index".toByteArray()) }
         var completed: V7GenerationReceiver.Result? = null
         for (symbolId in 0 until 8) {
-            val payload = V7DenseXor.encode(source, 0x55667788, 0, symbolId.toLong())
+            val payload = V7DenseXor.encode(source, 0x55667788L, 0L, symbolId.toLong())
             val packet = V7ModemContract.parsePacket(
-                V7ModemContract.buildPacket(0x55667788, 0, 4, symbolId.toLong(), 2, 64, payload),
+                V7ModemContract.buildPacket(0x55667788L, 0L, 4L, symbolId.toLong(), 2, 64L, payload),
             )
             val result = receiver.offer(packet)
             if (result.status == V7GenerationReceiver.Status.GENERATION_COMPLETE) {
@@ -51,9 +51,9 @@ class V7GenerationWindowTest {
         assertTrue(completed != null)
         assertEquals(1, receiver.completedGenerationCount)
         assertTrue(receiver.completionBitmapBytes <= 8)
-        val repair = V7DenseXor.encode(source, 0x55667788, 0, 20)
+        val repair = V7DenseXor.encode(source, 0x55667788L, 0L, 20L)
         val duplicate = receiver.offer(
-            V7ModemContract.parsePacket(V7ModemContract.buildPacket(0x55667788, 0, 4, 20, 2, 64, repair)),
+            V7ModemContract.parsePacket(V7ModemContract.buildPacket(0x55667788L, 0L, 4L, 20L, 2, 64L, repair)),
         )
         assertEquals(V7GenerationReceiver.Status.DUPLICATE, duplicate.status)
     }
