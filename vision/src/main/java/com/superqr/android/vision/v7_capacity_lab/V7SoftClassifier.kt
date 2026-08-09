@@ -65,6 +65,8 @@ class V7SoftClassifier {
     private val histY = Array(4) { IntArray(256) }
     private val histU = Array(4) { IntArray(256) }
     private val histV = Array(4) { IntArray(256) }
+    private val denseCounts = IntArray(4)
+    private val denseCenters = Array(4) { IntArray(3) }
 
     /** Last centers actually used for the final pass, useful for diagnostics/tests. */
     private var effectiveCenters: Array<IntArray> = emptyArray()
@@ -80,15 +82,20 @@ class V7SoftClassifier {
     fun setCenters(newCenters: Array<IntArray>) {
         paletteSize = newCenters.size
         centers = newCenters.map { it.copyOf() }.toTypedArray()
-        effectiveCenters = centers.map { it.copyOf() }.toTypedArray()
+        copyCentersToEffective()
         calibrated = BooleanArray(paletteSize) { true }
         ensureOutputArrays()
     }
 
     fun setCenter(symbolIdx: Int, y: Int, u: Int, v: Int) {
         require(symbolIdx in 0 until paletteSize)
-        centers[symbolIdx] = intArrayOf(y, u, v)
-        effectiveCenters = centers.map { it.copyOf() }.toTypedArray()
+        centers[symbolIdx][0] = y
+        centers[symbolIdx][1] = u
+        centers[symbolIdx][2] = v
+        if (effectiveCenters.size != paletteSize) copyCentersToEffective()
+        effectiveCenters[symbolIdx][0] = y
+        effectiveCenters[symbolIdx][1] = u
+        effectiveCenters[symbolIdx][2] = v
         calibrated[symbolIdx] = true
     }
 
@@ -100,7 +107,7 @@ class V7SoftClassifier {
     fun resetCalibration() {
         calibrated.fill(false)
         centers = Array(paletteSize) { intArrayOf(128, 128, 128) }
-        effectiveCenters = centers.map { it.copyOf() }.toTypedArray()
+        copyCentersToEffective()
     }
 
     private fun ensureOutputArrays() = Unit
@@ -122,7 +129,7 @@ class V7SoftClassifier {
 
         val denseFourColor = productionWeightedMode && paletteSize == 4 && totalCells >= 64
         if (!denseFourColor) {
-            effectiveCenters = centers.map { it.copyOf() }.toTypedArray()
+            copyCentersToEffective()
             classifyPass(
                 yArr, uArr, vArr, totalCells,
                 effectiveCenters,
@@ -134,7 +141,7 @@ class V7SoftClassifier {
         }
 
         val refined = buildDenseFourColorPayloadCenters(yArr, uArr, vArr, totalCells)
-        effectiveCenters = refined ?: centers.map { it.copyOf() }.toTypedArray()
+        if (refined == null) copyCentersToEffective() else copyCenters(refined, effectiveCenters)
 
         // Keep luma important, but retain enough chroma authority to cleanly
         // separate RED and BLUE. The previous 10:1:1 seed could merge them.
@@ -231,7 +238,7 @@ class V7SoftClassifier {
             histU[s].fill(0)
             histV[s].fill(0)
         }
-        val counts = IntArray(4)
+        denseCounts.fill(0)
 
         // WHITE is always substantially brighter than the three non-white colors.
         // Use pilot luma only for this coarse cut; RED/BLUE identity is assigned by
@@ -256,16 +263,16 @@ class V7SoftClassifier {
             histY[symbol][y]++
             histU[symbol][u]++
             histV[symbol][v]++
-            counts[symbol]++
+            denseCounts[symbol]++
         }
 
-        if (counts.any { it < DENSE4_MIN_CLUSTER_SAMPLES }) return null
+        if (denseCounts.any { it < DENSE4_MIN_CLUSTER_SAMPLES }) return null
 
-        val out = Array(4) { IntArray(3) }
+        val out = denseCenters
         for (s in 0 until 4) {
-            out[s][0] = histogramMedian(histY[s], counts[s])
-            out[s][1] = histogramMedian(histU[s], counts[s])
-            out[s][2] = histogramMedian(histV[s], counts[s])
+            out[s][0] = histogramMedian(histY[s], denseCounts[s])
+            out[s][1] = histogramMedian(histU[s], denseCounts[s])
+            out[s][2] = histogramMedian(histV[s], denseCounts[s])
         }
 
         // Reject a pathological estimate instead of poisoning this optical frame.
@@ -293,4 +300,19 @@ class V7SoftClassifier {
     }
 
     fun isErasure(cellIdx: Int): Boolean = bestSymbols[cellIdx] == ERASURE_MARKER
+
+    private fun copyCentersToEffective() {
+        if (effectiveCenters.size != paletteSize) {
+            effectiveCenters = Array(paletteSize) { IntArray(3) }
+        }
+        copyCenters(centers, effectiveCenters)
+    }
+
+    private fun copyCenters(source: Array<IntArray>, destination: Array<IntArray>) {
+        for (symbol in 0 until paletteSize) {
+            destination[symbol][0] = source[symbol][0]
+            destination[symbol][1] = source[symbol][1]
+            destination[symbol][2] = source[symbol][2]
+        }
+    }
 }

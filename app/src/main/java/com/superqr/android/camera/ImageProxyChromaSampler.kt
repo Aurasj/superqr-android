@@ -21,16 +21,31 @@ class ChromaSampleBuffers {
  * call it thousands of times per frame without creating Pair objects for rotation.
  */
 class ImageProxyChromaSampler(
-    imageProxy: ImageProxy,
     @Suppress("UNUSED_PARAMETER") buffers: ChromaSampleBuffers,
 ) : ChromaPixelReader {
-    private val cropLeft = imageProxy.cropRect.left
-    private val cropTop = imageProxy.cropRect.top
-    private val rawWidth = imageProxy.cropRect.width()
-    private val rawHeight = imageProxy.cropRect.height()
-    private val rotation = imageProxy.imageInfo.rotationDegrees
-    private val uPlane = PlaneReader(imageProxy.planes[1])
-    private val vPlane = PlaneReader(imageProxy.planes[2])
+    private var cropLeft = 0
+    private var cropTop = 0
+    private var rawWidth = 0
+    private var rawHeight = 0
+    private var rotation = 0
+    private val uPlane = PlaneReader()
+    private val vPlane = PlaneReader()
+
+    constructor(imageProxy: ImageProxy, buffers: ChromaSampleBuffers) : this(buffers) {
+        bind(imageProxy)
+    }
+
+    /** Rebind this reader to the current ImageProxy without allocating readers or ByteBuffer duplicates. */
+    fun bind(imageProxy: ImageProxy): ImageProxyChromaSampler {
+        cropLeft = imageProxy.cropRect.left
+        cropTop = imageProxy.cropRect.top
+        rawWidth = imageProxy.cropRect.width()
+        rawHeight = imageProxy.cropRect.height()
+        rotation = imageProxy.imageInfo.rotationDegrees
+        uPlane.bind(imageProxy.planes[1])
+        vPlane.bind(imageProxy.planes[2])
+        return this
+    }
 
     override fun read(
         imageX: Double,
@@ -77,11 +92,18 @@ class ImageProxyChromaSampler(
         return true
     }
 
-    private class PlaneReader(plane: ImageProxy.PlaneProxy) {
-        private val buffer = plane.buffer.duplicate()
-        private val start = buffer.position()
-        private val rowStride = plane.rowStride
-        private val pixelStride = plane.pixelStride
+    private class PlaneReader {
+        private lateinit var buffer: java.nio.ByteBuffer
+        private var start = 0
+        private var rowStride = 0
+        private var pixelStride = 0
+
+        fun bind(plane: ImageProxy.PlaneProxy) {
+            buffer = plane.buffer
+            start = buffer.position()
+            rowStride = plane.rowStride
+            pixelStride = plane.pixelStride
+        }
 
         fun sampleBilinear(x: Double, y: Double): Int? {
             if (!x.isFinite() || !y.isFinite() || x < 0.0 || y < 0.0) return null
