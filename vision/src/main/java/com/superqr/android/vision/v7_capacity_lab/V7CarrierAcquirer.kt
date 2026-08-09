@@ -52,7 +52,8 @@ data class V7CarrierAcquisitionResult(
  * Contours provide cheap homography hypotheses; duplicated protected optical
  * sync validates them. A validated homography is sampled first on subsequent
  * frames, making steady-state tracking allocation-free and much cheaper than
- * repeated contour acquisition. Any sync loss falls back to full acquisition.
+ * repeated contour acquisition. Short sync misses are held on the tracked path;
+ * bounded repeated misses fall back to full acquisition.
  */
 class V7CarrierAcquirer(
     private val spec: V7CarrierSpec = V7CarrierSpec(),
@@ -111,7 +112,9 @@ class V7CarrierAcquirer(
         gray.put(0, 0, luma)
 
         trackedHomography?.let { homography ->
+            var flowAttempted = false
             if (trackingReferenceValid && framesSinceFlow >= FLOW_INTERVAL_FRAMES) {
+                flowAttempted = true
                 val flowed = tryOpticalFlow(luma, width, height)
                 if (flowed != null) return flowed
             }
@@ -133,18 +136,40 @@ class V7CarrierAcquirer(
                     visibleFinderCount = trackedFinderCount,
                 )
             }
-            if (trackingReferenceValid) {
+            if (trackingReferenceValid && !flowAttempted) {
+                flowAttempted = true
                 val flowed = tryOpticalFlow(luma, width, height)
                 if (flowed != null) return flowed
             }
+
+            // A single rolling-shutter/mixed-frame sync miss is not evidence that
+            // geometry was lost. The previous implementation immediately launched
+            // the 70-100 ms contour search on every isolated CRC miss, even though
+            // the next camera frame almost always revalidated the tracked lock.
+            // Hold the last proven geometry for a bounded number of misses and do
+            // no contour work on those rejected frames.
             consecutiveTrackMisses++
-            if (consecutiveTrackMisses >= MAX_TRACK_MISSES) {
-                trackedHomography = null
-                trackedQuad = null
-                trackedCanonicalQuad = null
-                trackingReferenceValid = false
-                trackedFinderCount = 0
+            if (consecutiveTrackMisses < MAX_TRACK_MISSES) {
+                return V7CarrierAcquisitionResult(
+                    canonicalToImageHomography = null,
+                    sync = sync,
+                    source = "V7_TRACK_HOLD",
+                    contourCount = 0,
+                    candidateCount = 0,
+                    syncAttempts = if (flowAttempted) 2 else 1,
+                    bestSyncStatus = sync.status,
+                    detectedQuad = null,
+                    carrierLike = true,
+                    finderHypothesisCount = 1,
+                    visibleFinderCount = trackedFinderCount,
+                )
             }
+
+            trackedHomography = null
+            trackedQuad = null
+            trackedCanonicalQuad = null
+            trackingReferenceValid = false
+            trackedFinderCount = 0
         }
 
         if (temporalFrames == 0 || temporalBrightest.rows() != height || temporalBrightest.cols() != width || temporalFrames >= TEMPORAL_WINDOW_FRAMES) {
@@ -716,6 +741,7 @@ class V7CarrierAcquirer(
         trackingReferenceValid = false
         trackedFinderCount = 0
         temporalFrames = 0
+        consecutiveTrackMisses = 0
         consecutiveColdFailures = 0
     }
 
