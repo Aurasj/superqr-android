@@ -54,6 +54,10 @@ class V7Phase1Receiver(profile: V7Phase1GridProfile, seed: Int = 42) {
         doubleArrayOf(300.0, 120.0), doubleArrayOf(380.0, 120.0),
         doubleArrayOf(620.0, 120.0), doubleArrayOf(700.0, 120.0),
     )
+    private val rsBlockCount = (profile.rawBytesPerFrame + 254) / 255
+    private val byteToRsBlock = IntArray(profile.rawBytesPerFrame)
+    private val rsBlockErrors = IntArray(rsBlockCount)
+    private val rsBlockErasures = IntArray(rsBlockCount)
 
     var profile: V7Phase1GridProfile = profile
         private set
@@ -68,6 +72,12 @@ class V7Phase1Receiver(profile: V7Phase1GridProfile, seed: Int = 42) {
         sampler.setGridShape(profile.rows, profile.cols, profile.payloadBbox)
         colorClassifier.setCenters(Array(4) { intArrayOf(128, 128, 128) })
         expectedFrames = generateExpectedFrames(profile, seed)
+        var byte = 0
+        val baseLength = profile.rawBytesPerFrame / rsBlockCount
+        val extraLength = profile.rawBytesPerFrame % rsBlockCount
+        for (block in 0 until rsBlockCount) {
+            repeat(baseLength + if (block < extraLength) 1 else 0) { byteToRsBlock[byte++] = block }
+        }
     }
 
     fun analyze(
@@ -119,6 +129,8 @@ class V7Phase1Receiver(profile: V7Phase1GridProfile, seed: Int = 42) {
         var byteErasures = 0
         var errorCellCount = 0
         var erasureCellCount = 0
+        rsBlockErrors.fill(0)
+        rsBlockErasures.fill(0)
         val cellsPerByte = 8 / profile.bitsPerCell
         for (byteIndex in 0 until profile.rawBytesPerFrame) {
             var byteWrong = false
@@ -139,11 +151,23 @@ class V7Phase1Receiver(profile: V7Phase1GridProfile, seed: Int = 42) {
                     byteWrong = true
                 }
             }
-            if (byteErased) byteErasures++ else if (byteWrong) byteErrors++
+            val block = byteToRsBlock[byteIndex]
+            if (byteErased) {
+                byteErasures++
+                rsBlockErasures[block]++
+            } else if (byteWrong) {
+                byteErrors++
+                rsBlockErrors[block]++
+            }
         }
         val parityBytes = ceil(profile.rawBytesPerFrame * fecParityRatio).toInt()
+        val parityBase = parityBytes / rsBlockCount
+        val parityExtra = parityBytes % rsBlockCount
         val frameValid = bitErrors == 0 && erasedBits == 0
-        val postFecValid = 2 * byteErrors + byteErasures <= parityBytes
+        val postFecValid = (0 until rsBlockCount).all { block ->
+            val blockParity = parityBase + if (block < parityExtra) 1 else 0
+            2 * rsBlockErrors[block] + rsBlockErasures[block] <= blockParity
+        }
         return V7Phase1GridObservation(
             frameIndex, cells * profile.bitsPerCell, bitErrors, erasedBits,
             byteErrors, byteErasures, frameValid, postFecValid, validSamples, blackY, whiteY,

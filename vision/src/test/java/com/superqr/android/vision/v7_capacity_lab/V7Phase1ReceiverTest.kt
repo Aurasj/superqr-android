@@ -67,6 +67,29 @@ class V7Phase1ReceiverTest {
     }
 
     @Test
+    fun concentratedDamageUsesRealRs255BlockBoundary() {
+        val profile = V7Phase1GridProfile("mono_64x50_matched", 50, 64, 1, 400)
+        val receiver = V7Phase1Receiver(profile)
+        val frameIndex = 11
+        val expected = receiver.expectedSymbols(frameIndex)
+        val luma = render(profile, expected, frameIndex)
+        val cellW = 800.0 / profile.cols
+        val cellH = 620.0 / profile.rows
+        // 16 byte errors in the first 200-byte block cost 32 parity symbols;
+        // the balanced 15% model gives that block 30, so the frame must fail.
+        for (byte in 0 until 16) {
+            val cell = byte * 8
+            val row = cell / profile.cols
+            val col = cell % profile.cols
+            fillCell(luma, 1000, profile, row, col, cellW, cellH, if (expected[cell].toInt() == 0) 235 else 20)
+        }
+
+        val result = receiver.analyze(identity, luma, 1000, 1000)
+        assertEquals(16, result.byteErrors)
+        assertTrue(!result.postFecValid)
+    }
+
+    @Test
     fun qrPayloadValidationRequiresBinaryLengthHeaderAndCrc() {
         val payload = qrPayload(version = 27, frameIndex = 91, frameBytes = 1465)
         val good = V7Phase1QrDecoder.validatePayload(payload, 27, 1465)
