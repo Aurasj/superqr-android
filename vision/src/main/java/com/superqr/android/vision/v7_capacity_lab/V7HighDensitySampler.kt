@@ -16,9 +16,13 @@ import kotlin.math.roundToInt
  */
 class V7HighDensitySampler {
 
-    enum class ProbeMode { CENTER_1, CROSS_5 }
+    enum class ProbeMode { CENTER_1, CROSS_5, LUMA_PATCH_9 }
 
     var gridSize: Int = 40
+        private set
+    var gridRows: Int = 40
+        private set
+    var gridCols: Int = 40
         private set
     var totalCells: Int = 1600
         private set
@@ -36,6 +40,7 @@ class V7HighDensitySampler {
     private var sample5Y = IntArray(0)
     private var sample5U = IntArray(0)
     private var sample5V = IntArray(0)
+    private var sample9Y = IntArray(0)
     private var validMask = ByteArray(0)
     // CENTER_1 uses bit 0. CROSS_5 uses bits 0..4 for center/TL/TR/BL/BR.
     private var probeValidityMask = ByteArray(0)
@@ -47,25 +52,34 @@ class V7HighDensitySampler {
     private val chromaBuf = IntArray(2)
     private val projected = DoubleArray(2)
     private val medianScratch = IntArray(5)
+    private val probeY9 = IntArray(9)
+    private val probeValid9 = BooleanArray(9)
+    private val medianScratch9 = IntArray(9)
 
     fun setGridSize(newGridSize: Int, payloadBbox: DoubleArray) {
-        require(newGridSize >= 1) { "Grid size must be positive" }
+        setGridShape(newGridSize, newGridSize, payloadBbox)
+    }
+
+    fun setGridShape(rows: Int, cols: Int, payloadBbox: DoubleArray) {
+        require(rows >= 1 && cols >= 1) { "Grid rows and columns must be positive" }
         require(payloadBbox.size >= 4) { "payload bbox must have four values" }
         require(payloadBbox[2] > payloadBbox[0] && payloadBbox[3] > payloadBbox[1]) { "invalid payload bbox" }
 
-        gridSize = newGridSize
-        totalCells = gridSize * gridSize
-        cellWidth = ((payloadBbox[2] - payloadBbox[0]) / gridSize).toFloat()
-        cellHeight = ((payloadBbox[3] - payloadBbox[1]) / gridSize).toFloat()
+        gridRows = rows
+        gridCols = cols
+        gridSize = if (rows == cols) rows else maxOf(rows, cols)
+        totalCells = rows * cols
+        cellWidth = ((payloadBbox[2] - payloadBbox[0]) / cols).toFloat()
+        cellHeight = ((payloadBbox[3] - payloadBbox[1]) / rows).toFloat()
         crossOffsetX = cellWidth * CROSS_OFFSET_FRACTION
         crossOffsetY = cellHeight * CROSS_OFFSET_FRACTION
 
         canonicalX = FloatArray(totalCells)
         canonicalY = FloatArray(totalCells)
         var idx = 0
-        for (r in 0 until gridSize) {
+        for (r in 0 until rows) {
             val cy = (payloadBbox[1] + (r + 0.5) * cellHeight).toFloat()
-            for (c in 0 until gridSize) {
+            for (c in 0 until cols) {
                 canonicalX[idx] = (payloadBbox[0] + (c + 0.5) * cellWidth).toFloat()
                 canonicalY[idx] = cy
                 idx++
@@ -82,6 +96,7 @@ class V7HighDensitySampler {
         sample5Y = IntArray(totalCells)
         sample5U = IntArray(totalCells)
         sample5V = IntArray(totalCells)
+        sample9Y = IntArray(totalCells)
         validMask = ByteArray(totalCells)
         probeValidityMask = ByteArray(totalCells)
     }
@@ -201,6 +216,61 @@ class V7HighDensitySampler {
         return validCount
     }
 
+    /** Nine-point luma-only patch median for the monochrome Phase 1 PHY. */
+    fun sampleLumaPatch9(
+        homographyInv: DoubleArray,
+        lumaBytes: ByteArray,
+        lumaWidth: Int,
+        lumaHeight: Int,
+    ): Int {
+        ensureSampleArrays()
+        validMask.fill(0)
+        probeValidityMask.fill(0)
+        val ox = cellWidth * LUMA_PATCH_OFFSET_FRACTION
+        val oy = cellHeight * LUMA_PATCH_OFFSET_FRACTION
+        var validCount = 0
+
+        for (i in 0 until totalCells) {
+            var validProbes = 0
+            var probeBits = 0
+            var probeIndex = 0
+            for (rowOffset in -1..1) {
+                for (colOffset in -1..1) {
+                    val okProjection = projectInto(
+                        homographyInv,
+                        (canonicalX[i] + colOffset * ox).toDouble(),
+                        (canonicalY[i] + rowOffset * oy).toDouble(),
+                        projected,
+                    )
+                    if (okProjection) {
+                        val px = projected[0].roundToInt()
+                        val py = projected[1].roundToInt()
+                        if (px in 0 until lumaWidth && py in 0 until lumaHeight) {
+                            probeY9[probeIndex] = lumaBytes[py * lumaWidth + px].toInt() and 0xFF
+                            probeValid9[probeIndex] = true
+                            validProbes++
+                            probeBits = probeBits or (1 shl probeIndex)
+                        } else {
+                            probeValid9[probeIndex] = false
+                        }
+                    } else {
+                        probeValid9[probeIndex] = false
+                    }
+                    probeIndex++
+                }
+            }
+            probeValidityMask[i] = (probeBits and 0xFF).toByte()
+            if (validProbes >= 5) {
+                sample9Y[i] = medianValid(probeY9, probeValid9, medianScratch9, 9)
+                validMask[i] = 1
+                validCount++
+            } else {
+                sample9Y[i] = 128
+            }
+        }
+        return validCount
+    }
+
     /** Project one canonical coordinate into camera space without allocating Pair. */
     private fun projectInto(h: DoubleArray, x: Double, y: Double, out: DoubleArray): Boolean {
         val den = h[6] * x + h[7] * y + h[8]
@@ -219,6 +289,7 @@ class V7HighDensitySampler {
     fun getYCross5(): IntArray = sample5Y
     fun getUCross5(): IntArray = sample5U
     fun getVCross5(): IntArray = sample5V
+    fun getYLumaPatch9(): IntArray = sample9Y
     fun getValidMask(): ByteArray = validMask
     fun getProbeValidityMask(): ByteArray = probeValidityMask
     fun getCanonicalX(): FloatArray = canonicalX
@@ -235,6 +306,7 @@ class V7HighDensitySampler {
          * inside dense optical cells.
          */
         const val CROSS_OFFSET_FRACTION: Float = 0.14f
+        const val LUMA_PATCH_OFFSET_FRACTION: Float = 0.18f
 
         fun median5(v0: Int, v1: Int, v2: Int, v3: Int, v4: Int): Int {
             var a = v0; var b = v1; var c = v2; var d = v3; var e = v4
@@ -251,8 +323,17 @@ class V7HighDensitySampler {
         }
 
         private fun medianValid5(values: IntArray, valid: BooleanArray, scratch: IntArray): Int {
+            return medianValid(values, valid, scratch, 5)
+        }
+
+        private fun medianValid(
+            values: IntArray,
+            valid: BooleanArray,
+            scratch: IntArray,
+            count: Int,
+        ): Int {
             var n = 0
-            for (i in 0 until 5) if (valid[i]) scratch[n++] = values[i]
+            for (i in 0 until count) if (valid[i]) scratch[n++] = values[i]
             for (i in 1 until n) {
                 val value = scratch[i]
                 var j = i - 1

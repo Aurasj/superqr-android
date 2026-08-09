@@ -66,6 +66,28 @@ class V7SamplerTest {
     }
 
     @Test
+    fun `rectangular grid computes independent pitch`() {
+        val sampler = V7HighDensitySampler()
+        sampler.setGridShape(50, 64, doubleArrayOf(100.0, 190.0, 900.0, 810.0))
+        assertEquals(50, sampler.gridRows)
+        assertEquals(64, sampler.gridCols)
+        assertEquals(3200, sampler.totalCells)
+        assertEquals(12.5, sampler.getCellWidth().toDouble(), 1e-4)
+        assertEquals(12.4, sampler.getCellHeight().toDouble(), 1e-4)
+    }
+
+    @Test
+    fun `luma patch 9 uses median and no chroma`() {
+        val sampler = V7HighDensitySampler()
+        sampler.setGridShape(2, 2, doubleArrayOf(0.0, 0.0, 20.0, 20.0))
+        val luma = ByteArray(20 * 20) { 40 }
+        val identity = doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        assertEquals(4, sampler.sampleLumaPatch9(identity, luma, 20, 20))
+        assertTrue(sampler.getYLumaPatch9().all { it == 40 })
+        assertTrue(sampler.getValidMask().all { it.toInt() == 1 })
+    }
+
+    @Test
     fun `CENTER_1 sampling with identity homography`() {
         val sampler = V7HighDensitySampler(); sampler.setGridSize(2, payloadBbox)
         val hInv = doubleArrayOf(1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0)

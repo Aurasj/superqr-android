@@ -131,7 +131,28 @@ class V6StaticDetector : AutoCloseable {
 
     fun getGrayMat(): Mat = gray
 
-    fun detect(luma: ByteArray, width: Int, height: Int, mode: String, chromaReader: ChromaPixelReader? = null, exportDebugImage: Boolean = false, cacheDir: String? = null): V6StaticResult {
+    fun detectGeometry(luma: ByteArray, width: Int, height: Int): V6StaticResult =
+        detect(
+            luma = luma,
+            width = width,
+            height = height,
+            mode = "geometry-only",
+            chromaReader = null,
+            geometryOnly = true,
+            failFast = true,
+        )
+
+    fun detect(
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        mode: String,
+        chromaReader: ChromaPixelReader? = null,
+        exportDebugImage: Boolean = false,
+        cacheDir: String? = null,
+        geometryOnly: Boolean = false,
+        failFast: Boolean = false,
+    ): V6StaticResult {
         val startTime = System.currentTimeMillis()
         val detectorStartNs = System.nanoTime()
 
@@ -154,7 +175,7 @@ class V6StaticDetector : AutoCloseable {
             val trackedQuad = tracker.tryProactiveTracking(gray)
             if (trackedQuad != null) {
                 bestPts = trackedQuad
-                maxArea = Geometry.contourArea(MatOfPoint(*bestPts))
+                maxArea = contourAreaOf(bestPts)
                 classificationSource = "TRACKED_RESAMPLED"
             }
 
@@ -239,7 +260,7 @@ class V6StaticDetector : AutoCloseable {
                 if (bestPts == null) {
                     bestPts = tracker.recoverQuad(gray)
                     if (bestPts != null) {
-                        maxArea = Geometry.contourArea(MatOfPoint(*bestPts))
+                        maxArea = contourAreaOf(bestPts)
                         classificationSource = "TRACKED_RESAMPLED"
                     }
                 }
@@ -319,9 +340,7 @@ class V6StaticDetector : AutoCloseable {
                 coverage = 0.0
             } else {
                 // ── FULL_DETECTION: warp + anchor + orientation ─────────
-                val hMat = Mat(3, 3, CvType.CV_64F)
-                hMat.put(0, 0, *finalHArr)
-                Imgproc.warpPerspective(gray, warped, hMat, Size(1000.0, 1000.0), Imgproc.INTER_NEAREST)
+                warpWithHomography(finalHArr)
 
                 val minMax = Core.minMaxLoc(warped)
                 val mean = Core.mean(warped)
@@ -486,9 +505,7 @@ class V6StaticDetector : AutoCloseable {
                     return trackedRes
                 }
 
-                val finalHMat = Mat(3, 3, CvType.CV_64F)
-                finalHMat.put(0, 0, *finalHArr)
-                Imgproc.warpPerspective(gray, warped, finalHMat, Size(1000.0, 1000.0), Imgproc.INTER_NEAREST)
+                warpWithHomography(finalHArr)
 
                 finalInvHArr = solveHomographySimple(
                     canonicalPoints,
@@ -499,6 +516,46 @@ class V6StaticDetector : AutoCloseable {
                     recordFrameTrace(trackedRes, emptyMap(), 0, 0, 0)
                     return trackedRes
                 }
+            }
+
+            if (geometryOnly) {
+                val endNs = System.nanoTime()
+                val geometryResult = V6StaticResult(
+                    borderFound = true,
+                    detectedQuad = detectedQuadArray,
+                    contourArea = maxArea,
+                    decodedCornerIds = decodedCornerIds,
+                    decodedCornerBits = decodedCornerBits,
+                    decodedCornerDistances = decodedCornerDistances,
+                    decodedCornerMargins = decodedCornerMargins,
+                    bitSamples = emptyMap(),
+                    cornerMatches = emptyMap(),
+                    orientationResolved = orientationResolved,
+                    reprojectionError = 2.5,
+                    pilotYUVs = emptyMap(),
+                    cellAccuracy = 0.0,
+                    uncertainCells = 0,
+                    decodedCrc32 = null,
+                    expectedCrc32 = null,
+                    colorCorrect = 0,
+                    colorUncertain = 0,
+                    colorTotal = 0,
+                    confusionMatrix = null,
+                    processingTimeMs = (endNs - detectorStartNs) / 1_000_000,
+                    failureReason = null,
+                    debugImagePath = null,
+                    finalInvHomography = finalInvHArr,
+                    warpMinLuma = warpMin,
+                    warpMaxLuma = warpMax,
+                    warpMeanLuma = warpMean,
+                    warpCoverage = coverage,
+                    contoursConsidered = contoursConsidered,
+                    quadsConsidered = quadsConsidered,
+                    geometrySource = classificationSource,
+                    detectorStartNs = detectorStartNs,
+                    detectorEndNs = endNs,
+                )
+                return tracker.processFrame(gray, geometryResult, finalInvHArr)
             }
 
             // ── reusable arrays for allocation-free sampling ───────────
@@ -621,6 +678,7 @@ class V6StaticDetector : AutoCloseable {
 
             val prng = Xorshift32(42)
             val decodedBytes = ByteArray(cols * rows)
+            val decodedIndexes = IntArray(cols * rows)
             val expectedBytes = ByteArray(cols * rows)
 
             val confusionMatrix = mutableMapOf<String, MutableMap<String, Int>>()
@@ -732,6 +790,7 @@ class V6StaticDetector : AutoCloseable {
                     ))
 
                     decodedBytes[r * cols + c] = (if (decodedIdx == -1) 0 else decodedIdx).toByte()
+                    decodedIndexes[r * cols + c] = decodedIdx
                     expectedBytes[r * cols + c] = expectedIdx.toByte()
                 }
             }
@@ -763,7 +822,7 @@ class V6StaticDetector : AutoCloseable {
                     val r = i / cols
                     val c = i % cols
                     val expected = expectedBytes[i].toInt()
-                    val decoded = decodedBytes[i].toInt()
+                    val decoded = decodedIndexes[i]
                     val cx = gridBBox.x1 + c * cellSize
                     val cy = gridBBox.y1 + r * cellSize
                     Imgproc.putText(debugMat, "E:$expected", Point(cx, cy + 10), Imgproc.FONT_HERSHEY_SIMPLEX, 0.3, Scalar(0.0, 0.0, 255.0), 1)
@@ -885,7 +944,8 @@ class V6StaticDetector : AutoCloseable {
                 transportPayloadHex = transportPayloadHex,
                 transportCrc16Hex = transportCrc16Hex,
                 transportError = transportError,
-                transportFrame = transportFrameObj
+                transportFrame = transportFrameObj,
+                geometrySource = classificationSource,
             )
             val timedRes = res.copy(
                 detectorStartNs = detectorStartNs,
@@ -896,6 +956,7 @@ class V6StaticDetector : AutoCloseable {
             return trackedRes
 
         } catch (e: Throwable) {
+            if (failFast) throw e
             return V6StaticResult(
                 borderFound = false,
                 detectedQuad = null,
@@ -923,6 +984,25 @@ class V6StaticDetector : AutoCloseable {
                 detectorStartNs = detectorStartNs,
                 detectorEndNs = System.nanoTime()
             )
+        }
+    }
+
+    private fun contourAreaOf(points: Array<Point>): Double {
+        val contour = MatOfPoint(*points)
+        return try {
+            Geometry.contourArea(contour)
+        } finally {
+            contour.release()
+        }
+    }
+
+    private fun warpWithHomography(homography: DoubleArray) {
+        val matrix = Mat(3, 3, CvType.CV_64F)
+        try {
+            matrix.put(0, 0, *homography)
+            Imgproc.warpPerspective(gray, warped, matrix, Size(1000.0, 1000.0), Imgproc.INTER_NEAREST)
+        } finally {
+            matrix.release()
         }
     }
 

@@ -200,6 +200,8 @@ class V7CapacityLabReceiver(
                 sampler.sampleCenter1(hInv, lumaBytes, width, height, chromaReader)
             V7HighDensitySampler.ProbeMode.CROSS_5 ->
                 sampler.sampleCross5(hInv, lumaBytes, width, height, chromaReader)
+            V7HighDensitySampler.ProbeMode.LUMA_PATCH_9 ->
+                sampler.sampleCross5(hInv, lumaBytes, width, height, chromaReader)
         }
         val tSamp1 = System.nanoTime()
         timing.samplingUs = (tSamp1 - tSamp0) / 1000
@@ -209,14 +211,17 @@ class V7CapacityLabReceiver(
         val yArr = when (probeMode) {
             V7HighDensitySampler.ProbeMode.CENTER_1 -> sampler.getYCenters()
             V7HighDensitySampler.ProbeMode.CROSS_5 -> sampler.getYCross5()
+            V7HighDensitySampler.ProbeMode.LUMA_PATCH_9 -> sampler.getYCross5()
         }
         val uArr = when (probeMode) {
             V7HighDensitySampler.ProbeMode.CENTER_1 -> sampler.getUCenters()
             V7HighDensitySampler.ProbeMode.CROSS_5 -> sampler.getUCross5()
+            V7HighDensitySampler.ProbeMode.LUMA_PATCH_9 -> sampler.getUCross5()
         }
         val vArr = when (probeMode) {
             V7HighDensitySampler.ProbeMode.CENTER_1 -> sampler.getVCenters()
             V7HighDensitySampler.ProbeMode.CROSS_5 -> sampler.getVCross5()
+            V7HighDensitySampler.ProbeMode.LUMA_PATCH_9 -> sampler.getVCross5()
         }
 
         classifier.setCenters(calibrator.getCentersSnapshot())
@@ -266,14 +271,17 @@ class V7CapacityLabReceiver(
         val yArr = when (probeMode) {
             V7HighDensitySampler.ProbeMode.CENTER_1 -> sampler.getYCenters()
             V7HighDensitySampler.ProbeMode.CROSS_5 -> sampler.getYCross5()
+            V7HighDensitySampler.ProbeMode.LUMA_PATCH_9 -> sampler.getYCross5()
         }
         val uArr = when (probeMode) {
             V7HighDensitySampler.ProbeMode.CENTER_1 -> sampler.getUCenters()
             V7HighDensitySampler.ProbeMode.CROSS_5 -> sampler.getUCross5()
+            V7HighDensitySampler.ProbeMode.LUMA_PATCH_9 -> sampler.getUCross5()
         }
         val vArr = when (probeMode) {
             V7HighDensitySampler.ProbeMode.CENTER_1 -> sampler.getVCenters()
             V7HighDensitySampler.ProbeMode.CROSS_5 -> sampler.getVCross5()
+            V7HighDensitySampler.ProbeMode.LUMA_PATCH_9 -> sampler.getVCross5()
         }
         calibrator.calibrateFromSolidFrame(symbolIdx, yArr, uArr, vArr, gridSize * gridSize)
     }

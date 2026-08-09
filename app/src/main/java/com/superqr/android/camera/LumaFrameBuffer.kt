@@ -29,7 +29,8 @@ class LumaFrameBuffer {
         if (rowStride <= 0 || pixelStride <= 0) return false
 
         val rotation = imageProxy.imageInfo.rotationDegrees
-        val (nw, nh) = FrameRotationHelper.getNormalizedDimensions(w, h, rotation)
+        val nw = LumaPlanePacker.normalizedWidth(w, h, rotation)
+        val nh = LumaPlanePacker.normalizedHeight(w, h, rotation)
 
         val required = nw * nh
         if (bytes.size != required) {
@@ -43,22 +44,17 @@ class LumaFrameBuffer {
             rowBuffer = ByteArray(requiredRowBuffer)
         }
 
-        val buffer = plane.buffer.duplicate()
-
-        for (ry in 0 until h) {
-            val sourceRowStart = (crop.top + ry) * rowStride + crop.left * pixelStride
-            val sourceRowEnd = sourceRowStart + (w - 1) * pixelStride
-            if (sourceRowStart < 0 || sourceRowEnd >= buffer.limit()) return false
-
-            buffer.position(sourceRowStart)
-            buffer.get(rowBuffer, 0, w * pixelStride)
-
-            for (rx in 0 until w) {
-                val v = rowBuffer[rx * pixelStride]
-                val (nx, ny) = FrameRotationHelper.mapRawToNormalized(rx, ry, w, h, rotation)
-                bytes[ny * nw + nx] = v
-            }
-        }
-        return true
+        return LumaPlanePacker.pack(
+            source = plane.buffer,
+            cropLeft = crop.left,
+            cropTop = crop.top,
+            rawWidth = w,
+            rawHeight = h,
+            rowStride = rowStride,
+            pixelStride = pixelStride,
+            rotationDegrees = rotation,
+            rowBuffer = rowBuffer,
+            destination = bytes,
+        )
     }
 }

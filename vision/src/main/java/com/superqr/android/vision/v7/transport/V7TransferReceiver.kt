@@ -1,6 +1,7 @@
 package com.superqr.android.vision.v7.transport
 
 import com.superqr.android.vision.v6.classification.ChromaPixelReader
+import com.superqr.android.vision.v6.contract.V6Contract
 import com.superqr.android.vision.v6.model.V6StaticResult
 import com.superqr.android.vision.v7_capacity_lab.V7Calibrator
 import com.superqr.android.vision.v7_capacity_lab.V7HighDensitySampler
@@ -158,12 +159,13 @@ class V7TransferReceiver {
         if (selected != null && selected.id != activeProfile.id) applyProfile(selected)
         val profileUs = (System.nanoTime() - tp0) / 1000
 
-        updatePilotCalibration(geometry, hInv, lumaBytes, width, height, chromaReader)
+        updatePilotCalibration(hInv, lumaBytes, width, height, chromaReader)
 
         val ts0 = System.nanoTime()
         val validSamples = when (probeMode) {
             V7HighDensitySampler.ProbeMode.CENTER_1 -> sampler.sampleCenter1(hInv, lumaBytes, width, height, chromaReader)
             V7HighDensitySampler.ProbeMode.CROSS_5 -> sampler.sampleCross5(hInv, lumaBytes, width, height, chromaReader)
+            V7HighDensitySampler.ProbeMode.LUMA_PATCH_9 -> sampler.sampleCross5(hInv, lumaBytes, width, height, chromaReader)
         }
         val samplingUs = (System.nanoTime() - ts0) / 1000
 
@@ -450,8 +452,10 @@ class V7TransferReceiver {
         height: Int,
         geometry: V6StaticResult,
     ): V7OpticalProfile? {
-        val black = geometry.pilotYUVs["BLACK"]?.getOrNull(0) ?: return null
-        val white = geometry.pilotYUVs["WHITE"]?.getOrNull(0) ?: return null
+        val blackBox = V6Contract.getPilotCoreBBox("BLACK")
+        val whiteBox = V6Contract.getPilotCoreBBox("WHITE")
+        val black = sampleLuma(h, blackBox.centerX, blackBox.centerY, luma, width, height) ?: return null
+        val white = sampleLuma(h, whiteBox.centerX, whiteBox.centerY, luma, width, height) ?: return null
         if (abs(white - black) < 24) return null
         val threshold = (black + white) / 2.0
         var id = 0
@@ -463,7 +467,6 @@ class V7TransferReceiver {
     }
 
     private fun updatePilotCalibration(
-        result: V6StaticResult,
         h: DoubleArray,
         luma: ByteArray,
         width: Int,
@@ -476,7 +479,8 @@ class V7TransferReceiver {
             mapOf("BLACK" to 0, "WHITE" to 1, "RED" to 2, "BLUE" to 4)
         }
         for ((name, idx) in baseMap) {
-            val yuv = result.pilotYUVs[name] ?: continue
+            val box = V6Contract.getPilotCoreBBox(name)
+            val yuv = sampleYuv(h, box.centerX, box.centerY, luma, width, height, chromaReader) ?: continue
             if (!calibrator.isCalibrated(idx)) calibrator.setPilotCenter(idx, yuv[0], yuv[1], yuv[2])
             else calibrator.updateCenterEMA(idx, yuv[0], yuv[1], yuv[2], alpha = 0.04)
         }

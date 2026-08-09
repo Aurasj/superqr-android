@@ -169,6 +169,27 @@ class V6StaticDetectorTest {
         assertEquals("Decoded CRC32 should match expected exactly", 0xBEAFE8A7L, result.decodedCrc32)
     }
 
+    @Test
+    fun testGeometryOnlySkipsPayloadAndDiagnostics() {
+        Assume.assumeTrue("OpenCV native library is required for this test", isOpenCvAvailable)
+        val contractFile = File("src/main/assets/visual_contract.json")
+        V6Contract.loadAndVerifyBytes(contractFile.readBytes())
+        val detector = V6StaticDetector()
+        try {
+            val result = detector.detectGeometry(buildDeterministicSyntheticV6Frame(), 1000, 1000)
+            assertTrue(result.borderFound)
+            assertTrue(result.orientationResolved)
+            assertNotNull(result.finalInvHomography)
+            assertEquals(0, result.colorTotal)
+            assertNull(result.diagnosticPayload)
+            assertNull(result.warpedLumaBytes)
+            assertNull(result.transportFrame)
+            assertEquals("FULL_DETECTION", result.geometrySource)
+        } finally {
+            detector.close()
+        }
+    }
+
     /**
      * Multi-frame tracking test.
      *

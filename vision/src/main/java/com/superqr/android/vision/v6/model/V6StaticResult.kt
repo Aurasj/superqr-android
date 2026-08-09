@@ -65,6 +65,7 @@ data class V6StaticResult(
     val transportCrc16Hex: String? = null,
     val transportError: String? = null,
     val transportFrame: com.superqr.android.vision.v6.transport.V6TransportFrame? = null,
+    val geometrySource: String = "UNKNOWN",
     // ── pipeline timing (android.os.SystemClock.elapsedRealtimeNanos) ──
     val analyzerArrivalNs: Long = 0L,
     val detectorStartNs: Long = 0L,

@@ -344,7 +344,7 @@ fun AdaptiveSuperQRScannerScreen(
                     r.debugSnapshotEnabled = showDebug || overlayMode != V7DebugOverlayMode.LIVE || frozenBitmap != null
                     if (!luma.packFrom(image)) return@setAnalyzer
                     val chromaReader = ImageProxyChromaSampler(image, chroma)
-                    val detected = d.detect(luma.bytes, luma.width, luma.height, "deterministic_random", chromaReader).copy(analyzerArrivalNs = arrival)
+                    val detected = d.detectGeometry(luma.bytes, luma.width, luma.height).copy(analyzerArrivalNs = arrival)
                     val decoded = r.analyze(detected, luma.bytes, luma.width, luma.height, chromaReader)
                     val sourceTx = try { transforms.getOutputTransform(image) } catch (_: Throwable) { null }
                     val accepted = decoded.acceptedFrame
