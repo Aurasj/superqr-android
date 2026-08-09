@@ -3,10 +3,12 @@ package com.superqr.android.vision.v7.modem
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import java.util.zip.CRC32
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class V7ModemPhase2Test {
@@ -76,6 +78,27 @@ class V7ModemPhase2Test {
         assertEquals("text/plain", metadata.mimeType)
         assertEquals(V7PackageStream.COMPRESSION_DEFLATE_RAW, metadata.compressionId)
         assertArrayEquals("SuperQR Phase 2\n".repeat(100).toByteArray(), output.toByteArray())
+    }
+
+    @Test
+    fun packageMetadataRejectsMalformedUtf8EvenWithValidMetadataCrc() {
+        val packageBytes = "5337504B01010000000A000A00000000000006400000000000000025400CFC472F2F2EA3A86C5CB7F8C0331B6DE80C0FD2CD013F2C01A5DD0C94A2C88DEECD507068617365322E747874746578742F706C61696E0B2E2D482D0A0C5208C8482C4E5530E20A1EE58F86C7687A18CD0FA3E5C1687948447D0000".hexBytes()
+        packageBytes[64] = 0xC3.toByte()
+        packageBytes[65] = 0x28
+        val crc = CRC32().apply {
+            update(packageBytes, 0, 60)
+            update(packageBytes, 64, 20)
+        }.value.toInt()
+        packageBytes[60] = (crc ushr 24).toByte()
+        packageBytes[61] = (crc ushr 16).toByte()
+        packageBytes[62] = (crc ushr 8).toByte()
+        packageBytes[63] = crc.toByte()
+        try {
+            V7PackageStream.inspect(packageBytes.copyOfRange(0, 84))
+            fail("malformed UTF-8 should be rejected")
+        } catch (expected: V7ModemException) {
+            assertTrue(expected.message!!.contains("UTF-8"))
+        }
     }
 
     @Test
