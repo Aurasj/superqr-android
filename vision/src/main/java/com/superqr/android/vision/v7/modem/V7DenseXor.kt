@@ -22,7 +22,7 @@ object V7DenseXor {
 }
 
 class V7DenseXorDecoder(val sessionId:Long,val generationId:Long,val sourceCount:Int,val symbolBytes:Int){
-    private val wordCount=(sourceCount+63) ushr 6;private val masks=arrayOfNulls<LongArray>(sourceCount);private val rows=arrayOfNulls<ByteArray>(sourceCount);private val seen=UInt32Set(1024)
+    private val wordCount=(sourceCount+63) ushr 6;private val masks=arrayOfNulls<LongArray>(sourceCount);private val rows=arrayOfNulls<ByteArray>(sourceCount);private val seen=UInt32Set(2048)
     var rank:Int=0;private set
     val complete:Boolean get()=rank==sourceCount
     init{require(sourceCount in 1..V7ModemContract.MAX_SOURCE_SYMBOLS);require(symbolBytes>0)}
@@ -42,9 +42,11 @@ class V7DenseXorDecoder(val sessionId:Long,val generationId:Long,val sourceCount
     private fun xorBytes(target:ByteArray,source:ByteArray){for(i in target.indices)target[i]=(target[i].toInt() xor source[i].toInt()).toByte()}
 }
 
-private class UInt32Set(initialCapacity:Int){
-    private var table=LongArray(Integer.highestOneBit(maxOf(16,initialCapacity-1)) shl 1);private var size=0
-    fun add(value:Long):Boolean{val stored=value+1L;if((size+1)*10>=table.size*7)grow();var slot=mix(value).toInt() and(table.size-1);while(true){val current=table[slot];if(current==0L){table[slot]=stored;size++;return true};if(current==stored)return false;slot=(slot+1)and(table.size-1)}}
-    private fun grow(){val old=table;table=LongArray(old.size shl 1);size=0;for(stored in old)if(stored!=0L)add(stored-1L)}
+/** Fixed-memory duplicate filter. Once tracking slots are saturated, unseen ids
+ * are still processed (never falsely discarded), while already tracked ids are
+ * rejected early. Algebraic elimination remains the correctness backstop. */
+private class UInt32Set(capacity:Int){
+    private val table=LongArray(Integer.highestOneBit(maxOf(16,capacity-1)) shl 1);private var size=0;private val trackingLimit=table.size*7/10
+    fun add(value:Long):Boolean{val stored=value+1L;var slot=mix(value).toInt() and(table.size-1);while(true){val current=table[slot];if(current==0L){if(size<trackingLimit){table[slot]=stored;size++};return true};if(current==stored)return false;slot=(slot+1)and(table.size-1)}}
     private fun mix(value:Long):Long{var x=value*0x9E3779B97F4A7C15uL.toLong();x=x xor(x ushr 33);x*=0xC2B2AE3D27D4EB4FuL.toLong();return x xor(x ushr 29)}
 }
