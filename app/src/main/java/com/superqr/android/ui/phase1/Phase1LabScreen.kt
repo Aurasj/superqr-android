@@ -15,18 +15,10 @@ import androidx.camera.core.Preview
 import androidx.camera.core.SessionConfig
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.core.view.doOnLayout
 import com.superqr.android.camera.ChromaSampleBuffers
@@ -38,11 +30,6 @@ import com.superqr.android.vision.opencv.OpenCvRuntime
 import com.superqr.android.vision.v7_capacity_lab.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.atomic.AtomicInteger
-
-private val Good = Color(0xFF7EE787)
-private val Warn = Color(0xFFF2CC60)
-private val Bad = Color(0xFFFF7B72)
-private val Accent = Color(0xFF7DD3FC)
 
 @Composable
 fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modifier) {
@@ -267,41 +254,20 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
         onDispose { activity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 
-    val stateColor = when {
-        status.senderState == "RUNNING" && status.syncStatus.contains("LOCKED") -> Good
-        status.senderState == "READY" || status.senderState == "DONE" -> Warn
-        status.lastFailure != null -> Bad
-        else -> Color.LightGray
-    }
-    Column(modifier.background(Color(0xFF090B10))) {
-        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxWidth().weight(0.48f))
-        Column(
-            Modifier.fillMaxWidth().weight(0.52f).verticalScroll(rememberScrollState()).padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            Text("V7 Physical PHY Lab", style = MaterialTheme.typography.titleLarge, color = Color.White)
-            Text("${status.senderState} • ${status.syncStatus}", style = MaterialTheme.typography.titleMedium, color = stateColor)
-            Text("${status.profileName} • run ${status.runId} • expected ${status.expectedFrames}", color = Accent)
-            Text("Geometry ${status.geometryState} • $cameraState", color = Color.LightGray)
-            LinearProgressIndicator(progress = { status.progress.toFloat().coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-            Text("Analyzed ${status.analyzedFrames} • scored ${status.observations} • unique ${status.uniqueFrames}/${status.expectedFrames}", color = Color.White)
-            Text("BER (non-erased) %.3f%% • erasures %.3f%%".format(status.bitErrorRate * 100.0, status.erasureRate * 100.0), color = Color.White)
-            Text("Raw valid %.1f%% • inner-FEC valid %.1f%%".format(status.rawValidYield * 100.0, status.innerFecYield * 100.0), color = Color.White)
-            Text("Pipeline %.2f / %.2f ms mean/p95 • %.1f fps • %dx%d".format(status.meanPipelineMs, status.p95PipelineMs, status.cameraFps, status.captureWidth, status.captureHeight), color = Color.White)
-            Text("Goodput %.2f KiB/s • campaign %s".format(status.goodputKibS, status.campaignId.take(8)), color = Color.White)
-            if (status.lastFailure != null) Text("Last failure: ${status.lastFailure}", color = Bad)
-            if (status.failureSummary.isNotBlank()) Text("Failures: ${status.failureSummary}", color = Color.LightGray)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { running = !running }) { Text(if (running) "Stop camera" else "Start camera") }
-                OutlinedButton(enabled = !running, onClick = { recorder.reset(); status = recorder.snapshot() }) { Text("New campaign") }
-                OutlinedButton(enabled = status.analyzedFrames > 0, onClick = {
-                    try { recorder.exportAndShare(context) }
-                    catch (t: Throwable) { Toast.makeText(context, "Export failed: ${t.message}", Toast.LENGTH_LONG).show() }
-                }) { Text("Share results") }
-            }
-            Text("AUTO follows optical run/profile state. No terminal or manual profile switching required.", color = Color.Gray)
-        }
-    }
+    Phase1LabDashboard(
+        previewView = previewView,
+        status = status,
+        cameraState = cameraState,
+        running = running,
+        cameraPermission = permission,
+        onToggleCamera = { running = !running },
+        onNewCampaign = { recorder.reset(); status = recorder.snapshot() },
+        onShare = {
+            try { recorder.exportAndShare(context) }
+            catch (t: Throwable) { Toast.makeText(context, "Export failed: ${t.message}", Toast.LENGTH_LONG).show() }
+        },
+        modifier = modifier,
+    )
 }
 
 private fun gcCount(): Long = try { Debug.getRuntimeStat("art.gc.gc-count").toLongOrNull() ?: 0L } catch (_: Throwable) { 0L }

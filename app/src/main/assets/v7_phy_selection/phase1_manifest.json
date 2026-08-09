@@ -47,7 +47,41 @@
       "frame count (0 means 256)",
       "dwell epochs",
       "CRC-8/ATM"
-    ]
+    ],
+    "conformance_trace": {
+      "profile": "mono_128x100_qrlike",
+      "profile_id": 3,
+      "run_token": 48879,
+      "frame_count": 3,
+      "dwell_epochs": 3,
+      "packets": [
+        {
+          "state": "READY",
+          "frame_index": 0,
+          "packet_hex": "D7010003EFBE000303CA"
+        },
+        {
+          "state": "RUNNING",
+          "frame_index": 0,
+          "packet_hex": "D7010103EFBE00030315"
+        },
+        {
+          "state": "RUNNING",
+          "frame_index": 1,
+          "packet_hex": "D7010103EFBE0103037E"
+        },
+        {
+          "state": "RUNNING",
+          "frame_index": 2,
+          "packet_hex": "D7010103EFBE020303C3"
+        },
+        {
+          "state": "DONE",
+          "frame_index": 2,
+          "packet_hex": "D7010203EFBE020303A5"
+        }
+      ]
+    }
   },
   "qr_control_payload": {
     "byte_order": "little-endian",

@@ -52,4 +52,33 @@ class Phase1ObservationRecorderTest {
         assertEquals(false, json.getBoolean("scored"))
         assertEquals(0xBEEF, json.getInt("run_token"))
     }
+
+    @Test
+    fun readyRunningDoneFlowScoresOnlyRunningPayload() {
+        val recorder = Phase1ObservationRecorder()
+        val profile = Phase1Profile.Grid(
+            3, "mono_128x100_qrlike",
+            V7Phase1GridProfile("mono_128x100_qrlike", 100, 128, 1, 1600),
+            usefulBytes = 1360,
+        )
+        val ready = com.superqr.android.vision.v7_capacity_lab.V7LabRunEnvelope(
+            com.superqr.android.vision.v7_capacity_lab.V7LabRunState.READY, 3, 0xBEEF, 0, 3, 3,
+        )
+        recorder.observeSender(profile, ready, "LOCKED", "FULL_DETECTION")
+        assertEquals(0, recorder.snapshot().observations)
+        val running = ready.copy(state = com.superqr.android.vision.v7_capacity_lab.V7LabRunState.RUNNING)
+        recorder.record(
+            profile, 3, 100, frameIndex = 0, observedBits = 12_800,
+            bitErrors = 0, erasedBits = 0, frameValid = true, postFecValid = true,
+            pipelineMs = 10.0, allocationBytes = 0, gcEvents = 0,
+            envelope = running, sync = "LOCKED", geometry = "FULL_DETECTION",
+        )
+        val done = ready.copy(state = com.superqr.android.vision.v7_capacity_lab.V7LabRunState.DONE, frameIndex = 2)
+        recorder.observeSender(profile, done, "LOCKED", "TRACKED_RESAMPLED")
+        val snapshot = recorder.snapshot(200)
+        assertEquals("DONE", snapshot.senderState)
+        assertEquals(1, snapshot.observations)
+        assertEquals(1, snapshot.uniqueFrames)
+        assertEquals(1360, snapshot.innovativeBytes)
+    }
 }

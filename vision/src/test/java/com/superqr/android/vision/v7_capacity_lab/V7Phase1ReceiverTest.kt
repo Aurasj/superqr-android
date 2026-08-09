@@ -23,10 +23,23 @@ class V7Phase1ReceiverTest {
         val hash = MessageDigest.getInstance("SHA-256").digest(normalizedBytes).joinToString("") { "%02X".format(it) }
         val json = JSONObject(String(bytes, Charsets.UTF_8))
 
-        assertEquals("16DC2E1B5EAAC653FEFF462E8FDBE0029DC63BB09FDEBE22ABE26BAC283C0525", hash)
+        assertEquals("E42920B89F498FC13D6EF47126F2405BF4F761D7C7426F9DEFEAC17734CABC6C", hash)
         assertEquals("LAB_ONLY_NOT_A_V7_WIRE_CONTRACT", json.getString("status"))
         assertEquals(5, json.getJSONArray("grid_profiles").length())
         assertEquals(2, json.getJSONArray("qr_controls").length())
+
+        val trace = json.getJSONObject("run_sync").getJSONObject("conformance_trace")
+        val packets = trace.getJSONArray("packets")
+        for (index in 0 until packets.length()) {
+            val packet = packets.getJSONObject(index)
+            val state = V7LabRunState.valueOf(packet.getString("state"))
+            val envelope = V7LabRunEnvelope(
+                state, trace.getInt("profile_id"), trace.getInt("run_token"),
+                packet.getInt("frame_index"), trace.getInt("frame_count"), trace.getInt("dwell_epochs"),
+            )
+            assertEquals(packet.getString("packet_hex"), envelope.encode().joinToString("") { "%02X".format(it) })
+            assertEquals(envelope, V7LabRunEnvelope.decode(envelope.encode()))
+        }
     }
 
     @Test
