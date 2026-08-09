@@ -314,7 +314,7 @@ object V7DebugExporter {
     }
 
     private fun buildEventsCsv(events: List<V7DebugEvent>): String = buildString {
-        appendLine("analysis,profile_id,profile_key,session_id,frame_id,total_frames,payload_len,raw_erasures,remaining_erasures,temporal_obs,temporal_filled,temporal_overridden,header_valid,header_error,crc_candidate_attempts,crc_passed,candidate_passed,received_crc32,computed_crc32,accepted_frame,rejection")
+        appendLine("analysis,profile_id,profile_key,session_id,frame_id,total_frames,payload_len,camera_delivered_fps,analysis_fps,pipeline_ms,detector_ms,v7_total_ms,v7_profile_ms,v7_sampling_ms,v7_classification_ms,v7_transport_ms,useful_unique_fps,decoded_payload_kib_s,raw_erasures,remaining_erasures,temporal_obs,temporal_filled,temporal_overridden,header_valid,header_error,crc_candidate_attempts,crc_passed,candidate_passed,received_crc32,computed_crc32,accepted_frame,rejection")
         for (e in events) {
             append(e.analysisIndex).append(',')
                 .append(e.profileId).append(',')
@@ -323,6 +323,17 @@ object V7DebugExporter {
                 .append(e.frameId ?: "").append(',')
                 .append(e.totalFrames ?: "").append(',')
                 .append(e.payloadLen ?: "").append(',')
+                .append(e.cameraDeliveredFps).append(',')
+                .append(e.analysisFps).append(',')
+                .append(e.pipelineMs).append(',')
+                .append(e.detectorMs).append(',')
+                .append(e.v7TotalMs).append(',')
+                .append(e.v7ProfileMs).append(',')
+                .append(e.v7SamplingMs).append(',')
+                .append(e.v7ClassificationMs).append(',')
+                .append(e.v7TransportMs).append(',')
+                .append(e.usefulUniqueFps).append(',')
+                .append(e.decodedPayloadKiBs).append(',')
                 .append(e.rawErasures).append(',')
                 .append(e.remainingErasures).append(',')
                 .append(e.temporalObservations).append(',')
