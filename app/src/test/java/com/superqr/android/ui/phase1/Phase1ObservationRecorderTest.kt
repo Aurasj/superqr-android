@@ -80,7 +80,7 @@ class Phase1ObservationRecorderTest {
     }
 
     @Test
-    fun readyRunningDoneFlowScoresOnlyRunningPayload() {
+    fun readyRunningDoneFlowScoresOnlyRunningPayloadAndFreezesElapsedTime() {
         val recorder = Phase1ObservationRecorder()
         val profile = Phase1Profile.Grid(
             3, "mono_128x100_qrlike",
@@ -90,7 +90,7 @@ class Phase1ObservationRecorderTest {
         val ready = com.superqr.android.vision.v7_capacity_lab.V7LabRunEnvelope(
             com.superqr.android.vision.v7_capacity_lab.V7LabRunState.READY, 3, 0xBEEF, 0, 3, 3,
         )
-        recorder.observeSender(profile, ready, "LOCKED", "FULL_DETECTION")
+        recorder.observeSender(profile, ready, "LOCKED", "FULL_DETECTION", observedNs = 50)
         assertEquals(0, recorder.snapshot().observations)
         val running = ready.copy(state = com.superqr.android.vision.v7_capacity_lab.V7LabRunState.RUNNING)
         recorder.record(
@@ -100,23 +100,26 @@ class Phase1ObservationRecorderTest {
             envelope = running, sync = "LOCKED", geometry = "FULL_DETECTION",
         )
         val done = ready.copy(state = com.superqr.android.vision.v7_capacity_lab.V7LabRunState.DONE, frameIndex = 2)
-        recorder.observeSender(profile, done, "LOCKED", "TRACKED_RESAMPLED")
+        recorder.observeSender(profile, done, "LOCKED", "TRACKED_RESAMPLED", observedNs = 200)
         val snapshot = recorder.snapshot(200)
         assertEquals("DONE", snapshot.senderState)
         assertEquals(1, snapshot.observations)
         assertEquals(1, snapshot.uniqueFrames)
         assertEquals(1360, snapshot.innovativeBytes)
+        assertEquals(100.0 / 1_000_000_000.0, snapshot.elapsedSeconds, 0.0)
+        assertEquals(snapshot.elapsedSeconds, recorder.snapshot(9_000_000_000L).elapsedSeconds, 0.0)
 
         val linesAtDone = recorder.jsonLinesForTest().size
         recorder.recordFailure(
             "V7_NO_COMPLETE_CARRIER_GEOMETRY", 300, 12.0,
             "V7_SYNC_NOT_VALIDATED", "V7_NO_COMPLETE_CARRIER_GEOMETRY",
         )
-        val stable = recorder.snapshot(400)
+        val stable = recorder.snapshot(9_000_000_000L)
         assertEquals("DONE", stable.senderState)
         assertEquals("TRACKED_RESAMPLED", stable.geometryState)
         assertEquals("LOCKED", stable.syncStatus)
         assertEquals(snapshot.analyzedFrames, stable.analyzedFrames)
+        assertEquals(snapshot.elapsedSeconds, stable.elapsedSeconds, 0.0)
         assertEquals(linesAtDone, recorder.jsonLinesForTest().size)
     }
 }
