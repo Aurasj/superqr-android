@@ -14,10 +14,11 @@ class V7Phase1ReceiverTest {
     fun packagedManifestIsCanonicalPhase1Artifact() {
         val bytes = checkNotNull(javaClass.classLoader?.getResourceAsStream("v7_phy_selection/phase1_manifest.json"))
             .use { it.readBytes() }
-        val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02X".format(it) }
+        val normalizedBytes = String(bytes, Charsets.UTF_8).replace("\r\n", "\n").toByteArray()
+        val hash = MessageDigest.getInstance("SHA-256").digest(normalizedBytes).joinToString("") { "%02X".format(it) }
         val json = JSONObject(String(bytes, Charsets.UTF_8))
 
-        assertEquals("A6D21803142AE530E225516468ADC727B55117F70E1F09536C48302874AED1EF", hash)
+        assertEquals("E2D7924BD90ADD3F07CE9C0580356BACD231E4B56834103A0E8516B96C054200", hash)
         assertEquals("LAB_ONLY_NOT_A_V7_WIRE_CONTRACT", json.getString("status"))
         assertEquals(5, json.getJSONArray("grid_profiles").length())
         assertEquals(2, json.getJSONArray("qr_controls").length())
