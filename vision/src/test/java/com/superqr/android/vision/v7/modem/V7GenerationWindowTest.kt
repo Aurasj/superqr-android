@@ -11,14 +11,15 @@ class V7GenerationWindowTest {
         val receiver = V7GenerationReceiver(maxActiveGenerations = 2)
         fun packet(generation: Int, symbol: Int): V7ModemPacket {
             val payload = MessageDigest.getInstance("SHA-256").digest("$generation:$symbol".toByteArray())
+            val sourceCount = V7ModemContract.generationSourceCount(payload.size)
             return V7ModemContract.parsePacket(
                 V7ModemContract.buildPacket(
                     sessionId = 0x11223344L,
                     generationId = generation.toLong(),
                     totalGenerations = 8L,
                     symbolId = symbol.toLong(),
-                    sourceCount = 4,
-                    generationPayloadLen = 128L,
+                    sourceCount = sourceCount,
+                    generationPayloadLen = sourceCount.toLong() * payload.size,
                     payload = payload,
                 ),
             )
@@ -40,7 +41,7 @@ class V7GenerationWindowTest {
         for (symbolId in 0 until 8) {
             val payload = V7DenseXor.encode(source, 0x55667788L, 0L, symbolId.toLong())
             val packet = V7ModemContract.parsePacket(
-                V7ModemContract.buildPacket(0x55667788L, 0L, 4L, symbolId.toLong(), 2, 64L, payload),
+                V7ModemContract.buildPacket(0x55667788L, 0L, 1L, symbolId.toLong(), 2, 64L, payload),
             )
             val result = receiver.offer(packet)
             if (result.status == V7GenerationReceiver.Status.GENERATION_COMPLETE) {
@@ -53,7 +54,7 @@ class V7GenerationWindowTest {
         assertTrue(receiver.completionBitmapBytes <= 8)
         val repair = V7DenseXor.encode(source, 0x55667788L, 0L, 20L)
         val duplicate = receiver.offer(
-            V7ModemContract.parsePacket(V7ModemContract.buildPacket(0x55667788L, 0L, 4L, 20L, 2, 64L, repair)),
+            V7ModemContract.parsePacket(V7ModemContract.buildPacket(0x55667788L, 0L, 1L, 20L, 2, 64L, repair)),
         )
         assertEquals(V7GenerationReceiver.Status.DUPLICATE, duplicate.status)
     }
