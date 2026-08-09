@@ -38,6 +38,8 @@ data class V7CarrierAcquisitionResult(
     val detectedQuad: List<DoubleArray>? = null,
     val carrierLike: Boolean = false,
     val finderHypothesisCount: Int = 0,
+    val finderCenters: List<DoubleArray> = emptyList(),
+    val visibleFinderCount: Int = finderCenters.size.coerceAtMost(4),
     val candidateSummary: String? = null,
 ) {
     val acquired: Boolean
@@ -68,6 +70,9 @@ class V7CarrierAcquirer(
         val source: String,
     )
 
+    private data class FinderCenter(val point: Point, val strength: Int, val outerArea: Double)
+    private data class FinderEvidence(val centers: List<Point>, val quads: List<Array<Point>>)
+
     private var initialized = false
     private lateinit var gray: Mat
     private lateinit var blurred: Mat
@@ -91,9 +96,15 @@ class V7CarrierAcquirer(
     private var framesSinceFlow = 0
     private var consecutiveTrackMisses = 0
     private var consecutiveColdFailures = 0
+    private var trackedFinderCount = 0
 
     @Synchronized
-    fun analyze(luma: ByteArray, width: Int, height: Int): V7CarrierAcquisitionResult {
+    fun analyze(
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        diagnostics: Boolean = true,
+    ): V7CarrierAcquisitionResult {
         require(width > 0 && height > 0 && luma.size >= width * height)
         ensureInitialized()
         gray.create(height, width, CvType.CV_8UC1)
@@ -118,6 +129,8 @@ class V7CarrierAcquirer(
                     bestSyncStatus = sync.status,
                     detectedQuad = null,
                     carrierLike = true,
+                    finderHypothesisCount = 1,
+                    visibleFinderCount = trackedFinderCount,
                 )
             }
             if (trackingReferenceValid) {
@@ -130,6 +143,7 @@ class V7CarrierAcquirer(
                 trackedQuad = null
                 trackedCanonicalQuad = null
                 trackingReferenceValid = false
+                trackedFinderCount = 0
             }
         }
 
@@ -168,7 +182,8 @@ class V7CarrierAcquirer(
         // A monitor/camera scan band can fragment a long continuous border while
         // leaving the four compact nested finders intact. Recover a projective
         // hypothesis from their centers before trying arbitrary border quads.
-        val finderQuads = finderCarrierQuads(candidates, temporalLuma, width, height)
+        val finderEvidence = finderEvidence(candidates, temporalLuma, width, height)
+        val finderQuads = finderEvidence.quads
         for (finderQuad in finderQuads) {
             val ordered = orderAroundCenter(finderQuad)
             val windings = arrayOf(ordered, reverseWinding(ordered))
@@ -185,6 +200,7 @@ class V7CarrierAcquirer(
                         trackedHomography = homography.copyOf()
                         trackedQuad = trackingImage
                         trackedCanonicalQuad = trackingCanonical
+                        trackedFinderCount = finderEvidence.centers.size.coerceAtMost(4)
                         updateTrackingReference()
                         temporalFrames = 0
                         consecutiveTrackMisses = 0
@@ -197,9 +213,10 @@ class V7CarrierAcquirer(
                             candidateCount = candidates.size,
                             syncAttempts = attempts,
                             bestSyncStatus = sync.status,
-                            detectedQuad = imageQuad.asDiagnosticQuad(),
+                            detectedQuad = if (diagnostics && sync.envelope.state != V7LabRunState.RUNNING) imageQuad.asDiagnosticQuad() else null,
                             carrierLike = true,
                             finderHypothesisCount = finderQuads.size,
+                            visibleFinderCount = trackedFinderCount,
                         )
                     }
                     val rank = syncRank(sync)
@@ -227,6 +244,7 @@ class V7CarrierAcquirer(
                             trackedHomography = homography.copyOf()
                             trackedQuad = imageQuad.copyPoints()
                             trackedCanonicalQuad = canonicalQuad.copyPoints()
+                            trackedFinderCount = finderEvidence.centers.size.coerceAtMost(4)
                             updateTrackingReference()
                             temporalFrames = 0
                             consecutiveTrackMisses = 0
@@ -239,9 +257,10 @@ class V7CarrierAcquirer(
                                 candidateCount = candidates.size,
                                 syncAttempts = attempts,
                                 bestSyncStatus = sync.status,
-                                detectedQuad = imageQuad.asDiagnosticQuad(),
+                                detectedQuad = if (diagnostics && sync.envelope.state != V7LabRunState.RUNNING) imageQuad.asDiagnosticQuad() else null,
                                 carrierLike = true,
                                 finderHypothesisCount = finderQuads.size,
+                                visibleFinderCount = trackedFinderCount,
                             )
                         }
                         val rank = syncRank(sync)
@@ -271,13 +290,15 @@ class V7CarrierAcquirer(
             candidateCount = candidates.size,
             syncAttempts = attempts,
             bestSyncStatus = bestSync.status,
-            detectedQuad = best?.quad?.asDiagnosticQuad(),
+            detectedQuad = if (diagnostics) best?.quad?.asDiagnosticQuad() else null,
             carrierLike = bestRank >= SYNC_EVIDENCE_RANK,
             finderHypothesisCount = finderQuads.size,
-            candidateSummary = candidates.take(32).joinToString(";") {
+            finderCenters = if (diagnostics) finderEvidence.centers.asDiagnosticCenters() else emptyList(),
+            visibleFinderCount = finderEvidence.centers.size.coerceAtMost(4),
+            candidateSummary = if (diagnostics) candidates.take(32).joinToString(";") {
                 val center = centerOf(it.points)
                 "${it.source}:${it.area.toInt()}@${center.x.toInt()},${center.y.toInt()}"
-            },
+            } else null,
         )
     }
 
@@ -335,6 +356,8 @@ class V7CarrierAcquirer(
                 bestSyncStatus = sync.status,
                 detectedQuad = null,
                 carrierLike = true,
+                finderHypothesisCount = 1,
+                visibleFinderCount = trackedFinderCount,
             )
         } catch (_: Throwable) {
             null
@@ -459,13 +482,12 @@ class V7CarrierAcquirer(
     }
 
     /** Finds four groups of concentric square contours and returns center quads. */
-    private fun finderCarrierQuads(
+    private fun finderEvidence(
         candidates: List<QuadCandidate>,
         luma: ByteArray,
         width: Int,
         height: Int,
-    ): List<Array<Point>> {
-        data class FinderCenter(val point: Point, val strength: Int, val outerArea: Double)
+    ): FinderEvidence {
         data class ScoredQuad(val points: Array<Point>, val score: Double)
 
         val frameArea = width.toDouble() * height
@@ -499,11 +521,10 @@ class V7CarrierAcquirer(
                 }
             }
         }
-        if (centers.size < 4) return emptyList()
-
         val bounded = centers.sortedWith(
             compareByDescending<FinderCenter> { it.strength }.thenByDescending { it.outerArea },
         ).take(MAX_FINDER_CENTERS)
+        if (bounded.size < 4) return FinderEvidence(bounded.map { it.point }, emptyList())
         val scored = ArrayList<ScoredQuad>()
         for (a in 0 until bounded.size - 3) for (b in a + 1 until bounded.size - 2) {
             for (c in b + 1 until bounded.size - 1) for (d in c + 1 until bounded.size) {
@@ -525,8 +546,14 @@ class V7CarrierAcquirer(
                 scored += ScoredQuad(points, area * horizontalBalance * verticalBalance * diagonalBalance * (1.0 + strength * 0.08))
             }
         }
-        return scored.sortedByDescending { it.score }.take(MAX_FINDER_QUADS).map { it.points }
+        return FinderEvidence(
+            centers = bounded.map { it.point },
+            quads = scored.sortedByDescending { it.score }.take(MAX_FINDER_QUADS).map { it.points },
+        )
     }
+
+    private fun List<Point>.asDiagnosticCenters(): List<DoubleArray> =
+        take(4).map { doubleArrayOf(it.x, it.y) }
 
     /** Samples the black/white/black nested finder identity inside a quad. */
     private fun finderPatternContrast(
@@ -687,6 +714,7 @@ class V7CarrierAcquirer(
         trackedQuad = null
         trackedCanonicalQuad = null
         trackingReferenceValid = false
+        trackedFinderCount = 0
         temporalFrames = 0
         consecutiveColdFailures = 0
     }

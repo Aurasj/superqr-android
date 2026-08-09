@@ -12,25 +12,23 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
 import androidx.camera.core.SessionConfig
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
-import androidx.core.view.doOnLayout
 import com.superqr.android.camera.ChromaSampleBuffers
 import com.superqr.android.camera.ImageProxyChromaSampler
 import com.superqr.android.camera.LumaFrameBuffer
 import com.superqr.android.vision.opencv.OpenCvRuntime
 import com.superqr.android.vision.v7_capacity_lab.*
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 @Composable
@@ -45,12 +43,11 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
     val qrExpected = remember(manifest) {
         manifest.profiles.filterIsInstance<Phase1Profile.Qr>().associate { it.version to it.frameBytes }
     }
-    val previewView = remember {
-        PreviewView(context).apply {
-            scaleType = PreviewView.ScaleType.FIT_CENTER
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-        }
+    val previewExecutor = remember {
+        Executors.newSingleThreadExecutor { task -> Thread(task, "phy-lab-analysis-preview").apply { isDaemon = true } }
     }
+    val previewPublisher = remember(previewExecutor) { Phase1AnalysisPreviewPublisher(previewExecutor) }
+    DisposableEffect(previewExecutor) { onDispose { previewExecutor.shutdownNow() } }
     var permission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
@@ -60,6 +57,7 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
     var running by remember { mutableStateOf(false) }
     var cameraState by remember { mutableStateOf("STOPPED") }
     var status by remember { mutableStateOf(recorder.snapshot()) }
+    var alignmentPreview by remember { mutableStateOf(Phase1AnalysisPreview()) }
 
     DisposableEffect(permission, running) {
         val myGeneration = generation.incrementAndGet()
@@ -74,12 +72,9 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                 if (generation.get() != myGeneration) return@addListener
                 try {
                     provider = future.get()
-                    previewView.doOnLayout {
-                        if (generation.get() != myGeneration) return@doOnLayout
-                        try {
+                    try {
                             provider?.unbindAll()
-                            val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
-                            val preview = Preview.Builder().setTargetRotation(rotation).build().also { it.surfaceProvider = previewView.surfaceProvider }
+                            val rotation = activity?.window?.decorView?.display?.rotation ?: Surface.ROTATION_0
                             val resolutionSelector = ResolutionSelector.Builder()
                                 .setAllowedResolutionMode(ResolutionSelector.PREFER_CAPTURE_RATE_OVER_HIGHER_RESOLUTION)
                                 .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
@@ -109,6 +104,19 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                             var warmupStartedNs = 0L
                             var resolutionRejected = false
                             var cameraLabel = "CAMERA • 1280×720 target • OpenCV ${openCv.version}"
+                            var latestAcquisition: V7CarrierAcquisitionResult? = null
+                            var measuringRun = false
+
+                            fun updateMeasurementState(value: Boolean) {
+                                if (value == measuringRun) return
+                                measuringRun = value
+                                previewPublisher.setMeasuring(value)
+                                mainExecutor.execute {
+                                    if (generation.get() == myGeneration) {
+                                        alignmentPreview = alignmentPreview.copy(measuring = value)
+                                    }
+                                }
+                            }
 
                             analysis!!.setAnalyzer(analysisExecutor) { image ->
                                 val arrivalNs = System.nanoTime()
@@ -137,7 +145,11 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                     }
                                     val packedNs = System.nanoTime()
                                     if (scheduler.path == Phase1AnalysisPath.GRID) {
-                                        val acquisition = carrierAcquirer!!.analyze(luma.bytes, luma.width, luma.height)
+                                        val acquisition = carrierAcquirer!!.analyze(
+                                            luma.bytes, luma.width, luma.height,
+                                            diagnostics = !measuringRun,
+                                        )
+                                        latestAcquisition = acquisition
                                         val acquisitionDoneNs = System.nanoTime()
                                         val h = acquisition.canonicalToImageHomography
                                         if (h == null) {
@@ -184,6 +196,7 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                             val envelope = sync.envelope
                                             val profile = envelope?.let { manifest.profile(it.profileId) }
                                             if (envelope != null && profile is Phase1Profile.Grid) {
+                                                updateMeasurementState(envelope.state == V7LabRunState.RUNNING)
                                                 scheduler.locked(Phase1AnalysisPath.GRID)
                                                 recorder.observeSender(profile, envelope, sync.status, acquisition.source)
                                                 if (envelope.state == V7LabRunState.RUNNING) {
@@ -264,6 +277,7 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                         val envelope = qr.envelope
                                         val profile = envelope?.let { manifest.profile(it.profileId) }
                                         if (envelope != null && profile is Phase1Profile.Qr) {
+                                            updateMeasurementState(envelope.state == V7LabRunState.RUNNING)
                                             scheduler.locked(Phase1AnalysisPath.QR)
                                             recorder.observeSender(profile, envelope, "QR_LOCKED", "QR_NATIVE")
                                             if (envelope.state == V7LabRunState.RUNNING && qr.valid) {
@@ -305,6 +319,19 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                         }
                                     }
                                     deliveredFrames++
+                                    if (!measuringRun) {
+                                        val framing = Phase1FramingEvaluator.evaluate(
+                                            luma.width, luma.height, latestAcquisition, manifest.carrierSpec,
+                                        )
+                                        previewPublisher.offer(
+                                            luma.bytes, luma.width, luma.height, framing, arrivalNs,
+                                        ) { preview ->
+                                            mainExecutor.execute {
+                                                if (generation.get() == myGeneration && !measuringRun) alignmentPreview = preview
+                                                else preview.bitmap?.recycle()
+                                            }
+                                        }
+                                    }
                                     if (deliveredFrames % 3 == 0) mainExecutor.execute {
                                         if (generation.get() == myGeneration) status = recorder.snapshot()
                                     }
@@ -314,28 +341,28 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                     image.close()
                                 }
                             }
-                            // Do not attach PreviewView's square UI viewport to ImageAnalysis.
-                            // That previously converted a 1920×1080 request into a 3456×3456
-                            // center crop on the physical phone.
-                            val base = SessionConfig.Builder(listOf(preview, analysis!!))
+                            // ImageAnalysis is the only camera output. The UI renders a
+                            // throttled copy of its normalized luma buffer, so no Preview
+                            // viewport can silently diverge or crop the operator's view.
+                            val base = SessionConfig.Builder(listOf(analysis!!))
                             val info = provider!!.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
                             val ranges = try { info.getSupportedFrameRateRanges(base.build()) } catch (_: Throwable) { emptySet() }
                             val chosen = ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
                                 ?: ranges.filter { it.lower <= 30 && it.upper >= 30 }.minByOrNull { it.upper - it.lower }
-                            val config = SessionConfig.Builder(listOf(preview, analysis!!)).apply {
+                            val config = SessionConfig.Builder(listOf(analysis!!)).apply {
                                 if (chosen != null) setFrameRateRange(chosen)
                             }.build()
                             provider!!.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, config)
                             val fpsLabel = if (chosen == null) "AUTO FPS" else "${chosen.lower}-${chosen.upper} FPS"
                             cameraLabel = "CAMERA $fpsLabel • 1280×720 target • OpenCV ${openCv.version}"
                             cameraState = "$cameraLabel • WARMUP"
-                        } catch (t: Throwable) { cameraState = "ERROR • ${t.message ?: "camera"}" }
-                    }
+                    } catch (t: Throwable) { cameraState = "ERROR • ${t.message ?: "camera"}" }
                 } catch (t: Throwable) { cameraState = "ERROR • ${t.message ?: "provider"}" }
             }, mainExecutor)
         }
         onDispose {
             generation.incrementAndGet(); analysis?.clearAnalyzer()
+            previewPublisher.setMeasuring(false)
             try { provider?.unbindAll() } catch (_: Throwable) {}
             carrierAcquirer?.close(); qrDecoder?.close()
         }
@@ -347,13 +374,18 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
     }
 
     Phase1LabDashboard(
-        previewView = previewView,
+        alignmentPreview = alignmentPreview,
         status = status,
         cameraState = cameraState,
         running = running,
         cameraPermission = permission,
-        onToggleCamera = { running = !running },
-        onNewCampaign = { recorder.reset(); status = recorder.snapshot() },
+        onToggleCamera = {
+            running = !running
+            if (running) alignmentPreview = Phase1AnalysisPreview()
+        },
+        onNewCampaign = {
+            recorder.reset(); status = recorder.snapshot(); alignmentPreview = Phase1AnalysisPreview()
+        },
         onShare = {
             try { recorder.exportAndShare(context) }
             catch (t: Throwable) { Toast.makeText(context, "Export failed: ${t.message}", Toast.LENGTH_LONG).show() }

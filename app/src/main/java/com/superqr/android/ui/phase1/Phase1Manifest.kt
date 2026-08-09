@@ -47,6 +47,7 @@ data class Phase1Manifest(
             val acquisition = json.getJSONObject("acquisition_carrier")
             require(acquisition.getString("status") == "LAB_ONLY_NOT_PRODUCTION_V7_GEOMETRY")
             val border = acquisition.getJSONObject("outer_border")
+            val finders = acquisition.getJSONArray("finder_patterns")
             val sync = json.getJSONObject("run_sync")
             val carrierSpec = V7CarrierSpec(
                 canvasSize = json.getDouble("canvas_size"),
@@ -57,6 +58,9 @@ data class Phase1Manifest(
                 syncRows = sync.getInt("rows"),
                 syncCols = sync.getInt("cols"),
                 candidateContourEdges = acquisition.getJSONArray("candidate_contour_edges").toDoubleArray(),
+                finderOuterBboxes = List(finders.length()) { index ->
+                    finders.getJSONObject(index).getJSONArray("outer_bbox").toDoubleArray()
+                },
             )
             val profiles = mutableListOf<Phase1Profile>()
             val grid = json.getJSONArray("grid_profiles")

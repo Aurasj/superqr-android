@@ -85,11 +85,18 @@ data class V7CarrierSpec(
     val syncRows: Int = 2,
     val syncCols: Int = 40,
     val candidateContourEdges: DoubleArray = doubleArrayOf(50.0, 70.0),
+    val finderOuterBboxes: List<DoubleArray> = listOf(
+        doubleArrayOf(80.0, 80.0, 180.0, 180.0),
+        doubleArrayOf(820.0, 80.0, 920.0, 180.0),
+        doubleArrayOf(820.0, 820.0, 920.0, 920.0),
+        doubleArrayOf(80.0, 820.0, 180.0, 920.0),
+    ),
 ) {
     init {
         require(borderBbox.size == 4 && syncTopBbox.size == 4 && syncBottomBbox.size == 4)
         require(syncRows * syncCols == V7LabRunEnvelope.PACKET_BITS)
         require(candidateContourEdges.isNotEmpty())
+        require(finderOuterBboxes.size == 4 && finderOuterBboxes.all { it.size == 4 })
     }
 }
 

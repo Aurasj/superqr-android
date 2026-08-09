@@ -111,10 +111,12 @@ class V7Phase1ReceiverTest {
             val acquisition = acquirer.analyze(frame, 1280, 720)
             assertTrue("V7 carrier must acquire: ${acquisition.bestSyncStatus}", acquisition.acquired)
             assertEquals(acquisition.sync.status, envelope, acquisition.sync.envelope)
+            assertEquals("all four physical finders must be visible", 4, acquisition.visibleFinderCount)
 
             val tracked = acquirer.analyze(frame, 1280, 720)
             assertEquals("V7_SYNC_TRACKED", tracked.source)
             assertEquals(envelope, tracked.sync.envelope)
+            assertEquals(4, tracked.visibleFinderCount)
         }
     }
 
@@ -345,6 +347,7 @@ class V7Phase1ReceiverTest {
                 acquisition.source,
             )
             assertEquals(envelope, acquisition.sync.envelope)
+            assertEquals(4, acquisition.visibleFinderCount)
         }
     }
 

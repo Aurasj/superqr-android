@@ -1,6 +1,7 @@
 package com.superqr.android.ui.phase1
 
-import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -13,11 +14,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 
 private val LabBackground = Color(0xFF080B11)
 private val LabSurface = Color(0xFF121823)
@@ -39,7 +44,7 @@ private data class Metric(
 
 @Composable
 fun Phase1LabDashboard(
-    previewView: PreviewView,
+    alignmentPreview: Phase1AnalysisPreview,
     status: Phase1RunSnapshot,
     cameraState: String,
     running: Boolean,
@@ -102,13 +107,13 @@ fun Phase1LabDashboard(
             val wide = maxWidth >= 760.dp || maxWidth > maxHeight
             if (wide) {
                 Row(Modifier.fillMaxSize().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    PreviewPanel(previewView, cameraState, stateTint, Modifier.weight(1.18f).fillMaxHeight())
+                    PreviewPanel(alignmentPreview, cameraState, Modifier.weight(1.18f).fillMaxHeight())
                     LabDetails(status, stateTint, Modifier.weight(1f).fillMaxHeight())
                 }
             } else {
                 Column(Modifier.fillMaxSize()) {
                     PreviewPanel(
-                        previewView, cameraState, stateTint,
+                        alignmentPreview, cameraState,
                         Modifier.fillMaxWidth().heightIn(min = 220.dp).weight(0.43f),
                     )
                     LabDetails(status, stateTint, Modifier.fillMaxWidth().weight(0.57f))
@@ -120,20 +125,80 @@ fun Phase1LabDashboard(
 
 @Composable
 private fun PreviewPanel(
-    previewView: PreviewView,
+    preview: Phase1AnalysisPreview,
     cameraState: String,
-    tint: Color,
     modifier: Modifier,
 ) {
+    val geometry = preview.geometry
+    val tint = framingTint(geometry.status)
     val shape = RoundedCornerShape(14.dp)
     Box(
         modifier.clip(shape).background(Color.Black).border(1.dp, tint.copy(alpha = 0.65f), shape),
     ) {
-        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-        Box(
-            Modifier.align(Alignment.Center).fillMaxWidth(0.72f).aspectRatio(1f)
-                .border(1.dp, Color.White.copy(alpha = 0.32f), RoundedCornerShape(10.dp)),
-        )
+        preview.bitmap?.let { bitmap ->
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = "Exact ImageAnalysis luma frame",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        AnalysisGeometryOverlay(geometry, Modifier.fillMaxSize())
+        Surface(
+            modifier = Modifier.align(Alignment.TopCenter).padding(10.dp),
+            color = tint.copy(alpha = 0.94f),
+            shape = RoundedCornerShape(10.dp),
+        ) {
+            Column(
+                Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    geometry.status.label,
+                    color = Color(0xFF061019),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 0.5.sp,
+                )
+                Text(
+                    if (preview.measuring) "MEASURING • PREVIEW FROZEN" else geometry.detail,
+                    color = Color(0xFF061019).copy(alpha = 0.78f),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (geometry.frameWidth > 0 && geometry.frameHeight > 0) {
+            Surface(
+                modifier = Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 82.dp),
+                color = Color.Black.copy(alpha = 0.76f),
+                shape = RoundedCornerShape(7.dp),
+            ) {
+                Text(
+                    "ANALYSIS ${geometry.frameWidth}×${geometry.frameHeight} • FULL FRAME • NO CROP",
+                    Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    color = Color.White,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Surface(
+                modifier = Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = 82.dp),
+                color = Color.Black.copy(alpha = 0.76f),
+                shape = RoundedCornerShape(7.dp),
+            ) {
+                val margin = geometry.minimumMarginPx?.let { " • ${it.toInt()} px margin" } ?: ""
+                Text(
+                    "${geometry.visibleFinders} / 4 FINDERS$margin",
+                    Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    color = tint,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
         Surface(
             modifier = Modifier.align(Alignment.BottomStart).padding(10.dp),
             color = Color.Black.copy(alpha = 0.68f),
@@ -149,6 +214,83 @@ private fun PreviewPanel(
             )
         }
     }
+}
+
+@Composable
+private fun AnalysisGeometryOverlay(geometry: Phase1FramingGeometry, modifier: Modifier = Modifier) {
+    if (geometry.frameWidth <= 0 || geometry.frameHeight <= 0) return
+    Canvas(modifier) {
+        val fit = Phase1FrameFit.calculate(geometry.frameWidth, geometry.frameHeight, size.width, size.height)
+        val scale = fit.scale
+        val imageWidth = fit.renderedWidth
+        val imageHeight = fit.renderedHeight
+        val offsetX = fit.offsetX
+        val offsetY = fit.offsetY
+        fun map(point: Phase1FramePoint): androidx.compose.ui.geometry.Offset {
+            val mapped = fit.map(point)
+            return androidx.compose.ui.geometry.Offset(mapped.x, mapped.y)
+        }
+        fun path(points: List<Phase1FramePoint>): Path? {
+            if (points.size != 4) return null
+            return Path().apply {
+                val first = map(points.first())
+                moveTo(first.x, first.y)
+                points.drop(1).forEach { point ->
+                    val mapped = map(point)
+                    lineTo(mapped.x, mapped.y)
+                }
+                close()
+            }
+        }
+
+        val safe = geometry.safeInsetPx * scale
+        if (safe > 0f && imageWidth > safe * 2f && imageHeight > safe * 2f) {
+            drawRect(
+                color = Color.White.copy(alpha = 0.52f),
+                topLeft = androidx.compose.ui.geometry.Offset(offsetX + safe, offsetY + safe),
+                size = androidx.compose.ui.geometry.Size(imageWidth - safe * 2f, imageHeight - safe * 2f),
+                style = Stroke(width = 1.5.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f))),
+            )
+        }
+        geometry.candidateQuad?.let { candidate ->
+            path(candidate)?.let {
+                drawPath(
+                    it, LabWarn.copy(alpha = 0.9f),
+                    style = Stroke(width = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))),
+                )
+            }
+        }
+        geometry.carrierQuad?.let { carrier ->
+            path(carrier)?.let { drawPath(it, LabGood, style = Stroke(width = 2.5.dp.toPx())) }
+        }
+        geometry.finderQuads.forEach { finder ->
+            path(finder)?.let {
+                drawPath(it, LabGood.copy(alpha = 0.18f))
+                drawPath(it, LabGood, style = Stroke(width = 2.5.dp.toPx()))
+            }
+        }
+        geometry.finderCenters.forEach { center ->
+            drawCircle(
+                color = if (geometry.status == Phase1FramingStatus.GOOD) LabGood else LabWarn,
+                radius = 5.dp.toPx(),
+                center = map(center),
+                style = Stroke(width = 2.dp.toPx()),
+            )
+        }
+        drawRect(
+            Color.White.copy(alpha = 0.35f),
+            topLeft = androidx.compose.ui.geometry.Offset(offsetX, offsetY),
+            size = androidx.compose.ui.geometry.Size(imageWidth, imageHeight),
+            style = Stroke(width = 1.dp.toPx()),
+        )
+    }
+}
+
+private fun framingTint(status: Phase1FramingStatus): Color = when (status) {
+    Phase1FramingStatus.GOOD -> LabGood
+    Phase1FramingStatus.MOVE_BACK -> LabWarn
+    Phase1FramingStatus.NOT_FOUND -> LabBad
+    Phase1FramingStatus.ALIGNING -> LabAccent
 }
 
 @Composable
