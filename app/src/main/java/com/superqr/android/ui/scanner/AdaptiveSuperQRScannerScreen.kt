@@ -46,6 +46,7 @@ import com.superqr.android.camera.ChromaSampleBuffers
 import com.superqr.android.camera.ImageProxyChromaSampler
 import com.superqr.android.camera.LumaFrameBuffer
 import com.superqr.android.camera.V7AnalysisRateAccumulator
+import com.superqr.android.camera.V7MeasurementTracker
 import com.superqr.android.ui.v6.V6PreviewOverlayGeometry
 import com.superqr.android.ui.v6.V6PreviewOverlayMapper
 import com.superqr.android.vision.v6.contract.V6Contract
@@ -93,6 +94,8 @@ fun AdaptiveSuperQRScannerScreen(
     val generation = remember { AtomicInteger(0) }
     val accumulator = remember { V7SessionAccumulator() }
     val debugHistory = remember { V7DebugHistory(512) }
+    val measurement = remember { V7MeasurementTracker() }
+    val cameraDeliveredRate = remember { V7AnalysisRateAccumulator(64) }
 
     var result by remember { mutableStateOf<V6StaticResult?>(null) }
     var carrierOverlay by remember { mutableStateOf<V6PreviewOverlayGeometry?>(null) }
@@ -121,11 +124,21 @@ fun AdaptiveSuperQRScannerScreen(
     var parserRejects by remember { mutableIntStateOf(0) }
     var temporalRecoveredFrames by remember { mutableIntStateOf(0) }
 
+    var measurementRunId by remember { mutableStateOf("") }
     var cameraFps by remember { mutableDoubleStateOf(0.0) }
     var analysisFps by remember { mutableDoubleStateOf(0.0) }
+    var pipelineMs by remember { mutableDoubleStateOf(0.0) }
     var analysisMs by remember { mutableDoubleStateOf(0.0) }
-    var lastSensorTs by remember { mutableLongStateOf(0L) }
-    val rate = remember { V7AnalysisRateAccumulator(64) }
+    var profileMs by remember { mutableDoubleStateOf(0.0) }
+    var samplingMs by remember { mutableDoubleStateOf(0.0) }
+    var classificationMs by remember { mutableDoubleStateOf(0.0) }
+    var transportMs by remember { mutableDoubleStateOf(0.0) }
+    var usefulUniqueFps by remember { mutableDoubleStateOf(0.0) }
+    var acceptedPayloadBytes by remember { mutableLongStateOf(0L) }
+    var decodedPayloadKiBs by remember { mutableDoubleStateOf(0.0) }
+    var measurementElapsedMs by remember { mutableDoubleStateOf(0.0) }
+    var analysisExceptionCount by remember { mutableIntStateOf(0) }
+    var lastAnalysisException by remember { mutableStateOf<String?>(null) }
 
     var showDebug by remember { mutableStateOf(false) }
     var overlayMode by remember { mutableStateOf(V7DebugOverlayMode.LIVE) }
@@ -138,13 +151,18 @@ fun AdaptiveSuperQRScannerScreen(
     var frozenSnapshot by remember { mutableStateOf<V7DebugSnapshot?>(null) }
 
     fun resetLive() {
-        accumulator.reset(); debugHistory.reset()
+        accumulator.reset(); debugHistory.reset(); measurement.reset(); cameraDeliveredRate.reset()
         result = null; carrierOverlay = null; debugOverlay = null; debugSnapshot = null; completed = null
         activeProfile = V7OpticalProfiles.default; calibrated = 0; validSamples = 0; confidentCells = 0; erasures = 0
         lastFrame = -1; lastError = null; latestTransport = null
         analyzedFrames = 0; skippedErasures = 0; headerValidCount = 0; headerInvalidCount = 0; packAttempts = 0
         crcAttempts = 0; crcCandidateAttempts = 0; crcPass = 0; crcFail = 0; parserRejects = 0; temporalRecoveredFrames = 0
-        cameraFps = 0.0; analysisFps = 0.0; analysisMs = 0.0; lastSensorTs = 0L; rate.reset()
+        val ms = measurement.snapshot()
+        measurementRunId = ms.runId
+        cameraFps = 0.0; analysisFps = 0.0; pipelineMs = 0.0; analysisMs = 0.0
+        profileMs = 0.0; samplingMs = 0.0; classificationMs = 0.0; transportMs = 0.0
+        usefulUniqueFps = 0.0; acceptedPayloadBytes = 0L; decodedPayloadKiBs = 0.0; measurementElapsedMs = 0.0
+        analysisExceptionCount = 0; lastAnalysisException = null
         frozenBitmap = null; frozenOverlay = null; frozenSnapshot = null
     }
 
@@ -184,6 +202,8 @@ fun AdaptiveSuperQRScannerScreen(
     }
 
     fun buildReport(): V7DebugExporter.Report = V7DebugExporter.Report(
+        measurementSchemaVersion = V7MeasurementTracker.SCHEMA_VERSION,
+        runId = measurementRunId,
         profile = activeProfile,
         cameraState = cameraState,
         trackingState = result?.trackingState ?: "—",
@@ -211,7 +231,18 @@ fun AdaptiveSuperQRScannerScreen(
         conflicts = accumulator.getConflictCount(),
         cameraFps = cameraFps,
         analysisFps = analysisFps,
+        pipelineMs = pipelineMs,
         analysisMs = analysisMs,
+        profileMs = profileMs,
+        samplingMs = samplingMs,
+        classificationMs = classificationMs,
+        transportMs = transportMs,
+        usefulUniqueFps = usefulUniqueFps,
+        acceptedPayloadBytes = acceptedPayloadBytes,
+        decodedPayloadKiBs = decodedPayloadKiBs,
+        measurementElapsedMs = measurementElapsedMs,
+        analysisExceptionCount = analysisExceptionCount,
+        lastAnalysisException = lastAnalysisException,
         focusState = focusState,
         lastError = lastError,
     )
@@ -300,7 +331,11 @@ fun AdaptiveSuperQRScannerScreen(
             val transforms = ImageProxyTransformFactory().apply { setUsingCropRect(true); setUsingRotationDegrees(true) }
 
             analysis.setAnalyzer(analysisExecutor) { image ->
-                val gen = generation.get(); val sensorTs = image.imageInfo.timestamp; val arrival = System.nanoTime()
+                val gen = generation.get()
+                val sensorTs = image.imageInfo.timestamp
+                val arrival = System.nanoTime()
+                cameraDeliveredRate.recordCompletion(sensorTs)
+                val deliveredFps = cameraDeliveredRate.computeFps(sensorTs)
                 try {
                     val d = detectorRef ?: return@setAnalyzer
                     val r = receiverRef ?: return@setAnalyzer
@@ -313,17 +348,46 @@ fun AdaptiveSuperQRScannerScreen(
                     val decoded = r.analyze(detected, luma.bytes, luma.width, luma.height, chromaReader)
                     val sourceTx = try { transforms.getOutputTransform(image) } catch (_: Throwable) { null }
                     val accepted = decoded.acceptedFrame
+                    if (accepted != null) measurement.recordAccepted(accepted.sessionId, accepted.frameId, accepted.payload.size)
                     var pkg: V7TransferPackage? = null
                     if (accepted != null) pkg = try { accumulator.addFrame(accepted) } catch (_: Throwable) { null }
+
+                    val completedNs = System.nanoTime()
+                    measurement.recordAnalysis(
+                        completedNs = completedNs,
+                        pipelineMs = (completedNs - arrival) / 1_000_000.0,
+                        detectorMs = detected.processingTimeMs.toDouble(),
+                        v7TotalMs = decoded.timing.totalUs / 1000.0,
+                        v7ProfileMs = decoded.timing.profileUs / 1000.0,
+                        v7SamplingMs = decoded.timing.samplingUs / 1000.0,
+                        v7ClassificationMs = decoded.timing.classificationUs / 1000.0,
+                        v7TransportMs = decoded.timing.transportUs / 1000.0,
+                    )
+                    val ms = measurement.snapshot(completedNs)
 
                     mainExecutor.execute {
                         if (gen != generation.get()) return@execute
                         result = detected
                         carrierOverlay = if (sourceTx != null) pv.outputTransform?.let { V6PreviewOverlayMapper.map(detected, sourceTx, it) } else null
                         activeProfile = decoded.profile; calibrated = decoded.calibratedCount; validSamples = decoded.validSamples
-                        confidentCells = decoded.confidentCells; erasures = decoded.erasureCount; analysisMs = decoded.timing.totalUs / 1000.0
-                        latestTransport = decoded.transport
-                        analyzedFrames++
+                        confidentCells = decoded.confidentCells; erasures = decoded.erasureCount; latestTransport = decoded.transport
+
+                        measurementRunId = ms.runId
+                        cameraFps = deliveredFps
+                        analysisFps = ms.analysisFps
+                        pipelineMs = ms.pipelineMs
+                        analysisMs = ms.v7TotalMs
+                        profileMs = ms.v7ProfileMs
+                        samplingMs = ms.v7SamplingMs
+                        classificationMs = ms.v7ClassificationMs
+                        transportMs = ms.v7TransportMs
+                        usefulUniqueFps = ms.usefulUniqueFps
+                        acceptedPayloadBytes = ms.acceptedPayloadBytes
+                        decodedPayloadKiBs = ms.decodedPayloadKiBs
+                        measurementElapsedMs = ms.sessionElapsedMs
+                        analysisExceptionCount = ms.analysisExceptionCount
+                        lastAnalysisException = ms.lastAnalysisException
+                        analyzedFrames = ms.analysisCompleted
 
                         val td = decoded.transport
                         debugHistory.record(analyzedFrames, decoded.profile, td, accepted)
@@ -343,17 +407,6 @@ fun AdaptiveSuperQRScannerScreen(
                         if (accepted != null) { lastFrame = accepted.frameId; lastError = null }
                         else lastError = td.rejectionReason
 
-                        if (lastSensorTs > 0L) {
-                            val delta = (sensorTs - lastSensorTs) / 1_000_000_000.0
-                            if (delta > 0) {
-                                val instant = 1.0 / delta
-                                cameraFps = if (cameraFps <= 0.0) instant else cameraFps * 0.85 + instant * 0.15
-                            }
-                        }
-                        lastSensorTs = sensorTs
-                        rate.recordCompletion(System.nanoTime())
-                        analysisFps = rate.computeFps()
-
                         val opticalDebugActive = showDebug || overlayMode != V7DebugOverlayMode.LIVE
                         if (opticalDebugActive && frozenBitmap == null && sourceTx != null && decoded.debugSnapshot != null) {
                             val target = pv.outputTransform
@@ -371,8 +424,15 @@ fun AdaptiveSuperQRScannerScreen(
                             releaseCamera(); state = AdaptiveScannerState.COMPLETE; cameraState = "STOPPED"
                         }
                     }
-                } catch (_: Throwable) {
-                    // Bad optical frames are expected; transport diagnostics make them visible.
+                } catch (t: Throwable) {
+                    measurement.recordException(t)
+                    val ms = measurement.snapshot(System.nanoTime())
+                    mainExecutor.execute {
+                        if (gen != generation.get()) return@execute
+                        measurementRunId = ms.runId
+                        analysisExceptionCount = ms.analysisExceptionCount
+                        lastAnalysisException = ms.lastAnalysisException
+                    }
                 } finally { image.close() }
             }
 
@@ -414,8 +474,8 @@ fun AdaptiveSuperQRScannerScreen(
         Box(modifier.fillMaxSize().background(Color(0xFF090B10)), contentAlignment = Alignment.Center) {
             Column(Modifier.padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("SuperQR", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
-                Text("Adaptive V7 optical receiver", color = Color.White.copy(alpha = .62f))
-                Text("Profile AUTO • real-time optical diagnostics", color = Color(0xFF7CB7FF), fontSize = 11.sp)
+                Text("V7 optical receiver", color = Color.White.copy(alpha = .62f))
+                Text("40×40 / 4c baseline • measurement enabled", color = Color(0xFF7CB7FF), fontSize = 11.sp)
                 if (state == AdaptiveScannerState.ERROR) Text(cameraState, color = Color(0xFFFF7B72), fontSize = 11.sp)
                 Button(onClick = { startScan() }, modifier = Modifier.fillMaxWidth()) { Text("SCAN SUPERQR", fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 7.dp)) }
                 if (onBack != null) TextButton(onClick = onBack) { Text("Back") }
@@ -493,7 +553,16 @@ fun AdaptiveSuperQRScannerScreen(
                 temporalRecoveredFrames = temporalRecoveredFrames,
                 cameraFps = cameraFps,
                 analysisFps = analysisFps,
+                pipelineMs = pipelineMs,
                 analysisMs = analysisMs,
+                profileMs = profileMs,
+                samplingMs = samplingMs,
+                classificationMs = classificationMs,
+                transportMs = transportMs,
+                usefulUniqueFps = usefulUniqueFps,
+                decodedPayloadKiBs = decodedPayloadKiBs,
+                analysisExceptionCount = analysisExceptionCount,
+                lastAnalysisException = lastAnalysisException,
                 unique = accumulator.getUniqueFrames(),
                 duplicates = accumulator.getDuplicateCount(),
                 conflicts = accumulator.getConflictCount(),
@@ -534,6 +603,7 @@ fun AdaptiveSuperQRScannerScreen(
             V7ReceiveCard(
                 activeProfile, accumulator, calibrated, confidentCells, erasures, lastFrame, lastError,
                 crcPass, crcFail, skippedErasures, temporalRecoveredFrames, cameraFps, analysisFps,
+                usefulUniqueFps, decodedPayloadKiBs,
                 Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp),
             )
         }
