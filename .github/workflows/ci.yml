@@ -27,5 +27,5 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Test vision and app, compile debug Kotlin
-        run: ./gradlew :vision:testDebugUnitTest :app:testDebugUnitTest :app:compileDebugKotlin
+      - name: Test vision and app, build benchmark APK
+        run: ./gradlew :vision:testDebugUnitTest :app:testDebugUnitTest :app:assembleBenchmark
