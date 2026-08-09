@@ -7,12 +7,17 @@ class V7GenerationReceiver(private val maxActiveGenerations:Int=4){
     enum class Status{DUPLICATE,INNOVATIVE,GENERATION_COMPLETE,WINDOW_FULL}
     data class Result(val status:Status,val generationId:Long,val rank:Int,val sourceCount:Int,val completedBytes:ByteArray?=null)
     private data class State(val packet:V7ModemPacket,val decoder:V7DenseXorDecoder)
-    private val active=LinkedHashMap<Long,State>();private val completed=BitSet();private var completedCount=0;private var sessionId:Long?=null;private var totalGenerations:Long?=null
+    private val active=LinkedHashMap<Long,State>();private val completed=BitSet();private var completedCount=0;private var sessionId:Long?=null;private var totalGenerations:Long?=null;private var sessionSymbolBytes:Int?=null
     init{require(maxActiveGenerations in 1..16)}
     fun offer(packet:V7ModemPacket):Result{
         V7ModemContract.validateGenerationShape(packet)
         val session=sessionId
-        if(session==null){if(packet.totalGenerations>MAX_TRACKED_GENERATIONS)throw V7ModemException("generation count exceeds Android safety limit");sessionId=packet.sessionId;totalGenerations=packet.totalGenerations}else if(packet.sessionId!=session||packet.totalGenerations!=totalGenerations)throw V7ModemException("packet belongs to another modem session")
+        if(session==null){
+            if(packet.totalGenerations>MAX_TRACKED_GENERATIONS)throw V7ModemException("generation count exceeds Android safety limit")
+            sessionId=packet.sessionId;totalGenerations=packet.totalGenerations;sessionSymbolBytes=packet.symbolBytes
+        }else if(packet.sessionId!=session||packet.totalGenerations!=totalGenerations||packet.symbolBytes!=sessionSymbolBytes){
+            throw V7ModemException("packet belongs to another modem session or channel-symbol size")
+        }
         val generationIndex=packet.generationId.toInt();if(completed[generationIndex])return Result(Status.DUPLICATE,packet.generationId,packet.sourceCount,packet.sourceCount)
         var state=active[packet.generationId]
         if(state==null){
@@ -26,7 +31,7 @@ class V7GenerationReceiver(private val maxActiveGenerations:Int=4){
         val innovative=state.decoder.add(packet.symbolId,packet.payload);if(!innovative)return Result(Status.DUPLICATE,packet.generationId,state.decoder.rank,packet.sourceCount);if(!state.decoder.complete)return Result(Status.INNOVATIVE,packet.generationId,state.decoder.rank,packet.sourceCount)
         val bytes=state.decoder.decode(packet.generationPayloadLen.toInt());active.remove(packet.generationId);completed.set(generationIndex);completedCount++;return Result(Status.GENERATION_COMPLETE,packet.generationId,packet.sourceCount,packet.sourceCount,bytes)
     }
-    fun reset(){active.clear();completed.clear();completedCount=0;sessionId=null;totalGenerations=null}
+    fun reset(){active.clear();completed.clear();completedCount=0;sessionId=null;totalGenerations=null;sessionSymbolBytes=null}
     val activeGenerationCount:Int get()=active.size
     val completedGenerationCount:Int get()=completedCount
     val completionBitmapBytes:Int get()=completed.toLongArray().size*Long.SIZE_BYTES
