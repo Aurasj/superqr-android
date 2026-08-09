@@ -3,6 +3,7 @@ package com.superqr.android.ui.phase1
 import android.content.Context
 import com.superqr.android.ui.scanner.V7DebugExporter
 import com.superqr.android.vision.v7_capacity_lab.V7LabRunEnvelope
+import com.superqr.android.vision.v7_capacity_lab.V7LabRunState
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -50,6 +51,7 @@ class Phase1ObservationRecorder {
     private var firstAnalysisNs = 0L
     private var lastAnalysisNs = 0L
     private var runStartedNs = 0L
+    private var runEndedNs = 0L
     private var validFrames = 0
     private var innerFecFrames = 0
     private var uniqueFrames = 0
@@ -84,7 +86,13 @@ class Phase1ObservationRecorder {
     }
 
     @Synchronized
-    fun observeSender(profile: Phase1Profile, envelope: V7LabRunEnvelope, sync: String, geometry: String) {
+    fun observeSender(
+        profile: Phase1Profile,
+        envelope: V7LabRunEnvelope,
+        sync: String,
+        geometry: String,
+        observedNs: Long = System.nanoTime(),
+    ) {
         if (runToken != envelope.runToken || currentProfile?.id != profile.id) {
             currentProfile = profile; runToken = envelope.runToken
             runId = "%04X".format(envelope.runToken); expectedFrames = envelope.frameCount
@@ -92,6 +100,9 @@ class Phase1ObservationRecorder {
             resetRunCounters(); lastFailure = null
         }
         senderState = envelope.state.name; syncStatus = sync; geometryState = geometry
+        if (envelope.state == V7LabRunState.DONE && runStartedNs > 0L && runEndedNs == 0L) {
+            runEndedNs = observedNs.coerceAtLeast(runStartedNs)
+        }
     }
 
     @Synchronized
@@ -147,7 +158,7 @@ class Phase1ObservationRecorder {
         erasureCellCount: Int = 0,
         extra: Map<String, Any?> = emptyMap(),
     ): Phase1RunSnapshot {
-        if (envelope != null) observeSender(profile, envelope, sync, geometry)
+        if (envelope != null) observeSender(profile, envelope, sync, geometry, completedNs)
         else if (currentProfile == null) { currentProfile = profile; expectedFrames = 256; this.dwellEpochs = dwellEpochs }
         noteAnalysis(completedNs, pipelineMs)
         updateCapture(extra)
@@ -200,7 +211,7 @@ class Phase1ObservationRecorder {
     }
 
     private fun resetRunCounters() {
-        seenFrames.fill(false); runStartedNs = 0L; validFrames = 0; innerFecFrames = 0
+        seenFrames.fill(false); runStartedNs = 0L; runEndedNs = 0L; validFrames = 0; innerFecFrames = 0
         uniqueFrames = 0; innovativeBytes = 0; observations = 0
         bitErrorsTotal = 0; erasedBitsTotal = 0; observedBitsTotal = 0
         analyzedFrames = 0; firstAnalysisNs = 0L; lastAnalysisNs = 0L; pipelineMsTotal = 0.0
@@ -253,7 +264,8 @@ class Phase1ObservationRecorder {
 
     @Synchronized
     fun snapshot(nowNs: Long = System.nanoTime()): Phase1RunSnapshot {
-        val elapsed = if (runStartedNs > 0L) (nowNs - runStartedNs).coerceAtLeast(0L) / 1_000_000_000.0 else 0.0
+        val elapsedEnd = if (runEndedNs > 0L) runEndedNs else nowNs
+        val elapsed = if (runStartedNs > 0L) (elapsedEnd - runStartedNs).coerceAtLeast(0L) / 1_000_000_000.0 else 0.0
         val cameraElapsed = if (firstAnalysisNs > 0L) (lastAnalysisNs - firstAnalysisNs).coerceAtLeast(0L) / 1_000_000_000.0 else 0.0
         val sorted = pipelineWindow.copyOf(pipelineWindowCount).apply { sort() }
         val p95 = if (sorted.isEmpty()) 0.0 else sorted[((sorted.size * 0.95).toInt()).coerceAtMost(sorted.lastIndex)]
