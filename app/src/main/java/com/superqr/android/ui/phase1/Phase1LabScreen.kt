@@ -104,12 +104,11 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                             var warmupStartedNs = 0L
                             var resolutionRejected = false
                             var cameraLabel = "CAMERA • 1280×720 target • OpenCV ${openCv.version}"
-                            var latestAcquisition: V7CarrierAcquisitionResult? = null
-                            var measuringRun = false
+                            var previewSuppressed = false
 
-                            fun updateMeasurementState(value: Boolean) {
-                                if (value == measuringRun) return
-                                measuringRun = value
+                            fun updatePreviewSuppression(value: Boolean) {
+                                if (value == previewSuppressed) return
+                                previewSuppressed = value
                                 previewPublisher.setMeasuring(value)
                                 mainExecutor.execute {
                                     if (generation.get() == myGeneration) {
@@ -147,9 +146,8 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                     if (scheduler.path == Phase1AnalysisPath.GRID) {
                                         val acquisition = carrierAcquirer!!.analyze(
                                             luma.bytes, luma.width, luma.height,
-                                            diagnostics = !measuringRun,
+                                            diagnostics = !previewSuppressed,
                                         )
-                                        latestAcquisition = acquisition
                                         val acquisitionDoneNs = System.nanoTime()
                                         val h = acquisition.canonicalToImageHomography
                                         if (h == null) {
@@ -196,7 +194,9 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                             val envelope = sync.envelope
                                             val profile = envelope?.let { manifest.profile(it.profileId) }
                                             if (envelope != null && profile is Phase1Profile.Grid) {
-                                                updateMeasurementState(envelope.state == V7LabRunState.RUNNING)
+                                                updatePreviewSuppression(
+                                                    envelope.state == V7LabRunState.READY || envelope.state == V7LabRunState.RUNNING,
+                                                )
                                                 scheduler.locked(Phase1AnalysisPath.GRID)
                                                 recorder.observeSender(profile, envelope, sync.status, acquisition.source)
                                                 if (envelope.state == V7LabRunState.RUNNING) {
@@ -271,13 +271,33 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                                 )
                                             }
                                         }
+
+                                        // The preview and overlay are produced only from this exact
+                                        // GRID analysis frame and its own acquisition result. Never
+                                        // overlay geometry from a previous GRID frame onto a later QR
+                                        // analysis frame while the search scheduler alternates paths.
+                                        if (!previewSuppressed) {
+                                            val framing = Phase1FramingEvaluator.evaluate(
+                                                luma.width, luma.height, acquisition, manifest.carrierSpec,
+                                            )
+                                            previewPublisher.offer(
+                                                luma.bytes, luma.width, luma.height, framing, arrivalNs,
+                                            ) { preview ->
+                                                mainExecutor.execute {
+                                                    if (generation.get() == myGeneration && !previewSuppressed) alignmentPreview = preview
+                                                    else preview.bitmap?.recycle()
+                                                }
+                                            }
+                                        }
                                     } else {
                                         val qr = qrDecoder!!.analyzeAuto(luma.bytes, luma.width, luma.height, qrExpected)
                                         val completedNs = System.nanoTime()
                                         val envelope = qr.envelope
                                         val profile = envelope?.let { manifest.profile(it.profileId) }
                                         if (envelope != null && profile is Phase1Profile.Qr) {
-                                            updateMeasurementState(envelope.state == V7LabRunState.RUNNING)
+                                            updatePreviewSuppression(
+                                                envelope.state == V7LabRunState.READY || envelope.state == V7LabRunState.RUNNING,
+                                            )
                                             scheduler.locked(Phase1AnalysisPath.QR)
                                             recorder.observeSender(profile, envelope, "QR_LOCKED", "QR_NATIVE")
                                             if (envelope.state == V7LabRunState.RUNNING && qr.valid) {
@@ -319,19 +339,6 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                         }
                                     }
                                     deliveredFrames++
-                                    if (!measuringRun) {
-                                        val framing = Phase1FramingEvaluator.evaluate(
-                                            luma.width, luma.height, latestAcquisition, manifest.carrierSpec,
-                                        )
-                                        previewPublisher.offer(
-                                            luma.bytes, luma.width, luma.height, framing, arrivalNs,
-                                        ) { preview ->
-                                            mainExecutor.execute {
-                                                if (generation.get() == myGeneration && !measuringRun) alignmentPreview = preview
-                                                else preview.bitmap?.recycle()
-                                            }
-                                        }
-                                    }
                                     if (deliveredFrames % 3 == 0) mainExecutor.execute {
                                         if (generation.get() == myGeneration) status = recorder.snapshot()
                                     }
@@ -342,8 +349,9 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                 }
                             }
                             // ImageAnalysis is the only camera output. The UI renders a
-                            // throttled copy of its normalized luma buffer, so no Preview
-                            // viewport can silently diverge or crop the operator's view.
+                            // throttled copy of the same normalized luma buffer and never
+                            // attaches an independent Preview viewport that can crop or
+                            // transform the operator's view differently from the receiver.
                             val base = SessionConfig.Builder(listOf(analysis!!))
                             val info = provider!!.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
                             val ranges = try { info.getSupportedFrameRateRanges(base.build()) } catch (_: Throwable) { emptySet() }

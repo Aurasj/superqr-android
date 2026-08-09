@@ -35,12 +35,22 @@ class Phase1FramingTest {
     }
 
     @Test
+    fun validatedHomographyUsesProjectedVisibilityNotTransientContourCount() {
+        val result = acquisition(homography(scale = 0.60, offsetX = 60.0, offsetY = 340.0)).copy(
+            visibleFinderCount = 1,
+            finderCenters = listOf(doubleArrayOf(130.0, 418.0)),
+        )
+        val framing = Phase1FramingEvaluator.evaluate(720, 1280, result, spec)
+        assertEquals(Phase1FramingStatus.GOOD, framing.status)
+        assertEquals(4, framing.visibleFinders)
+    }
+
+    @Test
     fun validatedCarrierNearFrameEdgeRequiresMovingBack() {
         val result = acquisition(homography(scale = 0.80, offsetX = -55.0, offsetY = 240.0))
         val framing = Phase1FramingEvaluator.evaluate(720, 1280, result, spec)
         assertEquals(Phase1FramingStatus.MOVE_BACK, framing.status)
-        assertEquals(4, framing.visibleFinders)
-        assertTrue(framing.minimumMarginPx!! < framing.safeInsetPx)
+        assertTrue(framing.visibleFinders < 4 || framing.minimumMarginPx!! < framing.safeInsetPx)
     }
 
     @Test

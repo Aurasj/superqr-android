@@ -99,15 +99,22 @@ object Phase1FramingEvaluator {
             val minimumMargin = allFinderPoints.minOfOrNull { point ->
                 minOf(point.x, point.y, frameWidth - 1f - point.x, frameHeight - 1f - point.y)
             }
-            val allVisible = acquisition.visibleFinderCount >= 4 && finderQuads.size == 4 && allFinderPoints.all {
-                it.x in 0f..(frameWidth - 1f) && it.y in 0f..(frameHeight - 1f)
+            val visibleFinderQuads = finderQuads.filter { quad ->
+                quad.all { point -> point.x in 0f..(frameWidth - 1f) && point.y in 0f..(frameHeight - 1f) }
             }
-            val safelyFramed = allVisible && minimumMargin != null && minimumMargin >= safeInset
+            // Once protected sync has validated the homography, projected finder
+            // visibility is more trustworthy for operator framing than the
+            // contour detector's one-frame evidence count. A finder can be fully
+            // inside the camera frame yet temporarily disappear from thresholded
+            // contours under moire/rolling scan.
+            val projectedVisibleFinders = visibleFinderQuads.size
+            val safelyFramed = finderQuads.size == 4 && projectedVisibleFinders == 4 &&
+                minimumMargin != null && minimumMargin >= safeInset
             return Phase1FramingGeometry(
                 frameWidth = frameWidth,
                 frameHeight = frameHeight,
                 status = if (safelyFramed) Phase1FramingStatus.GOOD else Phase1FramingStatus.MOVE_BACK,
-                finderCenters = finderQuads.take(acquisition.visibleFinderCount.coerceAtMost(4)).map { quad -> center(quad) },
+                finderCenters = visibleFinderQuads.map(::center),
                 finderQuads = finderQuads,
                 carrierQuad = carrierQuad,
                 candidateQuad = candidate,
@@ -115,12 +122,10 @@ object Phase1FramingEvaluator {
                 minimumMarginPx = minimumMargin,
                 detail = if (safelyFramed) {
                     "All 4 finders visible with a safe edge margin"
+                } else if (projectedVisibleFinders < 4) {
+                    "Only $projectedVisibleFinders of 4 finder squares are inside the analysis frame"
                 } else {
-                    if (acquisition.visibleFinderCount < 4) {
-                        "Only ${acquisition.visibleFinderCount} of 4 finders are detected"
-                    } else {
-                        "Keep all 4 finder squares inside the dashed safe area"
-                    }
+                    "Keep all 4 finder squares inside the dashed safe area"
                 },
                 source = acquisition.source,
             )
@@ -174,7 +179,7 @@ object Phase1FramingEvaluator {
 }
 
 /** Pure capture gate used to prove preview work is absent during measurement. */
-class Phase1PreviewGate(private val intervalNs: Long = 400_000_000L) {
+class Phase1PreviewGate(private val intervalNs: Long = 125_000_000L) {
     private var lastCaptureNs = Long.MIN_VALUE
     private var inFlight = false
     private var measuring = false

@@ -13,8 +13,9 @@ data class Phase1AnalysisPreview(
 
 /**
  * Bounded, throttled renderer for the exact normalized luma frame analyzed by
- * V7. The analyzer only performs one bounded byte copy; bitmap conversion runs
- * on a dedicated executor and is completely suppressed during RUNNING.
+ * V7. The analyzer performs only one bounded copy into a reusable scratch
+ * buffer; grayscale conversion runs on a dedicated executor and is completely
+ * suppressed during the campaign measurement window.
  */
 class Phase1AnalysisPreviewPublisher(
     private val executor: ExecutorService,
@@ -22,6 +23,8 @@ class Phase1AnalysisPreviewPublisher(
 ) {
     private val measuring = AtomicBoolean(false)
     private var sequence = 0L
+    private var scratchLuma = ByteArray(0)
+    private var scratchPixels = IntArray(0)
 
     fun setMeasuring(value: Boolean) {
         measuring.set(value)
@@ -36,12 +39,20 @@ class Phase1AnalysisPreviewPublisher(
         nowNs: Long,
         deliver: (Phase1AnalysisPreview) -> Unit,
     ) {
+        val required = width * height
+        if (width <= 0 || height <= 0 || required <= 0 || luma.size < required) return
         if (!gate.tryAcquire(nowNs)) return
-        val copy = luma.copyOf(width * height)
+
+        // The analysis luma buffer is reused by CameraX. Copy into one reusable
+        // scratch buffer while the gate owns it; no second preview can enter
+        // until the background renderer releases the gate.
+        if (scratchLuma.size != required) scratchLuma = ByteArray(required)
+        luma.copyInto(scratchLuma, destinationOffset = 0, startIndex = 0, endIndex = required)
+
         executor.execute {
             try {
                 if (measuring.get()) return@execute
-                val bitmap = renderLuma(copy, width, height)
+                val bitmap = renderLuma(scratchLuma, width, height)
                 if (measuring.get()) {
                     bitmap.recycle()
                     return@execute
@@ -57,7 +68,8 @@ class Phase1AnalysisPreviewPublisher(
         val scale = minOf(1.0, MAX_PREVIEW_EDGE.toDouble() / maxOf(width, height))
         val outputWidth = maxOf(1, (width * scale).toInt())
         val outputHeight = maxOf(1, (height * scale).toInt())
-        val pixels = IntArray(outputWidth * outputHeight)
+        val requiredPixels = outputWidth * outputHeight
+        if (scratchPixels.size != requiredPixels) scratchPixels = IntArray(requiredPixels)
         for (y in 0 until outputHeight) {
             if (measuring.get()) break
             val sourceY = (y.toLong() * height / outputHeight).toInt().coerceAtMost(height - 1)
@@ -66,10 +78,10 @@ class Phase1AnalysisPreviewPublisher(
             for (x in 0 until outputWidth) {
                 val sourceX = (x.toLong() * width / outputWidth).toInt().coerceAtMost(width - 1)
                 val value = luma[sourceRow + sourceX].toInt() and 0xFF
-                pixels[outputRow + x] = -0x1000000 or (value shl 16) or (value shl 8) or value
+                scratchPixels[outputRow + x] = -0x1000000 or (value shl 16) or (value shl 8) or value
             }
         }
-        return Bitmap.createBitmap(pixels, outputWidth, outputHeight, Bitmap.Config.RGB_565)
+        return Bitmap.createBitmap(scratchPixels, outputWidth, outputHeight, Bitmap.Config.RGB_565)
     }
 
     private companion object {
