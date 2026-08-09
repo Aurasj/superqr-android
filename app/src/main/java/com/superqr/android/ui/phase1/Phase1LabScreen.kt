@@ -194,9 +194,10 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                             val envelope = sync.envelope
                                             val profile = envelope?.let { manifest.profile(it.profileId) }
                                             if (envelope != null && profile is Phase1Profile.Grid) {
-                                                updatePreviewSuppression(
-                                                    envelope.state == V7LabRunState.READY || envelope.state == V7LabRunState.RUNNING,
-                                                )
+                                                // READY is the operator's alignment guard. Keep the exact
+                                                // analysis preview live there; suppress it only when measured
+                                                // RUNNING data actually begins.
+                                                updatePreviewSuppression(envelope.state == V7LabRunState.RUNNING)
                                                 scheduler.locked(Phase1AnalysisPath.GRID)
                                                 recorder.observeSender(profile, envelope, sync.status, acquisition.source)
                                                 if (envelope.state == V7LabRunState.RUNNING) {
@@ -295,9 +296,7 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                         val envelope = qr.envelope
                                         val profile = envelope?.let { manifest.profile(it.profileId) }
                                         if (envelope != null && profile is Phase1Profile.Qr) {
-                                            updatePreviewSuppression(
-                                                envelope.state == V7LabRunState.READY || envelope.state == V7LabRunState.RUNNING,
-                                            )
+                                            updatePreviewSuppression(envelope.state == V7LabRunState.RUNNING)
                                             scheduler.locked(Phase1AnalysisPath.QR)
                                             recorder.observeSender(profile, envelope, "QR_LOCKED", "QR_NATIVE")
                                             if (envelope.state == V7LabRunState.RUNNING && qr.valid) {
