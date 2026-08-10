@@ -16,11 +16,38 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 
+/**
+ * Session-local frame gate. The token never crosses into CameraManager; it exists only
+ * to prevent an analysis that started before STOP from committing state afterward.
+ */
 internal class SessionFrameGate {
     private var accepting = false
-    @Synchronized fun start() { accepting = true }
-    @Synchronized fun stop() { accepting = false }
-    @Synchronized fun acceptsFrames(): Boolean = accepting
+    private var epoch = 0L
+
+    @Synchronized
+    fun start() {
+        epoch++
+        accepting = true
+    }
+
+    @Synchronized
+    fun stop() {
+        accepting = false
+        epoch++
+    }
+
+    @Synchronized
+    fun acceptsFrames(): Boolean = accepting
+
+    @Synchronized
+    fun enter(): Long? = if (accepting) epoch else null
+
+    @Synchronized
+    fun commitIfCurrent(token: Long, block: () -> Unit): Boolean {
+        if (!accepting || token != epoch) return false
+        block()
+        return true
+    }
 }
 
 class DiagnosticSession(private val context: Context) {
@@ -46,12 +73,15 @@ class DiagnosticSession(private val context: Context) {
 
     fun stopSession() {
         if (!sessionActive) return
+
+        // stop() synchronizes with any result commit currently in progress and bumps
+        // the epoch so analyses that started before STOP can no longer commit afterward.
         frameGate.stop()
         sessionActive = false
 
         // Every explicit Start/Stop cycle must leave a shareable diagnostic artifact,
-        // even when no QR/carrier was ever confirmed. This also keeps COMPLETE stable
-        // until the operator explicitly starts a new session.
+        // even when no QR/carrier was ever confirmed. COMPLETE remains terminal until
+        // the operator explicitly starts a new session.
         if (!recorder.hasLines) {
             recorder.recordFailure(
                 reason = "SESSION_STOP_NO_DETECTION",
@@ -91,103 +121,123 @@ class DiagnosticSession(private val context: Context) {
     }
 
     fun processFrame(frame: CameraFrame) {
-        if (!frameGate.acceptsFrames()) return
+        val frameToken = frameGate.enter() ?: return
+
         if (!Phase1AnalysisPolicy.accepts(frame.width, frame.height)) {
-            updateState { it.copy(error = "Resolution rejected: ${frame.width}x${frame.height}", sourceTransform = frame.sourceTransform) }
+            frameGate.commitIfCurrent(frameToken) {
+                updateState {
+                    it.copy(
+                        error = "Resolution rejected: ${frame.width}x${frame.height}",
+                        sourceTransform = frame.sourceTransform,
+                    )
+                }
+            }
             return
         }
 
         val result = try {
             engine.analyze(frame.lumaBytes, frame.width, frame.height, frame.chromaReader, frame.arrivalNs)
         } catch (t: Throwable) {
-            updateState { it.copy(error = "${t::class.java.simpleName}: ${t.message}", sourceTransform = frame.sourceTransform) }
+            frameGate.commitIfCurrent(frameToken) {
+                updateState {
+                    it.copy(
+                        error = "${t::class.java.simpleName}: ${t.message}",
+                        sourceTransform = frame.sourceTransform,
+                    )
+                }
+            }
             return
         }
 
         val completedNs = System.nanoTime()
-        analysisRate.recordCompletion(completedNs)
-        val analysisFps = analysisRate.computeFps(completedNs)
-        observedFrames++
 
-        result.gridObservation?.let { observation ->
-            recorder.record(
-                profile = observation.profile,
-                dwellEpochs = result.envelope?.dwellEpochs ?: 3,
-                completedNs = completedNs,
-                frameIndex = observation.frameIndex,
-                observedBits = observation.observedBits,
-                bitErrors = observation.bitErrors,
-                erasedBits = observation.erasedBits,
-                frameValid = observation.frameValid,
-                postFecValid = observation.postFecValid,
-                pipelineMs = result.pipelineMs,
-                allocationBytes = 0,
-                gcEvents = 0,
-                envelope = result.envelope,
-                sync = observation.syncStatus,
-                geometry = observation.geometrySource,
-                failureReason = observation.failureReason,
-                errorCellIndexes = observation.errorCellIndexes,
-                errorCellCount = observation.errorCellCount,
-                erasureCellIndexes = observation.erasureCellIndexes,
-                erasureCellCount = observation.erasureCellCount,
-                extra = frameExtras(frame, result, "GRID"),
-            )
-        }
+        // All mutable session/recorder state is committed under the same gate token.
+        // If STOP happened while vision was analyzing this frame, this block is skipped.
+        frameGate.commitIfCurrent(frameToken) {
+            analysisRate.recordCompletion(completedNs)
+            val analysisFps = analysisRate.computeFps(completedNs)
+            observedFrames++
 
-        result.qrObservation?.let { observation ->
-            val envelope = requireNotNull(result.envelope) { "QR observation must carry its validated run envelope" }
-            recorder.observeSender(observation.profile, envelope, "QR_LOCKED", observation.geometrySource)
-            recorder.record(
-                profile = observation.profile,
-                dwellEpochs = envelope.dwellEpochs,
-                completedNs = completedNs,
-                frameIndex = observation.frameIndex,
-                observedBits = observation.profile.frameBytes * 8,
-                bitErrors = 0,
-                erasedBits = 0,
-                frameValid = true,
-                postFecValid = true,
-                pipelineMs = result.pipelineMs,
-                allocationBytes = 0,
-                gcEvents = 0,
-                envelope = envelope,
-                sync = "QR_LOCKED",
-                geometry = observation.geometrySource,
-                extra = frameExtras(frame, result, "QR"),
-            )
-        }
-
-        if (result.gridObservation == null && result.qrObservation == null && observedFrames % 15 == 0) {
-            val failureReason = when (result.path) {
-                Phase1AnalysisPath.GRID -> result.carrierAcquisition?.bestSyncStatus ?: "GRID_NO_CANDIDATE"
-                Phase1AnalysisPath.QR -> result.qrResult?.failure ?: "QR_NOT_DECODED"
+            result.gridObservation?.let { observation ->
+                recorder.record(
+                    profile = observation.profile,
+                    dwellEpochs = result.envelope?.dwellEpochs ?: 3,
+                    completedNs = completedNs,
+                    frameIndex = observation.frameIndex,
+                    observedBits = observation.observedBits,
+                    bitErrors = observation.bitErrors,
+                    erasedBits = observation.erasedBits,
+                    frameValid = observation.frameValid,
+                    postFecValid = observation.postFecValid,
+                    pipelineMs = result.pipelineMs,
+                    allocationBytes = 0,
+                    gcEvents = 0,
+                    envelope = result.envelope,
+                    sync = observation.syncStatus,
+                    geometry = observation.geometrySource,
+                    failureReason = observation.failureReason,
+                    errorCellIndexes = observation.errorCellIndexes,
+                    errorCellCount = observation.errorCellCount,
+                    erasureCellIndexes = observation.erasureCellIndexes,
+                    erasureCellCount = observation.erasureCellCount,
+                    extra = frameExtras(frame, result, "GRID"),
+                )
             }
-            recorder.recordFailure(
-                failureReason,
-                completedNs,
-                result.pipelineMs,
-                result.trackingState.name,
-                result.schedulerState,
-                frameExtras(frame, result, result.path.name),
-            )
-        }
 
-        updateState {
-            it.copy(
-                phase = derivePhase(result),
-                trackingState = result.trackingState,
-                framing = result.framing,
-                sourceTransform = frame.sourceTransform,
-                profileName = result.profileName,
-                cameraFps = frame.cameraFps,
-                analysisFps = analysisFps,
-                pipelineMs = result.pipelineMs,
-                analyzedFrames = observedFrames,
-                hasObservations = recorder.hasLines,
-                campaignId = recorder.campaignId,
-                error = result.qrResult?.failure,
-            )
+            result.qrObservation?.let { observation ->
+                val envelope = requireNotNull(result.envelope) { "QR observation must carry its validated run envelope" }
+                recorder.observeSender(observation.profile, envelope, "QR_LOCKED", observation.geometrySource)
+                recorder.record(
+                    profile = observation.profile,
+                    dwellEpochs = envelope.dwellEpochs,
+                    completedNs = completedNs,
+                    frameIndex = observation.frameIndex,
+                    observedBits = observation.profile.frameBytes * 8,
+                    bitErrors = 0,
+                    erasedBits = 0,
+                    frameValid = true,
+                    postFecValid = true,
+                    pipelineMs = result.pipelineMs,
+                    allocationBytes = 0,
+                    gcEvents = 0,
+                    envelope = envelope,
+                    sync = "QR_LOCKED",
+                    geometry = observation.geometrySource,
+                    extra = frameExtras(frame, result, "QR"),
+                )
+            }
+
+            if (result.gridObservation == null && result.qrObservation == null && observedFrames % 15 == 0) {
+                val failureReason = when (result.path) {
+                    Phase1AnalysisPath.GRID -> result.carrierAcquisition?.bestSyncStatus ?: "GRID_NO_CANDIDATE"
+                    Phase1AnalysisPath.QR -> result.qrResult?.failure ?: "QR_NOT_DECODED"
+                }
+                recorder.recordFailure(
+                    failureReason,
+                    completedNs,
+                    result.pipelineMs,
+                    result.trackingState.name,
+                    result.schedulerState,
+                    frameExtras(frame, result, result.path.name),
+                )
+            }
+
+            updateState {
+                it.copy(
+                    phase = derivePhase(result),
+                    trackingState = result.trackingState,
+                    framing = result.framing,
+                    sourceTransform = frame.sourceTransform,
+                    profileName = result.profileName,
+                    cameraFps = frame.cameraFps,
+                    analysisFps = analysisFps,
+                    pipelineMs = result.pipelineMs,
+                    analyzedFrames = observedFrames,
+                    hasObservations = recorder.hasLines,
+                    campaignId = recorder.campaignId,
+                    error = result.qrResult?.failure,
+                )
+            }
         }
     }
 
