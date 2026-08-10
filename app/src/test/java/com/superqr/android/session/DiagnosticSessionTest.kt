@@ -10,7 +10,21 @@ import org.junit.Test
 
 class DiagnosticSessionTest {
 
-    // ---- SessionPhase ----
+    @Test
+    fun `session frame gate survives repeated start stop cycles`() {
+        val gate = SessionFrameGate()
+        assertFalse(gate.acceptsFrames())
+
+        repeat(3) {
+            gate.start()
+            assertTrue(gate.acceptsFrames())
+            gate.stop()
+            assertFalse(gate.acceptsFrames())
+        }
+
+        gate.start()
+        assertTrue(gate.acceptsFrames())
+    }
 
     @Test
     fun `all phases have non-empty labels`() {
@@ -25,8 +39,6 @@ class DiagnosticSessionTest {
         assertEquals(labels.size, labels.distinct().size)
     }
 
-    // ---- SessionState defaults ----
-
     @Test
     fun `initial state is IDLE with empty framing`() {
         val state = SessionState()
@@ -38,6 +50,7 @@ class DiagnosticSessionTest {
         assertEquals(0, state.analyzedFrames)
         assertFalse(state.hasObservations)
         assertTrue(state.campaignId.isEmpty())
+        assertTrue(state.sourceTransform == null)
     }
 
     @Test
@@ -60,8 +73,6 @@ class DiagnosticSessionTest {
         assertEquals(42, state.analyzedFrames)
     }
 
-    // ---- Phase derivation semantics ----
-
     @Test
     fun `GRID_LOCKED and RECEIVING have distinct labels`() {
         assertTrue(SessionPhase.GRID_LOCKED.label != SessionPhase.RECEIVING.label)
@@ -69,7 +80,6 @@ class DiagnosticSessionTest {
 
     @Test
     fun `QR phases are separate from GRID phases`() {
-        // QR_DETECTED and QR_LOCKED are separate from GRID_DETECTED and GRID_LOCKED
         val qrPhases = setOf(SessionPhase.QR_DETECTED, SessionPhase.QR_LOCKED)
         val gridPhases = setOf(SessionPhase.GRID_DETECTED, SessionPhase.GRID_LOCKED)
         assertTrue(qrPhases.intersect(gridPhases).isEmpty())
@@ -79,12 +89,9 @@ class DiagnosticSessionTest {
     fun `LOST and REACQUIRING form a recovery sequence`() {
         assertNotNull(SessionPhase.LOST)
         assertNotNull(SessionPhase.REACQUIRING)
-        // After LOST, REACQUIRING is the next natural state
         assertEquals("Lost", SessionPhase.LOST.label)
         assertEquals("Reacquiring", SessionPhase.REACQUIRING.label)
     }
-
-    // ---- SessionState copy semantics ----
 
     @Test
     fun `session state copy preserves unrelated fields`() {
@@ -111,8 +118,6 @@ class DiagnosticSessionTest {
         assertFalse(withoutObs.hasObservations)
     }
 
-    // ---- FramingGeometry ----
-
     @Test
     fun `empty framing geometry reports no finders`() {
         val geom = Phase1FramingGeometry.empty()
@@ -129,8 +134,6 @@ class DiagnosticSessionTest {
         )
         assertEquals(Phase1TrackingState.TRACKING, geom.trackingState)
     }
-
-    // ---- TrackingState from source strings ----
 
     @Test
     fun `V7_SYNC_TRACKED maps to TRACKING`() {

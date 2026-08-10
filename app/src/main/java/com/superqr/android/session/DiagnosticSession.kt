@@ -16,6 +16,28 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 
+/**
+ * Session-owned frame gate. CameraX callback generations deliberately do not
+ * cross this boundary: camera restart bookkeeping and campaign lifecycle are
+ * independent concerns.
+ */
+internal class SessionFrameGate {
+    private var accepting = false
+
+    @Synchronized
+    fun start() {
+        accepting = true
+    }
+
+    @Synchronized
+    fun stop() {
+        accepting = false
+    }
+
+    @Synchronized
+    fun acceptsFrames(): Boolean = accepting
+}
+
 class DiagnosticSession(
     private val context: Context,
     private val cacheDir: File,
@@ -27,42 +49,56 @@ class DiagnosticSession(
     private val engine by lazy { VisionEngine(manifest) }
     private val recorder = Phase1ObservationRecorder()
     private val analysisRate = V7AnalysisRateAccumulator(64)
+    private val frameGate = SessionFrameGate()
 
     private var wasTracking = false
     private var wasLost = false
-    private var generation = 0
     private var observedFrames = 0
+    private var hasRecordedObservations = false
 
     fun startSession() {
-        reset()
-        generation++
-        recorder.reset()
-        _sessionState.value = SessionState(phase = SessionPhase.SEARCHING)
+        resetForNewSession()
+        frameGate.start()
+        _sessionState.value = SessionState(
+            phase = SessionPhase.SEARCHING,
+            campaignId = recorder.campaignId,
+        )
     }
 
     fun stopSession() {
+        frameGate.stop()
         val current = _sessionState.value
         _sessionState.value = current.copy(
-            phase = if (current.hasObservations) SessionPhase.COMPLETE
-                    else SessionPhase.IDLE,
+            phase = if (current.hasObservations) SessionPhase.COMPLETE else SessionPhase.IDLE,
         )
     }
 
     fun reset() {
+        frameGate.stop()
+        resetForNewSession()
+    }
+
+    private fun resetForNewSession() {
         engine.reset()
         recorder.reset()
         analysisRate.reset()
         wasTracking = false
         wasLost = false
         observedFrames = 0
-        _sessionState.value = SessionState()
+        hasRecordedObservations = false
+        _sessionState.value = SessionState(campaignId = recorder.campaignId)
     }
 
     fun processFrame(frame: CameraFrame) {
-        if (frame.generation != generation) return
+        if (!frameGate.acceptsFrames()) return
 
         if (!Phase1AnalysisPolicy.accepts(frame.width, frame.height)) {
-            updateState { it.copy(error = "Resolution rejected: ${frame.width}x${frame.height}") }
+            updateState {
+                it.copy(
+                    error = "Resolution rejected: ${frame.width}x${frame.height}",
+                    sourceTransform = frame.sourceTransform,
+                )
+            }
             return
         }
 
@@ -76,7 +112,12 @@ class DiagnosticSession(
                 arrivalNs = arrivalNs,
             )
         } catch (t: Throwable) {
-            updateState { it.copy(error = "${t::class.java.simpleName}: ${t.message}") }
+            updateState {
+                it.copy(
+                    error = "${t::class.java.simpleName}: ${t.message}",
+                    sourceTransform = frame.sourceTransform,
+                )
+            }
             return
         }
 
@@ -86,7 +127,6 @@ class DiagnosticSession(
 
         observedFrames++
 
-        // Record observations
         val gridObs = result.gridObservation
         if (gridObs != null) {
             recorder.record(
@@ -119,6 +159,7 @@ class DiagnosticSession(
                     "pipeline_ms" to result.pipelineMs,
                 ),
             )
+            hasRecordedObservations = true
         }
 
         val qrObs = result.qrObservation
@@ -131,7 +172,7 @@ class DiagnosticSession(
             )
             recorder.record(
                 profile = qrObs.profile,
-                dwellEpochs = result.envelope!!.dwellEpochs,
+                dwellEpochs = result.envelope.dwellEpochs,
                 completedNs = completedNs,
                 frameIndex = qrObs.frameIndex,
                 observedBits = qrObs.profile.frameBytes * 8,
@@ -152,12 +193,11 @@ class DiagnosticSession(
                     "analysis_path" to "QR",
                 ),
             )
+            hasRecordedObservations = true
         }
 
-        // If neither observation but we got a carrier candidate or QR detection,
-        // record a failure for diagnostics.
-        if (gridObs == null && qrObs == null && observedFrames > 0 && observedFrames % 15 == 0) {
-            // Periodic diagnostic failure recording during search
+        // Keep search diagnostics bounded until the forensic recorder lands.
+        if (gridObs == null && qrObs == null && observedFrames % 15 == 0) {
             val failureReason = when (result.path) {
                 Phase1AnalysisPath.GRID -> result.carrierAcquisition?.bestSyncStatus ?: "GRID_NO_CANDIDATE"
                 Phase1AnalysisPath.QR -> result.qrResult?.failure ?: "QR_NOT_DECODED"
@@ -175,6 +215,7 @@ class DiagnosticSession(
                     "acquisition_state" to result.schedulerState,
                 ),
             )
+            hasRecordedObservations = true
         }
 
         val phase = derivePhase(result)
@@ -184,12 +225,13 @@ class DiagnosticSession(
                 phase = phase,
                 trackingState = result.trackingState,
                 framing = result.framing,
+                sourceTransform = frame.sourceTransform,
                 profileName = result.profileName,
                 cameraFps = frame.cameraFps,
                 analysisFps = analysisFps,
                 pipelineMs = result.pipelineMs,
                 analyzedFrames = observedFrames,
-                hasObservations = recorder.jsonLinesForTest().isNotEmpty(),
+                hasObservations = hasRecordedObservations,
                 campaignId = recorder.campaignId,
                 error = result.qrResult?.failure,
             )
@@ -200,8 +242,7 @@ class DiagnosticSession(
         when (result.path) {
             Phase1AnalysisPath.GRID -> {
                 if (result.carrierAcquisition == null) {
-                    val next = if (wasTracking || wasLost) SessionPhase.LOST
-                    else SessionPhase.SEARCHING
+                    val next = if (wasTracking || wasLost) SessionPhase.LOST else SessionPhase.SEARCHING
                     wasTracking = false
                     wasLost = true
                     return next
@@ -216,7 +257,6 @@ class DiagnosticSession(
                 wasLost = false
 
                 if (!result.carrierAcquisition.acquired) return SessionPhase.SEARCHING
-
                 if (result.envelope == null) return SessionPhase.GRID_DETECTED
 
                 if (result.envelope.state == com.superqr.android.vision.v7_capacity_lab.V7LabRunState.RUNNING) {
@@ -225,6 +265,7 @@ class DiagnosticSession(
 
                 return SessionPhase.GRID_LOCKED
             }
+
             Phase1AnalysisPath.QR -> {
                 val qr = result.qrResult
                 if (qr == null) {
@@ -245,29 +286,27 @@ class DiagnosticSession(
                     return SessionPhase.QR_DETECTED
                 }
 
-                // QR path but no decode: evaluate framing
                 wasTracking = result.framing.trackingState == Phase1TrackingState.TRACKING
                 wasLost = !wasTracking
 
-                val qrQuad = result.qrResult?.quad
+                val qrQuad = qr.quad
                 return if (qrQuad != null && qrQuad.size == 4) {
                     SessionPhase.QR_DETECTED
+                } else if (wasTracking || wasLost) {
+                    SessionPhase.LOST
                 } else {
-                    if (wasTracking || wasLost) SessionPhase.LOST
-                    else SessionPhase.SEARCHING
+                    SessionPhase.SEARCHING
                 }
             }
         }
     }
 
-    fun shareSession(context: Context): File {
-        return recorder.exportAndShare(context)
-    }
+    fun shareSession(context: Context): File = recorder.exportAndShare(context)
 
     fun snapshot(): Phase1RunSnapshot = recorder.snapshot()
 
     fun exportDebugBundle(context: Context): File? {
-        if (!recorder.jsonLinesForTest().any()) return null
+        if (!hasRecordedObservations) return null
         return recorder.exportAndShare(context)
     }
 
@@ -276,6 +315,7 @@ class DiagnosticSession(
     }
 
     fun close() {
+        frameGate.stop()
         engine.close()
     }
 }

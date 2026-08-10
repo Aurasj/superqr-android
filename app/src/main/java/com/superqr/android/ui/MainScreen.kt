@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.view.transform.OutputTransform
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -53,9 +54,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.superqr.android.camera.CameraManager
 import com.superqr.android.camera.CameraStatus
+import com.superqr.android.camera.CoordinateMapper
 import com.superqr.android.diagnostics.SessionExporter
 import com.superqr.android.session.DiagnosticSession
 import com.superqr.android.session.SessionPhase
+import com.superqr.android.ui.phase1.Phase1FramePoint
 import com.superqr.android.ui.phase1.Phase1FramingGeometry
 import java.io.File
 import java.util.concurrent.ExecutorService
@@ -92,9 +95,7 @@ fun MainScreen(
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP &&
-                cameraStatus == CameraStatus.RUNNING
-            ) {
+            if (event == Lifecycle.Event.ON_STOP && cameraStatus == CameraStatus.RUNNING) {
                 cameraManager.stop()
                 session.stopSession()
             }
@@ -143,11 +144,9 @@ fun MainScreen(
                 return@Column
             }
 
-            // Camera preview card (16:9) with overlay
             val framing = sessionState.framing
-            Box(
-                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-            ) {
+            val previewTargetTransform = cameraManager.previewView.outputTransform
+            Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
                 Card(
                     modifier = Modifier.fillMaxSize(),
                     shape = RoundedCornerShape(12.dp),
@@ -158,23 +157,21 @@ fun MainScreen(
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
-                // Preview geometry overlay: draw detected quad on top
+
                 if (framing.carrierQuad != null || framing.candidateQuad != null) {
                     PreviewOverlay(
                         framing = framing,
+                        sourceTransform = sessionState.sourceTransform,
+                        targetTransform = previewTargetTransform,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
 
             Spacer(Modifier.height(8.dp))
-
-            // Status bar
             StatusBar(phase = sessionState.phase, profileName = sessionState.profileName)
-
             Spacer(Modifier.height(8.dp))
 
-            // Live metrics
             MetricsRow(
                 cameraFps = sessionState.cameraFps,
                 analysisFps = sessionState.analysisFps,
@@ -184,9 +181,7 @@ fun MainScreen(
 
             Spacer(Modifier.height(12.dp))
 
-            // Control buttons
-            val isRunning = cameraStatus == CameraStatus.RUNNING ||
-                cameraStatus == CameraStatus.STARTING
+            val isRunning = cameraStatus == CameraStatus.RUNNING || cameraStatus == CameraStatus.STARTING
 
             if (!isRunning && sessionState.phase == SessionPhase.COMPLETE) {
                 Column(
@@ -207,7 +202,11 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("Campaign: ${sessionState.campaignId.take(8)}", color = Color.White, fontWeight = FontWeight.Bold)
+                            Text(
+                                "Campaign: ${sessionState.campaignId.take(8)}",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                            )
                             Text(
                                 "${sessionState.analyzedFrames} frames analyzed",
                                 color = Color.White.copy(alpha = 0.7f),
@@ -235,9 +234,7 @@ fun MainScreen(
                                 cameraManager.stop()
                                 session.stopSession()
                             },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFE53935)
-                            ),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE53935)),
                         ) {
                             Text("STOP CAMERA", fontWeight = FontWeight.Bold)
                         }
@@ -247,9 +244,7 @@ fun MainScreen(
                                 session.startSession()
                                 cameraManager.start(lifecycleOwner)
                             },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF43A047)
-                            ),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF43A047)),
                         ) {
                             Text("START CAMERA", fontWeight = FontWeight.Bold)
                         }
@@ -259,7 +254,6 @@ fun MainScreen(
 
             Spacer(Modifier.height(12.dp))
 
-            // Collapsible diagnostics
             TextButton(onClick = { showDiagnostics = !showDiagnostics }) {
                 Text(
                     if (showDiagnostics) "Hide Diagnostics" else "Show Diagnostics",
@@ -283,56 +277,50 @@ fun MainScreen(
 @Composable
 private fun PreviewOverlay(
     framing: Phase1FramingGeometry,
+    sourceTransform: OutputTransform?,
+    targetTransform: OutputTransform?,
     modifier: Modifier = Modifier,
 ) {
     val quad = framing.carrierQuad ?: framing.candidateQuad
-    if (quad == null || quad.size != 4) return
+    if (quad == null || quad.size != 4 || sourceTransform == null || targetTransform == null) return
+
+    val mappedQuad = mapFramePoints(quad, sourceTransform, targetTransform) ?: return
+    val mappedFinders = framing.finderCenters.take(4).mapNotNull { point ->
+        CoordinateMapper.mapPoint(sourceTransform, targetTransform, point.x, point.y)?.let {
+            Offset(it.first, it.second)
+        }
+    }
 
     Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-
-        // Map analysis-space points to preview view space.
-        // The framing geometry points are in analysis (luma) coordinates.
-        // PreviewView uses FIT_CENTER, so we need to apply the same transform
-        // that Phase1FrameFit would compute.
-        if (framing.frameWidth <= 0 || framing.frameHeight <= 0) return@Canvas
-
-        val scale = minOf(w / framing.frameWidth, h / framing.frameHeight)
-        val renderedW = framing.frameWidth * scale
-        val renderedH = framing.frameHeight * scale
-        val offsetX = (w - renderedW) * 0.5f
-        val offsetY = (h - renderedH) * 0.5f
-
-        val mappedPoints = quad.map { pt ->
-            Offset(
-                offsetX + pt.x * scale,
-                offsetY + pt.y * scale,
-            )
-        }
-
-        // Draw quad outline
         val path = Path().apply {
-            moveTo(mappedPoints[0].x, mappedPoints[0].y)
-            for (i in 1 until mappedPoints.size) {
-                lineTo(mappedPoints[i].x, mappedPoints[i].y)
-            }
+            moveTo(mappedQuad[0].x, mappedQuad[0].y)
+            for (i in 1 until mappedQuad.size) lineTo(mappedQuad[i].x, mappedQuad[i].y)
             close()
         }
         drawPath(path, color = Color(0xFF7CB7FF), style = Stroke(width = 2.5f))
 
-        // Draw corner dots
-        for (pt in mappedPoints) {
-            drawCircle(Color.White, radius = 4f, center = pt)
+        for (point in mappedQuad) {
+            drawCircle(Color.White, radius = 4f, center = point)
         }
-
-        // Draw finder centers
-        for (center in framing.finderCenters.take(4)) {
-            val cx = offsetX + center.x * scale
-            val cy = offsetY + center.y * scale
-            drawCircle(Color(0xFFF2CC60), radius = 3f, center = Offset(cx, cy))
+        for (point in mappedFinders) {
+            drawCircle(Color(0xFFF2CC60), radius = 3f, center = point)
         }
     }
+}
+
+private fun mapFramePoints(
+    points: List<Phase1FramePoint>,
+    sourceTransform: OutputTransform,
+    targetTransform: OutputTransform,
+): List<Offset>? {
+    if (points.isEmpty()) return emptyList()
+    val raw = FloatArray(points.size * 2)
+    points.forEachIndexed { index, point ->
+        raw[index * 2] = point.x
+        raw[index * 2 + 1] = point.y
+    }
+    if (!CoordinateMapper.mapPoints(sourceTransform, targetTransform, raw)) return null
+    return List(points.size) { index -> Offset(raw[index * 2], raw[index * 2 + 1]) }
 }
 
 @Composable
@@ -342,11 +330,9 @@ private fun StatusBar(
 ) {
     val phaseColor = when (phase) {
         SessionPhase.SEARCHING -> Color(0xFFF2CC60)
-        SessionPhase.QR_DETECTED -> Color(0xFF7CB7FF)
-        SessionPhase.QR_LOCKED -> Color(0xFF7CB7FF)
+        SessionPhase.QR_DETECTED, SessionPhase.QR_LOCKED -> Color(0xFF7CB7FF)
         SessionPhase.GRID_DETECTED -> Color(0xFF7CB7FF)
-        SessionPhase.GRID_LOCKED -> Color(0xFF7EE787)
-        SessionPhase.RECEIVING -> Color(0xFF7EE787)
+        SessionPhase.GRID_LOCKED, SessionPhase.RECEIVING -> Color(0xFF7EE787)
         SessionPhase.LOST, SessionPhase.REACQUIRING -> Color(0xFFFF7B72)
         SessionPhase.COMPLETE -> Color(0xFF7EE787)
         else -> Color.White.copy(alpha = 0.55f)
@@ -422,16 +408,14 @@ private fun DiagnosticsPanel(
     ) {
         SectionHeader("Session")
         Text(
-            "Campaign: ${sessionState.campaignId.take(8)} · " +
-                "Frames: ${sessionState.analyzedFrames}",
+            "Campaign: ${sessionState.campaignId.take(8)} · Frames: ${sessionState.analyzedFrames}",
             color = Color.White.copy(alpha = 0.7f),
             fontSize = 12.sp,
         )
 
         SectionHeader("Tracking")
         Text(
-            "State: ${sessionState.trackingState.label} · " +
-                "Path: ${sessionState.profileName}",
+            "State: ${sessionState.trackingState.label} · Path: ${sessionState.profileName}",
             color = Color.White.copy(alpha = 0.7f),
             fontSize = 12.sp,
         )
@@ -439,7 +423,9 @@ private fun DiagnosticsPanel(
         SectionHeader("Performance")
         Text(
             "Pipeline: %.1f ms · Camera: %.1f fps · Analysis: %.1f fps".format(
-                sessionState.pipelineMs, sessionState.cameraFps, sessionState.analysisFps,
+                sessionState.pipelineMs,
+                sessionState.cameraFps,
+                sessionState.analysisFps,
             ),
             color = Color.White.copy(alpha = 0.7f),
             fontSize = 12.sp,
@@ -448,10 +434,8 @@ private fun DiagnosticsPanel(
         if (snapshot.observations > 0) {
             SectionHeader("Observations")
             Text(
-                "Observed: ${snapshot.observations} · " +
-                    "Valid: ${snapshot.validFrames} · " +
-                    "Unique: ${snapshot.uniqueFrames} · " +
-                    "FEC valid: ${snapshot.innerFecFrames}",
+                "Observed: ${snapshot.observations} · Valid: ${snapshot.validFrames} · " +
+                    "Unique: ${snapshot.uniqueFrames} · FEC valid: ${snapshot.innerFecFrames}",
                 color = Color.White.copy(alpha = 0.7f),
                 fontSize = 12.sp,
             )
@@ -466,7 +450,7 @@ private fun DiagnosticsPanel(
             )
         }
 
-        if (!snapshot.failureSummary.isNullOrEmpty()) {
+        if (snapshot.failureSummary.isNotEmpty()) {
             SectionHeader("Failures")
             Text(
                 snapshot.failureSummary,

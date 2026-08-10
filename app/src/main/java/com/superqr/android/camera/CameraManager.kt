@@ -33,7 +33,6 @@ data class CameraFrame(
     val sensorTimestamp: Long,
     val arrivalNs: Long,
     val cameraFps: Double,
-    val generation: Int,
 )
 
 enum class CameraStatus { IDLE, STARTING, RUNNING, STOPPING, ERROR }
@@ -59,6 +58,10 @@ class CameraManager(
     private var provider: ProcessCameraProvider? = null
     private var boundAnalysis: ImageAnalysis? = null
     private var boundCamera: Camera? = null
+
+    // This token belongs to CameraManager only. It invalidates callbacks and
+    // analyzer frames from an older CameraX binding; it is never exposed to the
+    // session/vision layers.
     private val generation = AtomicInteger(0)
     private val cameraDeliveredRate = V7AnalysisRateAccumulator(64)
     private val transforms = ImageProxyTransformFactory().apply {
@@ -75,26 +78,35 @@ class CameraManager(
     }
 
     fun start(lifecycleOwner: LifecycleOwner) {
-        if (_status.value == CameraStatus.RUNNING) return
+        if (_status.value == CameraStatus.RUNNING || _status.value == CameraStatus.STARTING) return
         _status.value = CameraStatus.STARTING
-        generation.incrementAndGet()
+        _resolutionLabel.value = ""
+        val requestedGeneration = generation.incrementAndGet()
 
         val executor = ContextCompat.getMainExecutor(context)
         executor.execute {
             try {
                 val p = ProcessCameraProvider.getInstance(context).get()
+                if (generation.get() != requestedGeneration || _status.value != CameraStatus.STARTING) {
+                    return@execute
+                }
                 provider = p
                 previewView.doOnLayout {
-                    if (_status.value != CameraStatus.STARTING) return@doOnLayout
-                    bindCamera(p, lifecycleOwner)
+                    if (generation.get() != requestedGeneration || _status.value != CameraStatus.STARTING) {
+                        return@doOnLayout
+                    }
+                    bindCamera(p, lifecycleOwner, requestedGeneration)
                 }
-            } catch (e: Throwable) {
-                _status.value = CameraStatus.ERROR
+            } catch (_: Throwable) {
+                if (generation.get() == requestedGeneration) {
+                    _status.value = CameraStatus.ERROR
+                }
             }
         }
     }
 
     fun stop() {
+        if (_status.value == CameraStatus.IDLE) return
         _status.value = CameraStatus.STOPPING
         generation.incrementAndGet()
         boundAnalysis?.clearAnalyzer()
@@ -103,6 +115,7 @@ class CameraManager(
             provider?.unbindAll()
         } catch (_: Throwable) {}
         boundCamera = null
+        _cameraFps.value = 0.0
         _status.value = CameraStatus.IDLE
     }
 
@@ -111,7 +124,13 @@ class CameraManager(
         onFrame = null
     }
 
-    private fun bindCamera(provider: ProcessCameraProvider, lifecycleOwner: LifecycleOwner) {
+    private fun bindCamera(
+        provider: ProcessCameraProvider,
+        lifecycleOwner: LifecycleOwner,
+        configuredGeneration: Int,
+    ) {
+        if (generation.get() != configuredGeneration || _status.value != CameraStatus.STARTING) return
+
         try {
             provider.unbindAll()
 
@@ -139,46 +158,67 @@ class CameraManager(
                 .setResolutionSelector(resolutionSelector)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-            boundAnalysis = analysis
 
+            // A shared ViewPort is a correctness requirement for Phase 0. If it
+            // is unavailable we refuse to claim a running camera rather than
+            // silently running analysis with a lying/missing preview.
             val viewPort = pv.viewPort
-            val useCases = if (viewPort != null) listOf(preview, analysis) else listOf(analysis)
+            if (viewPort == null) {
+                _resolutionLabel.value = "VIEWPORT UNAVAILABLE"
+                _status.value = CameraStatus.ERROR
+                return
+            }
 
+            val useCases = listOf(preview, analysis)
             val info = provider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
-            val base = SessionConfig.Builder(useCases).apply {
-                if (viewPort != null) setViewPort(viewPort)
-            }.build()
+            val base = SessionConfig.Builder(useCases)
+                .apply { setViewPort(viewPort) }
+                .build()
             val ranges = try {
                 info.getSupportedFrameRateRanges(base)
-            } catch (_: Throwable) { emptySet() }
+            } catch (_: Throwable) {
+                emptySet()
+            }
 
             val chosen = ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
                 ?: ranges.filter { it.lower <= 30 && it.upper >= 30 }
                     .minByOrNull { it.upper - it.lower }
 
             val config = SessionConfig.Builder(useCases).apply {
-                if (viewPort != null) setViewPort(viewPort)
+                setViewPort(viewPort)
                 if (chosen != null) setFrameRateRange(chosen)
             }.build()
 
             val luma = LumaFrameBuffer()
             val chromaBuffers = ChromaSampleBuffers()
             val chromaReader = ImageProxyChromaSampler(chromaBuffers)
-            val configuredGen = generation.get()
 
             analysis.setAnalyzer(analysisExecutor) { image ->
-                processFrame(image, luma, chromaReader, configuredGen)
+                processFrame(image, luma, chromaReader, configuredGeneration)
             }
+            boundAnalysis = analysis
 
             boundCamera = provider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 config,
             )
-            _resolutionLabel.value = "${TARGET_WIDTH}x${TARGET_HEIGHT}"
+
+            if (generation.get() != configuredGeneration) {
+                analysis.clearAnalyzer()
+                provider.unbindAll()
+                return
+            }
+
+            _resolutionLabel.value = "${TARGET_WIDTH}x${TARGET_HEIGHT} target"
             _status.value = CameraStatus.RUNNING
-        } catch (e: Throwable) {
-            _status.value = CameraStatus.ERROR
+        } catch (_: Throwable) {
+            boundAnalysis?.clearAnalyzer()
+            boundAnalysis = null
+            try { provider.unbindAll() } catch (_: Throwable) {}
+            if (generation.get() == configuredGeneration) {
+                _status.value = CameraStatus.ERROR
+            }
         }
     }
 
@@ -186,10 +226,12 @@ class CameraManager(
         image: androidx.camera.core.ImageProxy,
         luma: LumaFrameBuffer,
         chroma: ImageProxyChromaSampler,
-        configuredGen: Int,
+        configuredGeneration: Int,
     ) {
-        val gen = generation.get()
-        if (gen != configuredGen) { image.close(); return }
+        if (generation.get() != configuredGeneration) {
+            image.close()
+            return
+        }
 
         val sensorTs = image.imageInfo.timestamp
         val arrivalNs = System.nanoTime()
@@ -205,24 +247,29 @@ class CameraManager(
             }
 
             if (!luma.packFrom(image)) return
+            _resolutionLabel.value = "${luma.width}x${luma.height}"
             chroma.bind(image)
 
             val sourceTx = try {
                 transforms.getOutputTransform(image)
-            } catch (_: Throwable) { null }
+            } catch (_: Throwable) {
+                null
+            } ?: return
 
-            val frame = CameraFrame(
-                lumaBytes = luma.bytes,
-                width = luma.width,
-                height = luma.height,
-                sourceTransform = sourceTx ?: return,
-                chromaReader = chroma,
-                sensorTimestamp = sensorTs,
-                arrivalNs = arrivalNs,
-                cameraFps = deliveredFps,
-                generation = gen,
+            if (generation.get() != configuredGeneration) return
+
+            onFrame?.invoke(
+                CameraFrame(
+                    lumaBytes = luma.bytes,
+                    width = luma.width,
+                    height = luma.height,
+                    sourceTransform = sourceTx,
+                    chromaReader = chroma,
+                    sensorTimestamp = sensorTs,
+                    arrivalNs = arrivalNs,
+                    cameraFps = deliveredFps,
+                )
             )
-            onFrame?.invoke(frame)
         } finally {
             image.close()
         }
