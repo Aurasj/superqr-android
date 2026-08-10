@@ -24,21 +24,15 @@ data class V7Phase1QrResult(
 )
 
 /**
- * Binary-safe OpenCV QR control decoder with a bounded ZXing fallback for dense QR.
+ * Binary-safe Phase 1 QR control decoder.
  *
- * OpenCV remains the first payload path. When it finds native QR geometry but cannot
- * decode the payload, Phase 1 passes its finite known QR dimensions to ZXing. ZXing
- * keeps its measured finder/alignment geometry but can correct an adjacent-version
- * module-count mistake before Reed-Solomon decode.
+ * A frame-scoped native decoder may supply bytes directly from the CameraX Y plane.
+ * When that succeeds, OpenCV performs geometry detection only; payload validation is
+ * still the same SuperQR length/header/run-envelope/CRC contract below. This keeps
+ * the proven OpenCV presentation geometry without paying its dense QR decode cost.
  *
- * ArUco is a geometry fallback only when standard OpenCV found no QR quadrangle.
- * Running a second full detect+decode after standard OpenCV already found geometry
- * was redundant on dense V27/V40 and dominated the physical hot path.
- *
- * A successful projective solve is anchored to the OpenCV TL/TR/BL observation from
- * that exact frame. Small hand motion transports the already perspective-correct
- * quadrangle with those three finder anchors, rather than rerunning TRY_HARDER on
- * every frame. Meaningful motion triggers a fresh projective solve.
+ * If the external decoder does not produce bytes, the existing OpenCV standard ->
+ * conditional ArUco -> Java ZXing known-dimension path remains a bounded fallback.
  */
 class V7Phase1QrDecoder : AutoCloseable {
     private var gray: Mat? = null
@@ -66,13 +60,27 @@ class V7Phase1QrDecoder : AutoCloseable {
         return attachDiagnostics(validatePayload(payload, expectedVersion, expectedBytes, quad))
     }
 
-    fun analyzeAuto(luma: ByteArray, width: Int, height: Int, expectedBytesByVersion: Map<Int, Int>): V7Phase1QrResult {
+    fun analyzeAuto(
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        expectedBytesByVersion: Map<Int, Int>,
+        external: ExternalQrDecodeResult? = null,
+    ): V7Phase1QrResult {
         val expectedDimensions = expectedBytesByVersion.keys
             .map(::qrDimension)
             .distinct()
             .sorted()
             .toIntArray()
-        val (payload, quad) = decode(luma, width, height, expectedDimensions)
+
+        val (payload, quad) = if (external != null && external.payload.isNotEmpty()) {
+            decodeExternalPayload(luma, width, height, expectedDimensions, external)
+        } else {
+            val decoded = decode(luma, width, height, expectedDimensions)
+            recordExternalDiagnostics(external)
+            decoded
+        }
+
         if (payload.isEmpty()) {
             return attachDiagnostics(
                 V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED", quad = quad)
@@ -100,6 +108,57 @@ class V7Phase1QrDecoder : AutoCloseable {
 
     private fun attachDiagnostics(result: V7Phase1QrResult): V7Phase1QrResult =
         result.copy(diagnostics = LinkedHashMap(lastDiagnostics))
+
+    private fun decodeExternalPayload(
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        expectedDimensions: IntArray,
+        external: ExternalQrDecodeResult,
+    ): Pair<ByteArray, List<DoubleArray>?> {
+        require(width > 0 && height > 0 && luma.size >= width * height)
+        lastDiagnostics.clear()
+        lastDiagnostics["decode_source"] = external.source
+        lastDiagnostics["known_qr_dimensions"] = expectedDimensions.copyOf()
+        recordExternalDiagnostics(external)
+        ensureInitialized()
+
+        val target = checkNotNull(gray)
+        val qr = checkNotNull(detector)
+        val detectedPoints = checkNotNull(points)
+        target.create(height, width, CvType.CV_8UC1)
+        target.put(0, 0, luma)
+
+        val geometryStartNs = System.nanoTime()
+        val detected = try {
+            qr.detect(target, detectedPoints)
+        } catch (_: Throwable) {
+            false
+        }
+        val rawQuad = if (detected) detectedPoints.toQuad() else null
+        lastDiagnostics["opencv_geometry_only_ms"] = elapsedMs(geometryStartNs)
+        lastDiagnostics["opencv_geometry_only_found"] = rawQuad != null
+
+        trustedPointsValid = false
+        trustedWithAruco = false
+        trustedDecodeMisses = 0
+        val presentation = if (rawQuad != null) decodedPresentationQuad(rawQuad) else {
+            clearPresentationGeometry()
+            null
+        }
+        return external.payload to presentation
+    }
+
+    private fun recordExternalDiagnostics(external: ExternalQrDecodeResult?) {
+        lastDiagnostics["external_qr_attempted"] = external != null
+        if (external == null) return
+        lastDiagnostics["external_qr_source"] = external.source
+        lastDiagnostics["external_qr_ms"] = external.elapsedMs
+        lastDiagnostics["external_qr_result_count"] = external.resultCount
+        lastDiagnostics["external_qr_payload_bytes"] = external.payload.size
+        external.errorType?.let { lastDiagnostics["external_qr_error"] = it }
+        external.errorMessage?.takeIf { it.isNotBlank() }?.let { lastDiagnostics["external_qr_error_message"] = it }
+    }
 
     private fun decode(
         luma: ByteArray,
