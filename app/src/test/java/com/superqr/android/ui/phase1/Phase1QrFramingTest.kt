@@ -33,4 +33,31 @@ class Phase1QrFramingTest {
         assertEquals(Phase1FramingStatus.QR_GOOD, geometry.status)
         assertTrue(geometry.detail.contains("exact full ImageAnalysis frame"))
     }
+
+    @Test
+    fun tinyDetectedQrQuadReportsTooSmall() {
+        val quad = listOf(
+            doubleArrayOf(340.0, 615.0), doubleArrayOf(380.0, 615.0),
+            doubleArrayOf(380.0, 655.0), doubleArrayOf(340.0, 655.0),
+        )
+        val geometry = Phase1FramingEvaluator.evaluateQr(
+            720, 1280,
+            V7Phase1QrResult(true, false, null, 0, failure = "QR_NOT_DECODED", quad = quad),
+        )
+        assertEquals(Phase1FramingStatus.TOO_SMALL, geometry.status)
+        assertTrue(geometry.sizeFraction!! < 0.18f)
+    }
+
+    @Test
+    fun clippedDetectedQrQuadIsFlagged() {
+        val quad = listOf(
+            doubleArrayOf(-20.0, 100.0), doubleArrayOf(400.0, 100.0),
+            doubleArrayOf(400.0, 500.0), doubleArrayOf(-20.0, 500.0),
+        )
+        val geometry = Phase1FramingEvaluator.evaluateQr(
+            720, 1280,
+            V7Phase1QrResult(true, false, null, 0, failure = "QR_NOT_DECODED", quad = quad),
+        )
+        assertTrue(geometry.clipped)
+    }
 }

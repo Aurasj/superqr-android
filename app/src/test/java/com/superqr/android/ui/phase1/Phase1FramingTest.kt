@@ -54,6 +54,51 @@ class Phase1FramingTest {
     }
 
     @Test
+    fun finderProjectedOutsideFrameIsFlaggedClipped() {
+        // Large enough and offset far enough that a finder corner falls outside
+        // the analysis frame entirely, not merely inside an unsafe margin.
+        val result = acquisition(homography(scale = 0.95, offsetX = -140.0, offsetY = 100.0))
+        val framing = Phase1FramingEvaluator.evaluate(720, 1280, result, spec)
+        assertEquals(Phase1FramingStatus.MOVE_BACK, framing.status)
+        assertTrue(framing.clipped)
+    }
+
+    @Test
+    fun tinyValidatedCarrierReportsTooSmall() {
+        // A safely-framed but tiny marker (huge margin, small absolute size) should
+        // read as "move closer", not "framing good".
+        val result = acquisition(homography(scale = 0.05, offsetX = 337.5, offsetY = 617.5))
+        val framing = Phase1FramingEvaluator.evaluate(720, 1280, result, spec)
+        assertEquals(Phase1FramingStatus.TOO_SMALL, framing.status)
+        assertFalse(framing.clipped)
+        assertTrue(framing.sizeFraction!! < 0.18f)
+    }
+
+    @Test
+    fun nonAffineHomographyProducesNonZeroSkew() {
+        // A homography with a nonzero perspective term distorts the projected
+        // carrier into a non-parallelogram; the skew score must reflect that.
+        val skewedHomography = doubleArrayOf(
+            0.60, 0.0, 60.0,
+            0.0, 0.60, 340.0,
+            0.00035, 0.0, 1.0,
+        )
+        val result = acquisition(skewedHomography)
+        val framing = Phase1FramingEvaluator.evaluate(720, 1280, result, spec)
+        assertTrue(framing.skew != null && framing.skew!! > 0f)
+    }
+
+    @Test
+    fun trackingStateDerivesFromAcquisitionSource() {
+        assertEquals(Phase1TrackingState.TRACKING, Phase1TrackingState.fromSource("V7_SYNC_TRACKED"))
+        assertEquals(Phase1TrackingState.TRACKING, Phase1TrackingState.fromSource("V7_OPTICAL_FLOW_TRACKED"))
+        assertEquals(Phase1TrackingState.HOLDING, Phase1TrackingState.fromSource("V7_TRACK_HOLD"))
+        assertEquals(Phase1TrackingState.ACQUIRED, Phase1TrackingState.fromSource("V7_FINDERS_ACQUIRED"))
+        assertEquals(Phase1TrackingState.SEARCHING, Phase1TrackingState.fromSource("V7_NO_CANDIDATE"))
+        assertEquals(Phase1TrackingState.UNKNOWN, Phase1TrackingState.fromSource("NONE"))
+    }
+
+    @Test
     fun partialFinderEvidenceNeverClaimsGoodFraming() {
         val result = acquisition(null).copy(
             finderCenters = listOf(

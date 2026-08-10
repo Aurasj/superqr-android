@@ -34,11 +34,15 @@ data class Phase1RunSnapshot(
     val erasureRate: Double,
     val lastFailure: String?,
     val failureSummary: String,
+    val lastAcquisitionMs: Double? = null,
+    val lastSyncMs: Double? = null,
+    val lastPayloadMs: Double? = null,
 ) {
     val goodputKibS: Double get() = if (elapsedSeconds > 0.0) innovativeBytes / elapsedSeconds / 1024.0 else 0.0
     val rawValidYield: Double get() = if (observations > 0) validFrames.toDouble() / observations else 0.0
     val innerFecYield: Double get() = if (observations > 0) innerFecFrames.toDouble() / observations else 0.0
     val progress: Double get() = if (expectedFrames > 0) uniqueFrames.toDouble() / expectedFrames else 0.0
+    val trackingState: Phase1TrackingState get() = Phase1TrackingState.fromSource(geometryState)
 }
 
 class Phase1ObservationRecorder {
@@ -72,6 +76,9 @@ class Phase1ObservationRecorder {
     private var captureWidth = 0
     private var captureHeight = 0
     private var observations = 0
+    private var lastAcquisitionMs: Double? = null
+    private var lastSyncMs: Double? = null
+    private var lastPayloadMs: Double? = null
     var campaignId: String = UUID.randomUUID().toString()
         private set
     var runId: String = "UNSYNCED"
@@ -254,11 +261,15 @@ class Phase1ObservationRecorder {
         pipelineWindow.fill(0.0); pipelineWindowCount = 0; pipelineWindowCursor = 0
         failureCounts.clear(); lastFailure = null
         captureWidth = 0; captureHeight = 0
+        lastAcquisitionMs = null; lastSyncMs = null; lastPayloadMs = null
     }
 
     private fun updateCapture(extra: Map<String, Any?>) {
         (extra["capture_width"] as? Number)?.toInt()?.let { captureWidth = it }
         (extra["capture_height"] as? Number)?.toInt()?.let { captureHeight = it }
+        (extra["acquisition_ms"] as? Number)?.toDouble()?.let { lastAcquisitionMs = it }
+        (extra["sync_ms"] as? Number)?.toDouble()?.let { lastSyncMs = it }
+        (extra["payload_ms"] as? Number)?.toDouble()?.let { lastPayloadMs = it }
     }
 
     private fun addIndexes(json: JSONObject, key: String, values: IntArray?, count: Int) {
@@ -311,10 +322,15 @@ class Phase1ObservationRecorder {
             if (observedBitsTotal > 0) erasedBitsTotal.toDouble() / observedBitsTotal else 0.0,
             lastFailure,
             failureCounts.entries.sortedByDescending { it.value }.take(4).joinToString(" • ") { "${it.key} ${it.value}" },
+            lastAcquisitionMs, lastSyncMs, lastPayloadMs,
         )
     }
 
     internal fun jsonLinesForTest(): List<String> = synchronized(this) { lines.toList() }
+
+    /** Snapshot of the current campaign's per-frame observation lines, for bundling into a debug export. */
+    @Synchronized
+    fun currentObservationLines(): List<String> = lines.toList()
 
     @Synchronized
     fun exportAndShare(context: Context): File {

@@ -1,5 +1,6 @@
 package com.superqr.android.ui.phase1
 
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -23,6 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 
 private val LabBackground = Color(0xFF080B11)
 private val LabSurface = Color(0xFF121823)
@@ -44,7 +46,11 @@ private data class Metric(
 
 @Composable
 fun Phase1LabDashboard(
+    previewView: PreviewView,
+    debugMode: Boolean,
+    onToggleDebugMode: () -> Unit,
     alignmentPreview: Phase1AnalysisPreview,
+    liveGuidance: Phase1FramingGeometry,
     status: Phase1RunSnapshot,
     cameraState: String,
     running: Boolean,
@@ -52,6 +58,7 @@ fun Phase1LabDashboard(
     onToggleCamera: () -> Unit,
     onNewCampaign: () -> Unit,
     onShare: () -> Unit,
+    onSaveFrame: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val synchronized = status.syncStatus.contains("LOCKED")
@@ -80,25 +87,41 @@ fun Phase1LabDashboard(
         },
         bottomBar = {
             Surface(color = LabSurface, shadowElevation = 12.dp) {
-                Row(
-                    Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Button(
-                        onClick = onToggleCamera,
-                        enabled = cameraPermission,
-                        modifier = Modifier.weight(1.25f).heightIn(min = 48.dp),
-                    ) { Text(if (running) "Stop camera" else "Start camera") }
-                    OutlinedButton(
-                        onClick = onNewCampaign,
-                        enabled = !running,
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    ) { Text("New run") }
-                    OutlinedButton(
-                        onClick = onShare,
-                        enabled = status.analyzedFrames > 0,
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    ) { Text("Share") }
+                Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Camera view", color = LabMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
+                        SegmentedToggle(
+                            leftLabel = "Preview", rightLabel = "Decoder input",
+                            selectedRight = debugMode, onSelectRight = onToggleDebugMode,
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onToggleCamera,
+                            enabled = cameraPermission,
+                            modifier = Modifier.weight(1.25f).heightIn(min = 48.dp),
+                        ) { Text(if (running) "Stop camera" else "Start camera") }
+                        OutlinedButton(
+                            onClick = onNewCampaign,
+                            enabled = !running,
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        ) { Text("New run") }
+                        OutlinedButton(
+                            onClick = onSaveFrame,
+                            enabled = debugMode && alignmentPreview.bitmap != null,
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        ) { Text("Save frame") }
+                        OutlinedButton(
+                            onClick = onShare,
+                            enabled = status.analyzedFrames > 0,
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        ) { Text("Share") }
+                    }
                 }
             }
         },
@@ -107,18 +130,144 @@ fun Phase1LabDashboard(
             val wide = maxWidth >= 760.dp || maxWidth > maxHeight
             if (wide) {
                 Row(Modifier.fillMaxSize().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    PreviewPanel(alignmentPreview, cameraState, Modifier.weight(1.18f).fillMaxHeight())
+                    CameraPanel(
+                        previewView, debugMode, alignmentPreview, liveGuidance, cameraState,
+                        Modifier.weight(1.18f).fillMaxHeight(),
+                    )
                     LabDetails(status, stateTint, Modifier.weight(1f).fillMaxHeight())
                 }
             } else {
                 Column(Modifier.fillMaxSize()) {
-                    PreviewPanel(
-                        alignmentPreview, cameraState,
+                    CameraPanel(
+                        previewView, debugMode, alignmentPreview, liveGuidance, cameraState,
                         Modifier.fillMaxWidth().heightIn(min = 220.dp).weight(0.43f),
                     )
                     LabDetails(status, stateTint, Modifier.fillMaxWidth().weight(0.57f))
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SegmentedToggle(leftLabel: String, rightLabel: String, selectedRight: Boolean, onSelectRight: () -> Unit) {
+    Surface(color = LabSurfaceHigh, shape = RoundedCornerShape(20.dp), border = androidx.compose.foundation.BorderStroke(1.dp, LabBorder)) {
+        Row(Modifier.padding(3.dp)) {
+            SegmentButton(leftLabel, selected = !selectedRight, onClick = { if (selectedRight) onSelectRight() })
+            SegmentButton(rightLabel, selected = selectedRight, onClick = { if (!selectedRight) onSelectRight() })
+        }
+    }
+}
+
+@Composable
+private fun SegmentButton(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = if (selected) LabAccent.copy(alpha = 0.22f) else Color.Transparent,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.clip(RoundedCornerShape(16.dp)),
+        onClick = onClick,
+    ) {
+        Text(
+            label,
+            color = if (selected) LabAccent else LabMuted,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+        )
+    }
+}
+
+/** Chooses between the smooth live camera Preview and the exact decoder-input debug view. */
+@Composable
+private fun CameraPanel(
+    previewView: PreviewView,
+    debugMode: Boolean,
+    alignmentPreview: Phase1AnalysisPreview,
+    liveGuidance: Phase1FramingGeometry,
+    cameraState: String,
+    modifier: Modifier,
+) {
+    if (debugMode) {
+        PreviewPanel(alignmentPreview, cameraState, modifier)
+    } else {
+        LivePreviewPanel(previewView, liveGuidance, cameraState, modifier)
+    }
+}
+
+@Composable
+private fun LivePreviewPanel(
+    previewView: PreviewView,
+    geometry: Phase1FramingGeometry,
+    cameraState: String,
+    modifier: Modifier,
+) {
+    val tint = framingTint(geometry.status)
+    val shape = RoundedCornerShape(14.dp)
+    Box(modifier.clip(shape).background(Color.Black).border(1.dp, tint.copy(alpha = 0.65f), shape)) {
+        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+        LiveGuidanceOverlay(geometry, Modifier.fillMaxSize())
+        Surface(
+            modifier = Modifier.align(Alignment.TopCenter).padding(10.dp),
+            color = tint.copy(alpha = 0.94f),
+            shape = RoundedCornerShape(10.dp),
+        ) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 9.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(geometry.status.label, color = Color(0xFF061019), fontSize = 18.sp, fontWeight = FontWeight.Black, letterSpacing = 0.5.sp)
+                Text(
+                    geometry.detail, color = Color(0xFF061019).copy(alpha = 0.78f), fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Surface(
+            modifier = Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 82.dp),
+            color = Color.Black.copy(alpha = 0.76f),
+            shape = RoundedCornerShape(7.dp),
+        ) {
+            Text(
+                "LIVE PREVIEW • ${geometry.trackingState.label}",
+                Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+            )
+        }
+        Surface(
+            modifier = Modifier.align(Alignment.BottomStart).padding(10.dp),
+            color = Color.Black.copy(alpha = 0.68f),
+            shape = RoundedCornerShape(8.dp),
+        ) {
+            Text(
+                cameraState, Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                color = if (cameraState.startsWith("ERROR")) LabBad else Color.White,
+                fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** Draws already preview-space-mapped geometry directly, with no additional fit scaling. */
+@Composable
+private fun LiveGuidanceOverlay(geometry: Phase1FramingGeometry, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        fun offset(point: Phase1FramePoint) = androidx.compose.ui.geometry.Offset(point.x, point.y)
+        fun path(points: List<Phase1FramePoint>): Path? {
+            if (points.size != 4) return null
+            return Path().apply {
+                val first = offset(points.first())
+                moveTo(first.x, first.y)
+                points.drop(1).forEach { point -> val mapped = offset(point); lineTo(mapped.x, mapped.y) }
+                close()
+            }
+        }
+        if (geometry.mode == Phase1FramingMode.GRID) {
+            geometry.carrierQuad?.let { carrier -> path(carrier)?.let { drawPath(it, LabGood, style = Stroke(width = 2.5.dp.toPx())) } }
+            geometry.finderQuads.forEach { finder ->
+                path(finder)?.let {
+                    drawPath(it, LabGood.copy(alpha = 0.18f))
+                    drawPath(it, LabGood, style = Stroke(width = 2.5.dp.toPx()))
+                }
+            }
+        } else {
+            geometry.candidateQuad?.let { quad -> path(quad)?.let { drawPath(it, framingTint(geometry.status), style = Stroke(width = 2.5.dp.toPx())) } }
         }
     }
 }
@@ -295,9 +444,16 @@ private fun AnalysisGeometryOverlay(geometry: Phase1FramingGeometry, modifier: M
 
 private fun framingTint(status: Phase1FramingStatus): Color = when (status) {
     Phase1FramingStatus.GOOD, Phase1FramingStatus.QR_GOOD -> LabGood
-    Phase1FramingStatus.MOVE_BACK -> LabWarn
+    Phase1FramingStatus.MOVE_BACK, Phase1FramingStatus.TOO_SMALL, Phase1FramingStatus.PERSPECTIVE_SKEWED -> LabWarn
     Phase1FramingStatus.NOT_FOUND -> LabBad
     Phase1FramingStatus.ALIGNING, Phase1FramingStatus.QR_SEARCHING -> LabAccent
+}
+
+private fun trackingTint(state: Phase1TrackingState): Color = when (state) {
+    Phase1TrackingState.TRACKING, Phase1TrackingState.ACQUIRED -> LabGood
+    Phase1TrackingState.HOLDING -> LabWarn
+    Phase1TrackingState.SEARCHING -> LabAccent
+    Phase1TrackingState.UNKNOWN -> LabMuted
 }
 
 @Composable
@@ -310,7 +466,17 @@ private fun LabDetails(status: Phase1RunSnapshot, stateTint: Color, modifier: Mo
         Metric("Raw valid", "%.1f%%".format(status.rawValidYield * 100.0), "exact frames", LabAccent),
         Metric("Inner-FEC valid", "%.1f%%".format(status.innerFecYield * 100.0), "simulated RS yield", LabAccent),
         Metric("Pipeline", "%.1f ms".format(status.p95PipelineMs), "p95 • mean %.1f ms".format(status.meanPipelineMs)),
+        Metric(
+            "Stage timing",
+            listOfNotNull(
+                status.lastAcquisitionMs?.let { "acq %.1f".format(it) },
+                status.lastSyncMs?.let { "sync %.1f".format(it) },
+                status.lastPayloadMs?.let { "payload %.1f".format(it) },
+            ).joinToString(" • ").ifBlank { "—" },
+            "ms, most recent frame",
+        ),
         Metric("Camera rate", "%.1f fps".format(status.cameraFps), "${status.captureWidth}×${status.captureHeight}"),
+        Metric("Tracking", status.trackingState.label, "acquisition source: ${status.geometryState}", trackingTint(status.trackingState)),
         Metric("Goodput", "%.2f KiB/s".format(status.goodputKibS), "unique inner-FEC-valid data", LabGood),
         Metric("Run token", status.runId, "campaign ${status.campaignId.take(8)}", stateTint),
     )
