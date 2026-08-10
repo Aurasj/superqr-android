@@ -64,6 +64,7 @@ import com.superqr.android.session.DiagnosticSession
 import com.superqr.android.session.SessionPhase
 import com.superqr.android.session.SessionState
 import java.util.concurrent.ExecutorService
+import kotlinx.coroutines.delay
 
 @Composable
 fun MainScreen(
@@ -146,6 +147,45 @@ fun MainScreen(
                 else -> false
             }
 
+            val isRunning = cameraStatus == CameraStatus.RUNNING || cameraStatus == CameraStatus.STARTING
+            val confirmedDetection = sessionState.phase in setOf(
+                SessionPhase.QR_DETECTED,
+                SessionPhase.QR_LOCKED,
+                SessionPhase.GRID_DETECTED,
+                SessionPhase.GRID_LOCKED,
+                SessionPhase.RECEIVING,
+            )
+            val desiredPrimaryStatus = when {
+                cameraStatus == CameraStatus.ERROR -> "Camera error"
+                !isRunning -> sessionState.phase.label
+                confirmedDetection -> sessionState.phase.label
+                else -> "LOOKING FOR QR / CARRIER"
+            }
+            val desiredGuidance = framing.status.label.takeIf {
+                cameraStatus == CameraStatus.RUNNING && confirmedDetection && framing.frameWidth > 0
+            }
+            var stablePrimaryStatus by remember { mutableStateOf("Ready") }
+            var stableGuidance by remember { mutableStateOf<String?>(null) }
+
+            LaunchedEffect(desiredPrimaryStatus, isRunning) {
+                val settleMs = when {
+                    !isRunning -> 0L
+                    confirmedDetection -> 250L
+                    else -> 700L
+                }
+                if (settleMs > 0) delay(settleMs)
+                stablePrimaryStatus = desiredPrimaryStatus
+            }
+            LaunchedEffect(desiredGuidance, isRunning) {
+                val settleMs = when {
+                    !isRunning -> 0L
+                    desiredGuidance == null -> 700L
+                    else -> 400L
+                }
+                if (settleMs > 0) delay(settleMs)
+                stableGuidance = desiredGuidance
+            }
+
             Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
                 Card(
                     modifier = Modifier.fillMaxSize(),
@@ -169,9 +209,9 @@ fun MainScreen(
 
             Spacer(Modifier.height(8.dp))
             StatusBlock(
-                phase = sessionState.phase,
+                primaryStatus = stablePrimaryStatus,
                 profileName = sessionState.profileName,
-                guidance = framing.status.label.takeIf { framing.frameWidth > 0 },
+                guidance = stableGuidance,
                 cameraStatus = cameraStatus,
             )
             Spacer(Modifier.height(8.dp))
@@ -183,7 +223,6 @@ fun MainScreen(
             )
             Spacer(Modifier.height(12.dp))
 
-            val isRunning = cameraStatus == CameraStatus.RUNNING || cameraStatus == CameraStatus.STARTING
             if (!isRunning && sessionState.phase == SessionPhase.COMPLETE) {
                 Column(
                     Modifier.fillMaxWidth().padding(8.dp),
@@ -304,20 +343,21 @@ private fun mapFramePoints(
 
 @Composable
 private fun StatusBlock(
-    phase: SessionPhase,
+    primaryStatus: String,
     profileName: String,
     guidance: String?,
     cameraStatus: CameraStatus,
 ) {
     val phaseColor = when {
         cameraStatus == CameraStatus.ERROR -> Color(0xFFFF7B72)
-        phase == SessionPhase.SEARCHING -> Color(0xFFF2CC60)
-        phase == SessionPhase.QR_DETECTED || phase == SessionPhase.QR_LOCKED || phase == SessionPhase.GRID_DETECTED -> Color(0xFF7CB7FF)
-        phase == SessionPhase.GRID_LOCKED || phase == SessionPhase.RECEIVING || phase == SessionPhase.COMPLETE -> Color(0xFF7EE787)
-        phase == SessionPhase.LOST || phase == SessionPhase.REACQUIRING -> Color(0xFFFF7B72)
+        primaryStatus == "LOOKING FOR QR / CARRIER" -> Color(0xFFF2CC60)
+        primaryStatus == SessionPhase.QR_DETECTED.label || primaryStatus == SessionPhase.GRID_DETECTED.label -> Color(0xFF7CB7FF)
+        primaryStatus == SessionPhase.QR_LOCKED.label ||
+            primaryStatus == SessionPhase.GRID_LOCKED.label ||
+            primaryStatus == SessionPhase.RECEIVING.label ||
+            primaryStatus == SessionPhase.COMPLETE.label -> Color(0xFF7EE787)
         else -> Color.White.copy(alpha = 0.55f)
     }
-    val primaryStatus = if (cameraStatus == CameraStatus.ERROR) "Camera error" else phase.label
 
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
