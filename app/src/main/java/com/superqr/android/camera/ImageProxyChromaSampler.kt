@@ -2,6 +2,8 @@ package com.superqr.android.camera
 
 import androidx.camera.core.ImageProxy
 import com.superqr.android.vision.v6.classification.ChromaPixelReader
+import com.superqr.android.vision.v7_capacity_lab.ExternalQrDecodeResult
+import com.superqr.android.vision.v7_capacity_lab.ExternalQrFrameDecoder
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -13,16 +15,15 @@ class ChromaSampleBuffers {
 }
 
 /**
- * Chroma reader for CameraX YUV_420_888 analysis frames.
+ * CameraX frame-scoped sampler/capability object.
  *
- * Luma is full resolution while U/V are normally one sample per 2x2 luma block.
- * We preserve sub-pixel coordinates through rotation and bilinearly interpolate
- * surrounding chroma samples. The hot read() path is allocation-free; CROSS_5 can
- * call it thousands of times per frame without creating Pair objects for rotation.
+ * Chroma reads remain allocation-free. The optional QR capability is bound to the
+ * same ImageProxy and is invoked only when VisionEngine is on its QR path, before
+ * CameraManager closes that image.
  */
 class ImageProxyChromaSampler(
     @Suppress("UNUSED_PARAMETER") buffers: ChromaSampleBuffers,
-) : ChromaPixelReader {
+) : ChromaPixelReader, ExternalQrFrameDecoder {
     private var cropLeft = 0
     private var cropTop = 0
     private var rawWidth = 0
@@ -30,6 +31,7 @@ class ImageProxyChromaSampler(
     private var rotation = 0
     private val uPlane = PlaneReader()
     private val vPlane = PlaneReader()
+    private var qrDecoder: CameraQrDecoder? = null
 
     constructor(imageProxy: ImageProxy, buffers: ChromaSampleBuffers) : this(buffers) {
         bind(imageProxy)
@@ -44,7 +46,32 @@ class ImageProxyChromaSampler(
         rotation = imageProxy.imageInfo.rotationDegrees
         uPlane.bind(imageProxy.planes[1])
         vPlane.bind(imageProxy.planes[2])
+        qrDecoder = null
         return this
+    }
+
+    fun bindQrDecoder(decoder: CameraQrDecoder): ImageProxyChromaSampler {
+        qrDecoder = decoder
+        return this
+    }
+
+    override fun decodeQr(): ExternalQrDecodeResult {
+        val result = qrDecoder?.decode()
+            ?: return ExternalQrDecodeResult(
+                payload = ByteArray(0),
+                elapsedMs = 0.0,
+                resultCount = 0,
+                source = "ZXING_CPP",
+                errorType = "UNBOUND",
+            )
+        return ExternalQrDecodeResult(
+            payload = result.payload,
+            elapsedMs = result.elapsedMs,
+            resultCount = result.resultCount,
+            source = "ZXING_CPP",
+            errorType = result.errorType,
+            errorMessage = result.errorMessage,
+        )
     }
 
     override fun read(
