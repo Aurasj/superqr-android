@@ -21,8 +21,10 @@ class Phase1AnalysisPolicyTest {
     }
 
     @Test
-    fun unlockedSearchAlternatesButGridCandidatesStayOnGrid() {
+    fun unlockedSearchProbesQrFirstThenAlternatesAndKeepsGridCandidates() {
         val scheduler = Phase1AcquisitionScheduler()
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.QR)
         assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
         scheduler.missed(Phase1AnalysisPath.GRID)
         assertEquals(Phase1AnalysisPath.QR, scheduler.path)
@@ -30,6 +32,8 @@ class Phase1AnalysisPolicyTest {
         assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
         scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
         assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+        scheduler.reset()
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
     }
 
     @Test
