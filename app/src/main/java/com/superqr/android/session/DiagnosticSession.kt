@@ -286,14 +286,16 @@ class DiagnosticSession(private val context: Context) {
             wasLost = false
             return SessionPhase.QR_LOCKED
         }
-        if (qr.decoded) {
+        if (qr.decoded || qr.quad != null) {
+            // qr.quad is emitted only by OpenCV's native QRCodeDetector, not by
+            // the generic carrier contour path. A valid native QR quadrangle is
+            // therefore real QR detection even when a rolling/mixed frame prevents
+            // payload decode on this particular exposure.
             wasTracking = true
             wasLost = false
             return SessionPhase.QR_DETECTED
         }
 
-        // OpenCV can propose transient quadrilaterals in normal scenes. A raw quad
-        // is only a candidate and must never be presented to the user as QR detection.
         wasTracking = false
         wasLost = false
         return SessionPhase.SEARCHING
