@@ -30,9 +30,12 @@ data class V7Phase1QrResult(
  * bottom-right corner can move because standard QR has no finder pattern there.
  * While only QR_DETECTED, every QR frame therefore gets a fresh full detection.
  *
- * A separately smoothed quadrangle is returned for overlay/framing guidance so
- * detector jitter does not make the visible border jump around. The smoothed
- * overlay never replaces the raw OpenCV geometry used by detectAndDecodeBytes().
+ * A separately stabilized quadrangle is returned for overlay/framing guidance so
+ * detector jitter does not make the visible border jump around. The stabilizer
+ * treats TL/TR/BL as the anchored QR corners. If those three remain effectively
+ * static while only BR jumps, BR is held instead of resetting the whole filter.
+ * The stabilized overlay never replaces the raw OpenCV geometry used by
+ * detectAndDecodeBytes().
  *
  * Dense V27/V40 camera images also get a bounded QRCodeDetectorAruco fallback.
  * OpenCV 5 exposes it as a second QR detector based on ArUco-style finder search;
@@ -83,8 +86,6 @@ class V7Phase1QrDecoder : AutoCloseable {
         target.put(0, 0, luma)
 
         // Reuse geometry only after that geometry has decoded a real payload.
-        // A geometry-only candidate must be re-detected on the next frame instead
-        // of feeding the same potentially-wrong inferred fourth corner repeatedly.
         if (trustedPointsValid && !detectedPoints.empty()) {
             val payload = if (trustedWithAruco) {
                 qrAruco.decodeBytes(target, detectedPoints)
@@ -105,8 +106,6 @@ class V7Phase1QrDecoder : AutoCloseable {
             trustedDecodeMisses = 0
         }
 
-        // Full standard detection. detectAndDecodeBytes() gets the raw points;
-        // stableQuad is presentation-only and cannot poison decoder geometry.
         val payload = qr.detectAndDecodeBytes(target, detectedPoints)
         val standardQuad = detectedPoints.toQuad()
         if (payload.isNotEmpty()) {
@@ -116,8 +115,6 @@ class V7Phase1QrDecoder : AutoCloseable {
             return payload to stabilizeQuad(standardQuad)
         }
 
-        // Dense QR fallback. Even if the standard detector found a quad, try the
-        // alternate finder implementation before returning QR_DETECTED.
         val fallbackPayload = qrAruco.detectAndDecodeBytes(target, fallbackPoints)
         val fallbackQuad = fallbackPoints.toQuad()
         if (fallbackPayload.isNotEmpty()) {
@@ -128,9 +125,6 @@ class V7Phase1QrDecoder : AutoCloseable {
             return fallbackPayload to stabilizeQuad(fallbackQuad)
         }
 
-        // Geometry without payload is evidence for the acquisition scheduler, but
-        // it is intentionally NOT reusable decode geometry. Next QR frame performs
-        // a fresh detector pass and gets another chance at a better fourth corner.
         val candidateQuad = chooseCandidateQuad(standardQuad, fallbackQuad)
         if (candidateQuad != null) {
             trustedPointsValid = false
@@ -142,7 +136,7 @@ class V7Phase1QrDecoder : AutoCloseable {
         trustedPointsValid = false
         trustedWithAruco = false
         trustedDecodeMisses = 0
-        return ByteArray(0) to holdStableQuadOnSingleMiss()
+        return ByteArray(0) to holdStableQuadOnMiss()
     }
 
     private fun chooseCandidateQuad(
@@ -151,25 +145,29 @@ class V7Phase1QrDecoder : AutoCloseable {
     ): List<DoubleArray>? = when {
         standard == null -> fallback
         fallback == null -> standard
-        // Prefer the candidate whose shape is temporally closer to the already
-        // stable geometry. This prevents alternate detectors from making BR jump.
         stableQuad == null -> standard
         quadDistance(standard, checkNotNull(stableQuad)) <= quadDistance(fallback, checkNotNull(stableQuad)) -> standard
         else -> fallback
     }
 
     private fun stabilizeQuad(raw: List<DoubleArray>?): List<DoubleArray>? {
-        if (raw == null || raw.size != 4) return holdStableQuadOnSingleMiss()
+        if (raw == null || raw.size != 4) return holdStableQuadOnMiss()
         stableQuadMisses = 0
-        val current = raw.map { doubleArrayOf(it[0], it[1]) }
+        val observed = raw.map { doubleArrayOf(it[0], it[1]) }
         val previous = stableQuad
-        if (previous == null || previous.size != 4 || shouldResetSmoothing(previous, current)) {
+        if (previous == null || previous.size != 4) {
+            stableQuad = observed
+            return observed
+        }
+
+        // QR finder anchors are TL/TR/BL (indices 0/1/3 in OpenCV ordering).
+        // If these three barely move but inferred BR jumps, keep the previous BR.
+        val current = suppressBottomRightOnlyJump(previous, observed)
+        if (shouldResetSmoothing(previous, current)) {
             stableQuad = current
             return current
         }
 
-        // Moderate EMA: enough to suppress BR/finder jitter while remaining
-        // responsive to deliberate phone movement. Decode still uses raw points.
         val alpha = QUAD_EMA_ALPHA
         val next = List(4) { index ->
             doubleArrayOf(
@@ -181,7 +179,30 @@ class V7Phase1QrDecoder : AutoCloseable {
         return next
     }
 
-    private fun holdStableQuadOnSingleMiss(): List<DoubleArray>? {
+    private fun suppressBottomRightOnlyJump(
+        previous: List<DoubleArray>,
+        current: List<DoubleArray>,
+    ): List<DoubleArray> {
+        val side = averageSide(current).coerceAtLeast(1.0)
+        val anchorStillThreshold = maxOf(MIN_STATIC_ANCHOR_PX, side * STATIC_ANCHOR_SIDE_FRACTION)
+        val bottomRightJumpThreshold = maxOf(MIN_BOTTOM_RIGHT_JUMP_PX, side * BOTTOM_RIGHT_JUMP_SIDE_FRACTION)
+        val anchorIndices = intArrayOf(0, 1, 3)
+        val averageAnchorMotion = anchorIndices.sumOf { index -> pointDistance(previous[index], current[index]) } /
+            anchorIndices.size.toDouble()
+        val bottomRightMotion = pointDistance(previous[2], current[2])
+        if (averageAnchorMotion > anchorStillThreshold || bottomRightMotion <= bottomRightJumpThreshold) {
+            return current
+        }
+        return List(4) { index ->
+            if (index == 2) {
+                doubleArrayOf(previous[2][0], previous[2][1])
+            } else {
+                doubleArrayOf(current[index][0], current[index][1])
+            }
+        }
+    }
+
+    private fun holdStableQuadOnMiss(): List<DoubleArray>? {
         val held = stableQuad ?: return null
         stableQuadMisses++
         if (stableQuadMisses > MAX_STABLE_QUAD_HOLD_MISSES) {
@@ -195,13 +216,16 @@ class V7Phase1QrDecoder : AutoCloseable {
     private fun shouldResetSmoothing(previous: List<DoubleArray>, current: List<DoubleArray>): Boolean {
         val side = averageSide(current).coerceAtLeast(1.0)
         val resetDistance = maxOf(MIN_SMOOTHING_RESET_PX, side * SMOOTHING_RESET_SIDE_FRACTION)
-        return previous.indices.any { index ->
-            hypot(
-                previous[index][0] - current[index][0],
-                previous[index][1] - current[index][1],
-            ) > resetDistance
+        // BR alone is not allowed to reset smoothing. A genuine camera move changes
+        // at least two of the three finder-anchored corners TL/TR/BL as well.
+        val movedAnchors = intArrayOf(0, 1, 3).count { index ->
+            pointDistance(previous[index], current[index]) > resetDistance
         }
+        return movedAnchors >= 2
     }
+
+    private fun pointDistance(a: DoubleArray, b: DoubleArray): Double =
+        hypot(a[0] - b[0], a[1] - b[1])
 
     private fun averageSide(quad: List<DoubleArray>): Double {
         if (quad.size != 4) return 0.0
@@ -209,22 +233,17 @@ class V7Phase1QrDecoder : AutoCloseable {
         for (index in quad.indices) {
             val a = quad[index]
             val b = quad[(index + 1) % quad.size]
-            sum += hypot(a[0] - b[0], a[1] - b[1])
+            sum += pointDistance(a, b)
         }
         return sum / 4.0
     }
 
     private fun quadDistance(a: List<DoubleArray>, b: List<DoubleArray>): Double {
         if (a.size != 4 || b.size != 4) return Double.POSITIVE_INFINITY
-        return a.indices.sumOf { index ->
-            hypot(a[index][0] - b[index][0], a[index][1] - b[index][1])
-        } / 4.0
+        return a.indices.sumOf { index -> pointDistance(a[index], b[index]) } / 4.0
     }
 
     private fun Mat.toQuad(): List<DoubleArray>? {
-        // OpenCV commonly returns one QR as a 1x4 CV_32FC2 Mat, not four rows.
-        // total() counts the four 2-channel point elements regardless of whether
-        // the Java binding exposes them as 1x4 or 4x1.
         if (empty() || total() < 4L) return null
         val mat2f = MatOfPoint2f()
         return try {
@@ -268,10 +287,14 @@ class V7Phase1QrDecoder : AutoCloseable {
 
     companion object {
         private const val MAX_TRUSTED_DECODE_MISSES = 2
-        private const val MAX_STABLE_QUAD_HOLD_MISSES = 1
-        private const val QUAD_EMA_ALPHA = 0.40
+        private const val MAX_STABLE_QUAD_HOLD_MISSES = 6
+        private const val QUAD_EMA_ALPHA = 0.22
         private const val SMOOTHING_RESET_SIDE_FRACTION = 0.18
         private const val MIN_SMOOTHING_RESET_PX = 18.0
+        private const val STATIC_ANCHOR_SIDE_FRACTION = 0.02
+        private const val MIN_STATIC_ANCHOR_PX = 4.0
+        private const val BOTTOM_RIGHT_JUMP_SIDE_FRACTION = 0.03
+        private const val MIN_BOTTOM_RIGHT_JUMP_PX = 7.0
 
         fun validatePayload(
             payload: ByteArray,
