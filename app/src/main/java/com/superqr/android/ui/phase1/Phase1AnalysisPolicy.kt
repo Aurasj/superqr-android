@@ -20,19 +20,25 @@ enum class Phase1AnalysisPath { GRID, QR }
 /**
  * Avoids running both expensive acquisition algorithms serially on every frame.
  *
- * The V7 grid acquirer itself holds a proven homography for two transient sync
- * misses and would enter its expensive cold contour search on the third miss.
- * Therefore this scheduler deliberately hands a lost GRID lock to QR after two
- * misses, before that cold search can run on a dense standard-QR image. A short
- * bounded transition probe gives QR several decode opportunities; if it is not
- * a QR transition, normal alternating search resumes quickly.
+ * Search starts with QR because running the custom GRID cold contour finder on a
+ * dense standard-QR image is the worst-case direction: thousands of nested
+ * contours can be generated before the scheduler gets a chance to switch paths.
+ * A single QR miss on a GRID carrier simply hands the next frame to GRID during
+ * the four-second READY guard.
+ *
+ * Once GRID is locked, the V7 grid acquirer itself holds a proven homography for
+ * two transient sync misses and would enter its expensive cold contour search on
+ * the third miss. This scheduler deliberately hands a lost GRID lock to QR after
+ * two misses, before that cold search can run on a changed QR carrier. A short
+ * bounded transition probe gives QR several decode opportunities; if it is not a
+ * QR transition, normal alternating search resumes quickly.
  */
 class Phase1AcquisitionScheduler(
     private val unlockAfterMisses: Int = 2,
     private val transitionProbeFrames: Int = 3,
 ) {
     private var lockedPath: Phase1AnalysisPath? = null
-    private var nextSearchPath = Phase1AnalysisPath.GRID
+    private var nextSearchPath = Phase1AnalysisPath.QR
     private var misses = 0
     private var transitionProbePath: Phase1AnalysisPath? = null
     private var transitionProbesRemaining = 0
@@ -87,7 +93,7 @@ class Phase1AcquisitionScheduler(
 
     fun reset() {
         lockedPath = null
-        nextSearchPath = Phase1AnalysisPath.GRID
+        nextSearchPath = Phase1AnalysisPath.QR
         misses = 0
         transitionProbePath = null
         transitionProbesRemaining = 0
