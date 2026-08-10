@@ -271,7 +271,8 @@ class DiagnosticSession(private val context: Context) {
         if (sequence - lastQrCaptureSequence < QR_CAPTURE_MIN_GAP_FRAMES) return
         if (result.path != Phase1AnalysisPath.QR) return
         val qr = result.qrResult ?: return
-        if (qr.valid || qr.quad == null) return
+        val quad = qr.quad ?: return
+        if (qr.valid) return
         if (qr.diagnostics["zxing_attempted"] != true) return
 
         capturedQrFrames += CapturedQrFrame(
@@ -283,7 +284,7 @@ class DiagnosticSession(private val context: Context) {
             pipelineMs = result.pipelineMs,
             failure = qr.failure,
             schedulerState = result.schedulerState,
-            quad = qr.quad.map { it.copyOf() },
+            quad = quad.map { it.copyOf() },
             diagnostics = LinkedHashMap(qr.diagnostics),
             // Event-selected exact normalized analyzer luma. No normal-frame copy.
             luma = frame.lumaBytes.copyOf(),
