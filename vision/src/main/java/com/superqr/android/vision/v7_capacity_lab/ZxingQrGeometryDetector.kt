@@ -12,6 +12,14 @@ import com.google.zxing.qrcode.detector.Detector
 internal data class ZxingQrAnalysis(
     val payload: ByteArray,
     val outerQuad: List<DoubleArray>?,
+    val stage: String,
+    val exceptionType: String? = null,
+    val exceptionMessage: String? = null,
+    val dimension: Int? = null,
+    val pointCount: Int = 0,
+    val detectMs: Double? = null,
+    val decodeMs: Double? = null,
+    val totalMs: Double = 0.0,
 )
 
 /**
@@ -26,15 +34,26 @@ internal data class ZxingQrAnalysis(
  * rawBytes are the corrected QR data-codeword stream (which also contains mode,
  * length and padding bits); byteSegments are the actual BYTE-mode payload bytes
  * emitted by DecodedBitStreamParser.
+ *
+ * Phase 0 diagnostics deliberately report the exact stage/exception and timings;
+ * they do not alter detector or decoder behavior.
  */
 internal class ZxingQrGeometryDetector {
     private val decoder = Decoder()
     private val hints = mapOf(DecodeHintType.TRY_HARDER to true)
 
     fun analyze(luma: ByteArray, width: Int, height: Int): ZxingQrAnalysis? {
-        if (width <= 0 || height <= 0 || luma.size < width * height) return null
+        val totalStartNs = System.nanoTime()
+        if (width <= 0 || height <= 0 || luma.size < width * height) {
+            return ZxingQrAnalysis(
+                payload = ByteArray(0),
+                outerQuad = null,
+                stage = "INPUT_INVALID",
+                totalMs = elapsedMs(totalStartNs),
+            )
+        }
 
-        return try {
+        val bitmap = try {
             val source = PlanarYUVLuminanceSource(
                 luma,
                 width,
@@ -45,35 +64,85 @@ internal class ZxingQrGeometryDetector {
                 height,
                 false,
             )
-            val bitmap = BinaryBitmap(HybridBinarizer(source))
-            val detectorResult = Detector(bitmap.blackMatrix).detect(hints)
-            val dimension = detectorResult.bits.width
-            val points = detectorResult.points
+            BinaryBitmap(HybridBinarizer(source))
+        } catch (t: Throwable) {
+            return failure("BINARIZE_FAIL", t, totalStartNs)
+        }
 
-            val outerQuad = if (dimension > 0 && points.size >= 4) {
-                projectOuterQuad(
-                    dimension = dimension,
-                    topLeft = points[1],
-                    topRight = points[2],
-                    bottomLeft = points[0],
-                    alignment = points[3],
-                )
-            } else {
-                null
-            }
+        val detectStartNs = System.nanoTime()
+        val detectorResult = try {
+            Detector(bitmap.blackMatrix).detect(hints)
+        } catch (t: Throwable) {
+            return failure(
+                stage = "DETECT_FAIL",
+                throwable = t,
+                totalStartNs = totalStartNs,
+                detectMs = elapsedMs(detectStartNs),
+            )
+        }
+        val detectMs = elapsedMs(detectStartNs)
+        val dimension = detectorResult.bits.width
+        val points = detectorResult.points
 
-            val payload = try {
-                val decoded = decoder.decode(detectorResult.bits, hints)
-                concatenateByteSegments(decoded.byteSegments)
-            } catch (_: Throwable) {
-                ByteArray(0)
-            }
-
-            ZxingQrAnalysis(payload = payload, outerQuad = outerQuad)
-        } catch (_: Throwable) {
+        val outerQuad = if (dimension > 0 && points.size >= 4) {
+            projectOuterQuad(
+                dimension = dimension,
+                topLeft = points[1],
+                topRight = points[2],
+                bottomLeft = points[0],
+                alignment = points[3],
+            )
+        } else {
             null
         }
+
+        val decodeStartNs = System.nanoTime()
+        return try {
+            val decoded = decoder.decode(detectorResult.bits, hints)
+            val payload = concatenateByteSegments(decoded.byteSegments)
+            ZxingQrAnalysis(
+                payload = payload,
+                outerQuad = outerQuad,
+                stage = "DECODE_OK",
+                dimension = dimension,
+                pointCount = points.size,
+                detectMs = detectMs,
+                decodeMs = elapsedMs(decodeStartNs),
+                totalMs = elapsedMs(totalStartNs),
+            )
+        } catch (t: Throwable) {
+            ZxingQrAnalysis(
+                payload = ByteArray(0),
+                outerQuad = outerQuad,
+                stage = "DECODE_FAIL",
+                exceptionType = t.javaClass.simpleName,
+                exceptionMessage = t.message,
+                dimension = dimension,
+                pointCount = points.size,
+                detectMs = detectMs,
+                decodeMs = elapsedMs(decodeStartNs),
+                totalMs = elapsedMs(totalStartNs),
+            )
+        }
     }
+
+    private fun failure(
+        stage: String,
+        throwable: Throwable,
+        totalStartNs: Long,
+        detectMs: Double? = null,
+    ): ZxingQrAnalysis = ZxingQrAnalysis(
+        payload = ByteArray(0),
+        outerQuad = null,
+        stage = stage,
+        exceptionType = throwable.javaClass.simpleName,
+        exceptionMessage = throwable.message,
+        detectMs = detectMs,
+        totalMs = elapsedMs(totalStartNs),
+    )
+
+    private fun elapsedMs(startNs: Long): Double =
+        (System.nanoTime() - startNs) / 1_000_000.0
 
     private fun concatenateByteSegments(segments: List<ByteArray>?): ByteArray {
         if (segments.isNullOrEmpty()) return ByteArray(0)
