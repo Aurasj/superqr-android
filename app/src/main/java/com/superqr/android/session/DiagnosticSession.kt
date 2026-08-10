@@ -35,24 +35,36 @@ class DiagnosticSession(private val context: Context) {
     private var wasTracking = false
     private var wasLost = false
     private var observedFrames = 0
+    private var sessionActive = false
 
     fun startSession() {
         resetForNewSession()
+        sessionActive = true
         frameGate.start()
         _sessionState.value = SessionState(phase = SessionPhase.SEARCHING, campaignId = recorder.campaignId)
     }
 
     fun stopSession() {
+        if (!sessionActive) return
         frameGate.stop()
-        val hasObservations = recorder.hasLines
+        sessionActive = false
+        recorder.recordSessionStop(
+            completedNs = System.nanoTime(),
+            analyzedFrameCount = observedFrames,
+            extra = mapOf(
+                "final_phase" to _sessionState.value.phase.name,
+                "final_profile" to _sessionState.value.profileName,
+            ),
+        )
         _sessionState.value = _sessionState.value.copy(
-            phase = if (hasObservations) SessionPhase.COMPLETE else SessionPhase.IDLE,
-            hasObservations = hasObservations,
+            phase = SessionPhase.COMPLETE,
+            hasObservations = recorder.hasLines,
         )
     }
 
     fun reset() {
         frameGate.stop()
+        sessionActive = false
         resetForNewSession()
     }
 
@@ -217,11 +229,13 @@ class DiagnosticSession(private val context: Context) {
             wasLost = false
             return SessionPhase.QR_DETECTED
         }
-        wasTracking = result.framing.trackingState == Phase1TrackingState.TRACKING
-        wasLost = !wasTracking
-        return if (qr.quad?.size == 4) SessionPhase.QR_DETECTED
-        else if (wasTracking || wasLost) SessionPhase.LOST
-        else SessionPhase.SEARCHING
+
+        // A raw OpenCV quadrilateral is only a candidate. It is deliberately not
+        // surfaced as a QR detection because random high-contrast objects can
+        // produce transient quads while the camera scans a normal scene.
+        wasTracking = false
+        wasLost = false
+        return SessionPhase.SEARCHING
     }
 
     fun snapshot(): Phase1RunSnapshot = recorder.snapshot()
@@ -233,6 +247,7 @@ class DiagnosticSession(private val context: Context) {
 
     fun close() {
         frameGate.stop()
+        sessionActive = false
         engine.close()
     }
 }
