@@ -189,9 +189,14 @@ private fun PreviewPanel(
                 color = Color.Black.copy(alpha = 0.76f),
                 shape = RoundedCornerShape(7.dp),
             ) {
-                val margin = geometry.minimumMarginPx?.let { " • ${it.toInt()} px margin" } ?: ""
+                val label = if (geometry.mode == Phase1FramingMode.QR) {
+                    if (geometry.status == Phase1FramingStatus.QR_GOOD) "QR DECODED • FULL FRAME" else "QR SEARCH • FULL FRAME"
+                } else {
+                    val margin = geometry.minimumMarginPx?.let { " • ${it.toInt()} px margin" } ?: ""
+                    "${geometry.visibleFinders} / 4 FINDERS$margin"
+                }
                 Text(
-                    "${geometry.visibleFinders} / 4 FINDERS$margin",
+                    label,
                     Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
                     color = tint,
                     fontSize = 9.sp,
@@ -252,30 +257,32 @@ private fun AnalysisGeometryOverlay(geometry: Phase1FramingGeometry, modifier: M
                 style = Stroke(width = 1.5.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f))),
             )
         }
-        geometry.candidateQuad?.let { candidate ->
-            path(candidate)?.let {
-                drawPath(
-                    it, LabWarn.copy(alpha = 0.9f),
-                    style = Stroke(width = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))),
+        if (geometry.mode == Phase1FramingMode.GRID) {
+            geometry.candidateQuad?.let { candidate ->
+                path(candidate)?.let {
+                    drawPath(
+                        it, LabWarn.copy(alpha = 0.9f),
+                        style = Stroke(width = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))),
+                    )
+                }
+            }
+            geometry.carrierQuad?.let { carrier ->
+                path(carrier)?.let { drawPath(it, LabGood, style = Stroke(width = 2.5.dp.toPx())) }
+            }
+            geometry.finderQuads.forEach { finder ->
+                path(finder)?.let {
+                    drawPath(it, LabGood.copy(alpha = 0.18f))
+                    drawPath(it, LabGood, style = Stroke(width = 2.5.dp.toPx()))
+                }
+            }
+            geometry.finderCenters.forEach { center ->
+                drawCircle(
+                    color = if (geometry.status == Phase1FramingStatus.GOOD) LabGood else LabWarn,
+                    radius = 5.dp.toPx(),
+                    center = map(center),
+                    style = Stroke(width = 2.dp.toPx()),
                 )
             }
-        }
-        geometry.carrierQuad?.let { carrier ->
-            path(carrier)?.let { drawPath(it, LabGood, style = Stroke(width = 2.5.dp.toPx())) }
-        }
-        geometry.finderQuads.forEach { finder ->
-            path(finder)?.let {
-                drawPath(it, LabGood.copy(alpha = 0.18f))
-                drawPath(it, LabGood, style = Stroke(width = 2.5.dp.toPx()))
-            }
-        }
-        geometry.finderCenters.forEach { center ->
-            drawCircle(
-                color = if (geometry.status == Phase1FramingStatus.GOOD) LabGood else LabWarn,
-                radius = 5.dp.toPx(),
-                center = map(center),
-                style = Stroke(width = 2.dp.toPx()),
-            )
         }
         drawRect(
             Color.White.copy(alpha = 0.35f),
@@ -287,10 +294,10 @@ private fun AnalysisGeometryOverlay(geometry: Phase1FramingGeometry, modifier: M
 }
 
 private fun framingTint(status: Phase1FramingStatus): Color = when (status) {
-    Phase1FramingStatus.GOOD -> LabGood
+    Phase1FramingStatus.GOOD, Phase1FramingStatus.QR_GOOD -> LabGood
     Phase1FramingStatus.MOVE_BACK -> LabWarn
     Phase1FramingStatus.NOT_FOUND -> LabBad
-    Phase1FramingStatus.ALIGNING -> LabAccent
+    Phase1FramingStatus.ALIGNING, Phase1FramingStatus.QR_SEARCHING -> LabAccent
 }
 
 @Composable
