@@ -19,6 +19,20 @@ class Phase1QrFramingTest {
     }
 
     @Test
+    fun detectedQuadReportsDetectedInsteadOfSearching() {
+        val quad = listOf(
+            doubleArrayOf(100.0, 100.0), doubleArrayOf(600.0, 100.0),
+            doubleArrayOf(600.0, 600.0), doubleArrayOf(100.0, 600.0),
+        )
+        val geometry = Phase1FramingEvaluator.evaluateQr(
+            720, 1280,
+            V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED", quad = quad),
+        )
+        assertEquals(Phase1FramingStatus.QR_DETECTED, geometry.status)
+        assertEquals("QR_NATIVE_DETECTED", geometry.source)
+    }
+
+    @Test
     fun validatedQrReportsGood() {
         val envelope = V7LabRunEnvelope(V7LabRunState.READY, 5, 0x98D9, 0, 256, 3)
         val geometry = Phase1FramingEvaluator.evaluateQr(
