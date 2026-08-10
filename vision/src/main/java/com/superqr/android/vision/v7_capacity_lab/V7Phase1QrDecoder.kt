@@ -83,7 +83,11 @@ class V7Phase1QrDecoder : AutoCloseable {
     }
 
     private fun Mat.toQuad(): List<DoubleArray>? {
-        if (empty() || rows() < 4) return null
+        // OpenCV commonly returns one QR as a 1x4 CV_32FC2 Mat, not four rows.
+        // total() counts the four 2-channel point elements regardless of whether
+        // the Java binding exposes them as 1x4 or 4x1. The previous rows() < 4
+        // guard therefore discarded genuine QR geometry on Android.
+        if (empty() || total() < 4L) return null
         val mat2f = MatOfPoint2f()
         return try {
             convertTo(mat2f, CvType.CV_32FC2)
@@ -100,7 +104,12 @@ class V7Phase1QrDecoder : AutoCloseable {
         if (detector != null) return
         OpenCvRuntime.ensureLoaded()
         gray = Mat()
-        detector = QRCodeDetector()
+        detector = QRCodeDetector().apply {
+            // Alignment markers materially improve corner refinement on dense
+            // V27/V40 controls; OpenCV documents this as enabled by default, but
+            // set it explicitly so the lab behavior does not depend on defaults.
+            setUseAlignmentMarkers(true)
+        }
         points = Mat()
     }
 
