@@ -51,6 +51,9 @@ class CameraManager(
     val resolutionLabel: StateFlow<String> = _resolutionLabel.asStateFlow()
 
     val previewView: PreviewView = PreviewView(context).apply {
+        // FIT_CENTER is intentional: show the complete camera frame. Preview and
+        // ImageAnalysis are forced to the same 4:3 resolution family below, so
+        // the letterboxed image is the same sensor FOV consumed by the decoder.
         scaleType = PreviewView.ScaleType.FIT_CENTER
         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
     }
@@ -70,8 +73,11 @@ class CameraManager(
     var onFrame: ((CameraFrame) -> Unit)? = null
 
     companion object {
+        // 4:3 preserves substantially more sensor FOV than 16:9 in portrait.
+        // This is especially important at close range: if the operator can see
+        // the whole carrier in Preview, ImageAnalysis must receive that same FOV.
         const val TARGET_WIDTH = 1280
-        const val TARGET_HEIGHT = 720
+        const val TARGET_HEIGHT = 960
         const val MAX_ANALYSIS_PIXELS = 1280L * 960
     }
 
@@ -127,9 +133,15 @@ class CameraManager(
         try {
             cameraProvider.unbindAll()
             val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
+
+            // One selector for BOTH use cases. Previously Preview used CameraX's
+            // default resolution while ImageAnalysis was forced to 16:9/720p.
+            // On the A53 this made the visible preview roughly 3:4 portrait while
+            // the decoder consumed a different 9:16 crop. At close range the
+            // carrier could therefore look complete in UI but be clipped for vision.
             val resolutionSelector = ResolutionSelector.Builder()
                 .setAllowedResolutionMode(ResolutionSelector.PREFER_CAPTURE_RATE_OVER_HIGHER_RESOLUTION)
-                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                 .setResolutionStrategy(
                     ResolutionStrategy(
                         Size(TARGET_WIDTH, TARGET_HEIGHT),
@@ -140,6 +152,7 @@ class CameraManager(
 
             val preview = Preview.Builder()
                 .setTargetRotation(rotation)
+                .setResolutionSelector(resolutionSelector)
                 .build()
                 .also { it.surfaceProvider = previewView.surfaceProvider }
             val analysis = ImageAnalysis.Builder()
@@ -185,7 +198,7 @@ class CameraManager(
                 cameraProvider.unbindAll()
                 return
             }
-            _resolutionLabel.value = "${TARGET_WIDTH}x${TARGET_HEIGHT} target"
+            _resolutionLabel.value = "${TARGET_WIDTH}x${TARGET_HEIGHT} 4:3 target"
             _status.value = CameraStatus.RUNNING
         } catch (_: Throwable) {
             boundAnalysis?.clearAnalyzer()
@@ -218,7 +231,7 @@ class CameraManager(
                 return
             }
             if (!luma.packFrom(image)) return
-            _resolutionLabel.value = "${luma.width}x${luma.height}"
+            _resolutionLabel.value = "${luma.width}x${luma.height} decoder FOV"
             chroma.bind(image)
             val sourceTransform = try { transforms.getOutputTransform(image) } catch (_: Throwable) { null } ?: return
             if (generation.get() != configuredGeneration) return
