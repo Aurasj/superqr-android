@@ -17,6 +17,7 @@ enum class Phase1FramingStatus(val label: String) {
     MOVE_BACK("MOVE PHONE BACK"),
     NOT_FOUND("CARRIER NOT FOUND"),
     QR_SEARCHING("QR SEARCHING"),
+    QR_DETECTED("QR DETECTED"),
     QR_GOOD("QR FRAMING GOOD"),
 }
 
@@ -166,6 +167,7 @@ object Phase1FramingEvaluator {
         if (frameWidth <= 0 || frameHeight <= 0) return Phase1FramingGeometry.empty()
         val valid = qr.valid && qr.envelope != null
         val quad = qr.quad?.mapNotNull(::diagnosticPoint)?.takeIf { it.size == 4 }
+        val hasQrEvidence = quad != null || qr.decoded
         val safeInset = safeInset(frameWidth, frameHeight)
         val sizeFraction = quad?.let { quadSizeFraction(it, frameWidth, frameHeight) }
         val skew = quad?.let(::quadSkew)
@@ -179,6 +181,7 @@ object Phase1FramingEvaluator {
             clipped -> Phase1FramingStatus.MOVE_BACK
             tooSmall -> Phase1FramingStatus.TOO_SMALL
             skewed -> Phase1FramingStatus.PERSPECTIVE_SKEWED
+            hasQrEvidence -> Phase1FramingStatus.QR_DETECTED
             else -> Phase1FramingStatus.QR_SEARCHING
         }
         return Phase1FramingGeometry(
@@ -197,9 +200,10 @@ object Phase1FramingEvaluator {
                 tooSmall -> "QR marker is small in frame; move the phone closer"
                 skewed -> "Viewing angle is skewed; hold the phone more parallel to the screen"
                 qr.decoded -> "QR detected but payload validation failed: ${qr.failure ?: "invalid payload"}"
+                quad != null -> "QR geometry detected; decoding the dense payload"
                 else -> "Keep the complete QR inside the frame; OpenCV scans this full analysis image"
             },
-            source = if (valid) "QR_NATIVE_LOCKED" else "QR_NATIVE_SEARCH",
+            source = if (valid) "QR_NATIVE_LOCKED" else if (hasQrEvidence) "QR_NATIVE_DETECTED" else "QR_NATIVE_SEARCH",
         )
     }
 
