@@ -7,6 +7,14 @@ import org.junit.Test
 
 class Phase1AnalysisPolicyTest {
     @Test
+    fun usesFourByThreePhysicalTargetForPreviewParity() {
+        assertEquals(1280, Phase1AnalysisPolicy.TARGET_WIDTH)
+        assertEquals(960, Phase1AnalysisPolicy.TARGET_HEIGHT)
+        assertTrue(Phase1AnalysisPolicy.accepts(1280, 960))
+        assertTrue(Phase1AnalysisPolicy.accepts(960, 1280))
+    }
+
+    @Test
     fun rejectsOversizedPhysicalFramesBeforePacking() {
         assertFalse(Phase1AnalysisPolicy.accepts(3456, 3456))
         assertTrue(Phase1AnalysisPolicy.accepts(1280, 720))
