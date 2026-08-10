@@ -5,6 +5,7 @@ import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfPoint2f
 import org.opencv.objdetect.QRCodeDetector
+import org.opencv.objdetect.QRCodeDetectorAruco
 import java.util.zip.CRC32
 
 data class V7Phase1QrResult(
@@ -27,12 +28,19 @@ data class V7Phase1QrResult(
  * those points through decodeBytes() removes repeated full-image finder scans
  * from the hot path. Bounded misses fall back to full detection so V27 -> V40,
  * phone motion, and reacquisition remain safe.
+ *
+ * Dense V27/V40 camera images also get a bounded QRCodeDetectorAruco fallback.
+ * OpenCV 5 exposes it as a second QR detector based on ArUco-style finder search;
+ * the fallback is only paid after the normal detector misses.
  */
 class V7Phase1QrDecoder : AutoCloseable {
     private var gray: Mat? = null
     private var detector: QRCodeDetector? = null
+    private var arucoDetector: QRCodeDetectorAruco? = null
     private var points: Mat? = null
+    private var arucoPoints: Mat? = null
     private var trackedPointsValid = false
+    private var trackedWithAruco = false
     private var trackedDecodeMisses = 0
 
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
@@ -56,30 +64,65 @@ class V7Phase1QrDecoder : AutoCloseable {
         ensureInitialized()
         val target = checkNotNull(gray)
         val qr = checkNotNull(detector)
+        val qrAruco = checkNotNull(arucoDetector)
         val detectedPoints = checkNotNull(points)
+        val fallbackPoints = checkNotNull(arucoPoints)
         target.create(height, width, CvType.CV_8UC1)
         target.put(0, 0, luma)
 
         if (trackedPointsValid && !detectedPoints.empty()) {
-            val payload = qr.decodeBytes(target, detectedPoints)
+            val payload = if (trackedWithAruco) {
+                qrAruco.decodeBytes(target, detectedPoints)
+            } else {
+                qr.decodeBytes(target, detectedPoints)
+            }
             if (payload.isNotEmpty()) {
                 trackedDecodeMisses = 0
                 return payload to detectedPoints.toQuad()
             }
             trackedDecodeMisses++
-            if (trackedDecodeMisses < MAX_TRACKED_DECODE_MISSES) return ByteArray(0) to detectedPoints.toQuad()
+            if (trackedDecodeMisses < MAX_TRACKED_DECODE_MISSES) {
+                return ByteArray(0) to detectedPoints.toQuad()
+            }
             trackedPointsValid = false
+            trackedWithAruco = false
             trackedDecodeMisses = 0
         }
 
-        // Search the exact complete normalized ImageAnalysis frame. Supplying an
-        // output points Mat lets the next frames bypass detection once geometry
-        // is known. Even if this frame is a rolling transition and payload decode
-        // fails, useful detected points may still seed the next frame's fast path.
+        // Fast/default path first.
         val payload = qr.detectAndDecodeBytes(target, detectedPoints)
-        trackedPointsValid = !detectedPoints.empty()
+        if (payload.isNotEmpty() || !detectedPoints.empty()) {
+            trackedPointsValid = !detectedPoints.empty()
+            trackedWithAruco = false
+            trackedDecodeMisses = 0
+            if (payload.isNotEmpty()) return payload to detectedPoints.toQuad()
+
+            // The normal detector found geometry but failed to decode. Dense camera
+            // captures can still benefit from the alternate finder implementation.
+            val fallbackPayload = qrAruco.detectAndDecodeBytes(target, fallbackPoints)
+            if (fallbackPayload.isNotEmpty() || !fallbackPoints.empty()) {
+                fallbackPoints.copyTo(detectedPoints)
+                trackedPointsValid = true
+                trackedWithAruco = true
+                return fallbackPayload to detectedPoints.toQuad()
+            }
+            return ByteArray(0) to detectedPoints.toQuad()
+        }
+
+        // No standard QR geometry: try OpenCV 5's ArUco-based QR detector once.
+        val fallbackPayload = qrAruco.detectAndDecodeBytes(target, fallbackPoints)
+        if (fallbackPayload.isNotEmpty() || !fallbackPoints.empty()) {
+            fallbackPoints.copyTo(detectedPoints)
+            trackedPointsValid = true
+            trackedWithAruco = true
+            trackedDecodeMisses = 0
+            return fallbackPayload to detectedPoints.toQuad()
+        }
+
+        trackedPointsValid = false
+        trackedWithAruco = false
         trackedDecodeMisses = 0
-        return payload to detectedPoints.toQuad()
+        return ByteArray(0) to null
     }
 
     private fun Mat.toQuad(): List<DoubleArray>? {
@@ -105,21 +148,24 @@ class V7Phase1QrDecoder : AutoCloseable {
         OpenCvRuntime.ensureLoaded()
         gray = Mat()
         detector = QRCodeDetector().apply {
-            // Alignment markers materially improve corner refinement on dense
-            // V27/V40 controls; OpenCV documents this as enabled by default, but
-            // set it explicitly so the lab behavior does not depend on defaults.
             setUseAlignmentMarkers(true)
         }
+        arucoDetector = QRCodeDetectorAruco()
         points = Mat()
+        arucoPoints = Mat()
     }
 
     override fun close() {
         gray?.release()
         points?.release()
+        arucoPoints?.release()
         gray = null
         points = null
+        arucoPoints = null
         detector = null
+        arucoDetector = null
         trackedPointsValid = false
+        trackedWithAruco = false
         trackedDecodeMisses = 0
     }
 
