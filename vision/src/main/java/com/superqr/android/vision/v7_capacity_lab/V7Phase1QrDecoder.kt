@@ -7,6 +7,7 @@ import org.opencv.core.MatOfPoint2f
 import org.opencv.objdetect.QRCodeDetector
 import org.opencv.objdetect.QRCodeDetectorAruco
 import java.util.zip.CRC32
+import kotlin.math.abs
 import kotlin.math.hypot
 
 data class V7Phase1QrResult(
@@ -30,12 +31,14 @@ data class V7Phase1QrResult(
  * bottom-right corner can move because standard QR has no finder pattern there.
  * While only QR_DETECTED, every QR frame therefore gets a fresh full detection.
  *
- * Overlay stabilization is deliberately motion-aware. When the three finder
- * anchored corners (TL/TR/BL) are essentially static, bottom-right-only jitter
- * may be suppressed and the quad lightly smoothed. As soon as those real finder
- * anchors move, smoothing is bypassed and the newest geometry is surfaced
- * immediately. A frame with no QR geometry clears the overlay immediately; no
- * stale border is held across misses.
+ * Overlay geometry intentionally trusts the three finder-anchored QR corners
+ * (TL/TR/BL) and does not trust OpenCV's raw bottom-right estimate. The visible
+ * BR is reconstructed from those three anchors. On the first observation it is
+ * the affine/parallelogram completion TR + BL - TL; on following observations
+ * the previous BR is transported by the affine transform defined by the three
+ * current finder anchors. This keeps a static BR fixed while still following
+ * real phone translation/scale/rotation immediately. Raw OpenCV geometry remains
+ * untouched for actual QR decoding.
  *
  * Dense V27/V40 camera images also get a bounded QRCodeDetectorAruco fallback.
  */
@@ -69,7 +72,7 @@ class V7Phase1QrDecoder : AutoCloseable {
         return validatePayload(payload, version, expectedBytes, quad)
     }
 
-    /** Returns decoded payload plus motion-responsive display geometry. */
+    /** Returns decoded payload plus finder-anchor-derived display geometry. */
     private fun decode(luma: ByteArray, width: Int, height: Int): Pair<ByteArray, List<DoubleArray>?> {
         require(width > 0 && height > 0 && luma.size >= width * height)
         ensureInitialized()
@@ -144,7 +147,10 @@ class V7Phase1QrDecoder : AutoCloseable {
         standard == null -> fallback
         fallback == null -> standard
         stableQuad == null -> standard
-        quadDistance(standard, checkNotNull(stableQuad)) <= quadDistance(fallback, checkNotNull(stableQuad)) -> standard
+        // Ignore BR when comparing detector candidates; TL/TR/BL are the three
+        // QR finder-anchored corners and are the trustworthy geometric evidence.
+        anchorDistance(standard, checkNotNull(stableQuad)) <=
+            anchorDistance(fallback, checkNotNull(stableQuad)) -> standard
         else -> fallback
     }
 
@@ -154,75 +160,84 @@ class V7Phase1QrDecoder : AutoCloseable {
             return null
         }
 
+        // OpenCV QR ordering is TL, TR, BR, BL. Surface the three real finder
+        // anchors immediately; only BR is reconstructed for presentation.
         val observed = raw.map { doubleArrayOf(it[0], it[1]) }
         val previous = stableQuad
-        if (previous == null || previous.size != 4) {
-            stableQuad = observed
-            return observed
+        val reconstructedBr = if (previous == null || previous.size != 4) {
+            parallelogramBottomRight(observed)
+        } else {
+            transportBottomRight(previous, observed) ?: parallelogramBottomRight(observed)
         }
 
-        val side = averageSide(observed).coerceAtLeast(1.0)
-        val anchorStaticThreshold = maxOf(MIN_STATIC_ANCHOR_PX, side * STATIC_ANCHOR_SIDE_FRACTION)
-        val anchorIndices = intArrayOf(0, 1, 3)
-        val averageAnchorMotion = anchorIndices.sumOf { index ->
-            pointDistance(previous[index], observed[index])
-        } / anchorIndices.size.toDouble()
-
-        // Genuine phone/camera motion: never ease toward the new position. Surface
-        // the new detector geometry immediately so the border cannot lag in space.
-        if (averageAnchorMotion > anchorStaticThreshold) {
-            stableQuad = observed
-            return observed
-        }
-
-        // Static scene: the three finder anchors agree, so suppress an isolated BR
-        // estimator jump and lightly smooth sub-pixel/finder jitter.
-        val current = suppressBottomRightOnlyJump(previous, observed)
-        val alpha = STATIC_QUAD_EMA_ALPHA
-        val next = List(4) { index ->
-            doubleArrayOf(
-                previous[index][0] + (current[index][0] - previous[index][0]) * alpha,
-                previous[index][1] + (current[index][1] - previous[index][1]) * alpha,
-            )
-        }
+        val next = listOf(
+            doubleArrayOf(observed[0][0], observed[0][1]),
+            doubleArrayOf(observed[1][0], observed[1][1]),
+            reconstructedBr,
+            doubleArrayOf(observed[3][0], observed[3][1]),
+        )
         stableQuad = next
         return next
     }
 
-    private fun suppressBottomRightOnlyJump(
+    /**
+     * Affine coordinates of previous BR relative to previous TL/TR/BL are
+     * transported onto the current TL/TR/BL. This follows real motion from the
+     * finder anchors without consulting the noisy current raw BR estimate.
+     */
+    private fun transportBottomRight(
         previous: List<DoubleArray>,
         current: List<DoubleArray>,
-    ): List<DoubleArray> {
-        val side = averageSide(current).coerceAtLeast(1.0)
-        val bottomRightJumpThreshold = maxOf(MIN_BOTTOM_RIGHT_JUMP_PX, side * BOTTOM_RIGHT_JUMP_SIDE_FRACTION)
-        val bottomRightMotion = pointDistance(previous[2], current[2])
-        if (bottomRightMotion <= bottomRightJumpThreshold) return current
-        return List(4) { index ->
-            if (index == 2) {
-                doubleArrayOf(previous[2][0], previous[2][1])
-            } else {
-                doubleArrayOf(current[index][0], current[index][1])
-            }
-        }
+    ): DoubleArray? {
+        if (previous.size != 4 || current.size != 4) return null
+        val a = previous[0]
+        val b = previous[1]
+        val c = previous[3]
+        val p = previous[2]
+
+        val bx = b[0] - a[0]
+        val by = b[1] - a[1]
+        val cx = c[0] - a[0]
+        val cy = c[1] - a[1]
+        val px = p[0] - a[0]
+        val py = p[1] - a[1]
+        val det = bx * cy - by * cx
+        if (!det.isFinite() || abs(det) < 1e-6) return null
+
+        val u = (px * cy - py * cx) / det
+        val v = (bx * py - by * px) / det
+        if (!u.isFinite() || !v.isFinite()) return null
+
+        val na = current[0]
+        val nb = current[1]
+        val nc = current[3]
+        val nbx = nb[0] - na[0]
+        val nby = nb[1] - na[1]
+        val ncx = nc[0] - na[0]
+        val ncy = nc[1] - na[1]
+        val x = na[0] + u * nbx + v * ncx
+        val y = na[1] + u * nby + v * ncy
+        if (!x.isFinite() || !y.isFinite()) return null
+        return doubleArrayOf(x, y)
+    }
+
+    private fun parallelogramBottomRight(quad: List<DoubleArray>): DoubleArray {
+        val tl = quad[0]
+        val tr = quad[1]
+        val bl = quad[3]
+        return doubleArrayOf(
+            tr[0] + bl[0] - tl[0],
+            tr[1] + bl[1] - tl[1],
+        )
     }
 
     private fun pointDistance(a: DoubleArray, b: DoubleArray): Double =
         hypot(a[0] - b[0], a[1] - b[1])
 
-    private fun averageSide(quad: List<DoubleArray>): Double {
-        if (quad.size != 4) return 0.0
-        var sum = 0.0
-        for (index in quad.indices) {
-            val a = quad[index]
-            val b = quad[(index + 1) % quad.size]
-            sum += pointDistance(a, b)
-        }
-        return sum / 4.0
-    }
-
-    private fun quadDistance(a: List<DoubleArray>, b: List<DoubleArray>): Double {
+    private fun anchorDistance(a: List<DoubleArray>, b: List<DoubleArray>): Double {
         if (a.size != 4 || b.size != 4) return Double.POSITIVE_INFINITY
-        return a.indices.sumOf { index -> pointDistance(a[index], b[index]) } / 4.0
+        val anchors = intArrayOf(0, 1, 3)
+        return anchors.sumOf { index -> pointDistance(a[index], b[index]) } / anchors.size.toDouble()
     }
 
     private fun Mat.toQuad(): List<DoubleArray>? {
@@ -269,11 +284,6 @@ class V7Phase1QrDecoder : AutoCloseable {
     companion object {
         // One failed tracked decode immediately falls back to a fresh detector pass.
         private const val MAX_TRUSTED_DECODE_MISSES = 1
-        private const val STATIC_QUAD_EMA_ALPHA = 0.45
-        private const val STATIC_ANCHOR_SIDE_FRACTION = 0.015
-        private const val MIN_STATIC_ANCHOR_PX = 3.0
-        private const val BOTTOM_RIGHT_JUMP_SIDE_FRACTION = 0.03
-        private const val MIN_BOTTOM_RIGHT_JUMP_PX = 7.0
 
         fun validatePayload(
             payload: ByteArray,
