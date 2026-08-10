@@ -265,10 +265,11 @@ class VisionEngine(private val manifest: Phase1Manifest) {
             )
         }
 
-        scheduler.missed(Phase1AnalysisPath.QR)
+        val qrCandidate = qr.quad != null
+        scheduler.missed(Phase1AnalysisPath.QR, qrCandidate = qrCandidate)
         return VisionResult(
             path = Phase1AnalysisPath.QR,
-            trackingState = Phase1TrackingState.SEARCHING,
+            trackingState = if (qrCandidate) Phase1TrackingState.TRACKING else Phase1TrackingState.SEARCHING,
             framing = Phase1FramingEvaluator.evaluateQr(width, height, qr),
             carrierAcquisition = null,
             qrResult = qr,
