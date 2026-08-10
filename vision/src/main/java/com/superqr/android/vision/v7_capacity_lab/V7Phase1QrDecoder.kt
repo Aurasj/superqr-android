@@ -3,7 +3,6 @@ package com.superqr.android.vision.v7_capacity_lab
 import com.superqr.android.vision.opencv.OpenCvRuntime
 import org.opencv.core.CvType
 import org.opencv.core.Mat
-import org.opencv.core.Rect
 import org.opencv.objdetect.QRCodeDetector
 import java.util.zip.CRC32
 
@@ -16,7 +15,7 @@ data class V7Phase1QrResult(
     val failure: String? = null,
 )
 
-/** Binary-safe OpenCV QR control decoder with a reused luma Mat. */
+/** Binary-safe OpenCV QR control decoder with a reused full-frame luma Mat. */
 class V7Phase1QrDecoder : AutoCloseable {
     private var gray: Mat? = null
     private var detector: QRCodeDetector? = null
@@ -37,6 +36,7 @@ class V7Phase1QrDecoder : AutoCloseable {
     }
 
     private fun decode(luma: ByteArray, width: Int, height: Int): ByteArray {
+        require(width > 0 && height > 0 && luma.size >= width * height)
         if (detector == null) {
             OpenCvRuntime.ensureLoaded()
             gray = Mat()
@@ -45,16 +45,12 @@ class V7Phase1QrDecoder : AutoCloseable {
         val target = checkNotNull(gray)
         target.create(height, width, CvType.CV_8UC1)
         target.put(0, 0, luma)
-        // The lab guide keeps the square marker centered. Restricting OpenCV's
-        // finder scan to that square avoids searching the unused portrait or
-        // landscape bands and materially reduces V27/V40 acquisition cost.
-        val side = minOf(width, height)
-        val roi = target.submat(Rect((width - side) / 2, (height - side) / 2, side, side))
-        return try {
-            detector!!.detectAndDecodeBytes(roi)
-        } finally {
-            roi.release()
-        }
+
+        // Do not hide a central square crop from the operator. The UI preview is
+        // the exact normalized ImageAnalysis frame, so QR acquisition must search
+        // that same complete frame. This also prevents a valid off-center QR from
+        // being fully visible in the UI while silently falling outside a decoder ROI.
+        return detector!!.detectAndDecodeBytes(target)
     }
 
     override fun close() {
