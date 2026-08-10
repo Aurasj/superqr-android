@@ -19,6 +19,8 @@ data class V7Phase1QrResult(
     val failure: String? = null,
     /** QR quadrangle in exact ImageAnalysis luma coordinates. */
     val quad: List<DoubleArray>? = null,
+    /** Phase 0 decoder-path telemetry. It never participates in decode decisions. */
+    val diagnostics: Map<String, Any?> = emptyMap(),
 )
 
 /**
@@ -42,6 +44,7 @@ class V7Phase1QrDecoder : AutoCloseable {
     private var points: Mat? = null
     private var arucoPoints: Mat? = null
     private val zxingGeometryDetector = ZxingQrGeometryDetector()
+    private val lastDiagnostics = LinkedHashMap<String, Any?>()
 
     /** True only after these OpenCV points have produced a non-empty payload. */
     private var trustedPointsValid = false
@@ -56,21 +59,43 @@ class V7Phase1QrDecoder : AutoCloseable {
 
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
         val (payload, quad) = decode(luma, width, height)
-        return validatePayload(payload, expectedVersion, expectedBytes, quad)
+        return attachDiagnostics(validatePayload(payload, expectedVersion, expectedBytes, quad))
     }
 
     fun analyzeAuto(luma: ByteArray, width: Int, height: Int, expectedBytesByVersion: Map<Int, Int>): V7Phase1QrResult {
         val (payload, quad) = decode(luma, width, height)
-        if (payload.isEmpty()) return V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED", quad = quad)
-        if (payload.size < 5) return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_HEADER", quad = quad)
+        if (payload.isEmpty()) {
+            return attachDiagnostics(
+                V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED", quad = quad)
+            )
+        }
+        if (payload.size < 5) {
+            return attachDiagnostics(
+                V7Phase1QrResult(true, false, null, payload.size, failure = "QR_HEADER", quad = quad)
+            )
+        }
         val version = payload[4].toInt() and 0xFF
         val expectedBytes = expectedBytesByVersion[version]
-            ?: return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_UNSUPPORTED_VERSION", quad = quad)
-        return validatePayload(payload, version, expectedBytes, quad)
+            ?: return attachDiagnostics(
+                V7Phase1QrResult(
+                    true,
+                    false,
+                    null,
+                    payload.size,
+                    failure = "QR_UNSUPPORTED_VERSION",
+                    quad = quad,
+                )
+            )
+        return attachDiagnostics(validatePayload(payload, version, expectedBytes, quad))
     }
+
+    private fun attachDiagnostics(result: V7Phase1QrResult): V7Phase1QrResult =
+        result.copy(diagnostics = LinkedHashMap(lastDiagnostics))
 
     private fun decode(luma: ByteArray, width: Int, height: Int): Pair<ByteArray, List<DoubleArray>?> {
         require(width > 0 && height > 0 && luma.size >= width * height)
+        lastDiagnostics.clear()
+        lastDiagnostics["decode_source"] = "NONE"
         ensureInitialized()
         val target = checkNotNull(gray)
         val qr = checkNotNull(detector)
@@ -81,13 +106,19 @@ class V7Phase1QrDecoder : AutoCloseable {
         target.put(0, 0, luma)
 
         if (trustedPointsValid && !detectedPoints.empty()) {
+            val trustedStartNs = System.nanoTime()
             val payload = if (trustedWithAruco) {
                 qrAruco.decodeBytes(target, detectedPoints)
             } else {
                 qr.decodeBytes(target, detectedPoints)
             }
             val rawQuad = detectedPoints.toQuad()
+            lastDiagnostics["opencv_trusted_attempted"] = true
+            lastDiagnostics["opencv_trusted_ms"] = elapsedMs(trustedStartNs)
+            lastDiagnostics["opencv_trusted_geometry"] = rawQuad != null
+            lastDiagnostics["opencv_trusted_payload_bytes"] = payload.size
             if (payload.isNotEmpty()) {
+                lastDiagnostics["decode_source"] = if (trustedWithAruco) "OPENCV_ARUCO_TRUSTED" else "OPENCV_STANDARD_TRUSTED"
                 trustedDecodeMisses = 0
                 return payload to decodedPresentationQuad(rawQuad)
             }
@@ -98,20 +129,34 @@ class V7Phase1QrDecoder : AutoCloseable {
             trustedPointsValid = false
             trustedWithAruco = false
             trustedDecodeMisses = 0
+        } else {
+            lastDiagnostics["opencv_trusted_attempted"] = false
         }
 
+        val standardStartNs = System.nanoTime()
         val payload = qr.detectAndDecodeBytes(target, detectedPoints)
+        val standardMs = elapsedMs(standardStartNs)
         val standardQuad = detectedPoints.toQuad()
+        lastDiagnostics["opencv_standard_ms"] = standardMs
+        lastDiagnostics["opencv_standard_geometry"] = standardQuad != null
+        lastDiagnostics["opencv_standard_payload_bytes"] = payload.size
         if (payload.isNotEmpty()) {
+            lastDiagnostics["decode_source"] = "OPENCV_STANDARD"
             trustedPointsValid = standardQuad != null
             trustedWithAruco = false
             trustedDecodeMisses = 0
             return payload to decodedPresentationQuad(standardQuad)
         }
 
+        val arucoStartNs = System.nanoTime()
         val fallbackPayload = qrAruco.detectAndDecodeBytes(target, fallbackPoints)
+        val arucoMs = elapsedMs(arucoStartNs)
         val fallbackQuad = fallbackPoints.toQuad()
+        lastDiagnostics["opencv_aruco_ms"] = arucoMs
+        lastDiagnostics["opencv_aruco_geometry"] = fallbackQuad != null
+        lastDiagnostics["opencv_aruco_payload_bytes"] = fallbackPayload.size
         if (fallbackPayload.isNotEmpty()) {
+            lastDiagnostics["decode_source"] = "OPENCV_ARUCO"
             fallbackPoints.copyTo(detectedPoints)
             trustedPointsValid = fallbackQuad != null
             trustedWithAruco = true
@@ -125,9 +170,11 @@ class V7Phase1QrDecoder : AutoCloseable {
             trustedWithAruco = false
             trustedDecodeMisses = 0
             val fallback = denseQrFallback(luma, width, height, candidateQuad)
+            if (fallback.payload.isNotEmpty()) lastDiagnostics["decode_source"] = "ZXING"
             return fallback.payload to fallback.quad
         }
 
+        lastDiagnostics["zxing_attempted"] = false
         trustedPointsValid = false
         trustedWithAruco = false
         trustedDecodeMisses = 0
@@ -174,11 +221,14 @@ class V7Phase1QrDecoder : AutoCloseable {
         val shouldRunZxing = geometryNeedsRefresh || zxingRetryCountdown <= 0
 
         if (shouldRunZxing) {
+            lastDiagnostics["zxing_attempted"] = true
             val analysis = zxingGeometryDetector.analyze(luma, width, height)
+            recordZxingDiagnostics(analysis)
             zxingRetryCountdown = ZXING_RETRY_INTERVAL_FRAMES
 
             val solved = analysis?.outerQuad
             val acceptedSolve = solved != null && projectiveSolutionMatchesObserved(solved, observed, side)
+            lastDiagnostics["zxing_projective_accepted"] = acceptedSolve
             if (acceptedSolve) {
                 projectiveQuad = copyQuad(checkNotNull(solved))
                 projectiveReferenceAnchors = copyQuad(observed)
@@ -197,10 +247,29 @@ class V7Phase1QrDecoder : AutoCloseable {
             return DenseFallbackResult(ByteArray(0), presentation)
         }
 
+        lastDiagnostics["zxing_attempted"] = false
+        lastDiagnostics["zxing_retry_countdown"] = zxingRetryCountdown
         zxingRetryCountdown--
         val presentation = currentProjectivePresentation(observed) ?: observed
         stableQuad = copyQuad(presentation)
         return DenseFallbackResult(ByteArray(0), presentation)
+    }
+
+    private fun recordZxingDiagnostics(analysis: ZxingQrAnalysis?) {
+        if (analysis == null) {
+            lastDiagnostics["zxing_stage"] = "NO_RESULT"
+            return
+        }
+        lastDiagnostics["zxing_stage"] = analysis.stage
+        lastDiagnostics["zxing_payload_bytes"] = analysis.payload.size
+        lastDiagnostics["zxing_projective_geometry"] = analysis.outerQuad != null
+        analysis.exceptionType?.let { lastDiagnostics["zxing_exception"] = it }
+        analysis.exceptionMessage?.takeIf { it.isNotBlank() }?.let { lastDiagnostics["zxing_exception_message"] = it }
+        analysis.dimension?.let { lastDiagnostics["zxing_dimension"] = it }
+        lastDiagnostics["zxing_point_count"] = analysis.pointCount
+        analysis.detectMs?.let { lastDiagnostics["zxing_detect_ms"] = it }
+        analysis.decodeMs?.let { lastDiagnostics["zxing_decode_ms"] = it }
+        lastDiagnostics["zxing_total_ms"] = analysis.totalMs
     }
 
     /**
@@ -300,6 +369,9 @@ class V7Phase1QrDecoder : AutoCloseable {
         return (top + left) * 0.5
     }
 
+    private fun elapsedMs(startNs: Long): Double =
+        (System.nanoTime() - startNs) / 1_000_000.0
+
     private fun Mat.toQuad(): List<DoubleArray>? {
         if (empty() || total() < 4L) return null
         val mat2f = MatOfPoint2f()
@@ -338,6 +410,7 @@ class V7Phase1QrDecoder : AutoCloseable {
         trustedPointsValid = false
         trustedWithAruco = false
         trustedDecodeMisses = 0
+        lastDiagnostics.clear()
         clearPresentationGeometry()
     }
 
