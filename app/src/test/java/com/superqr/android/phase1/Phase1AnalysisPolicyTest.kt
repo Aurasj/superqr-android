@@ -43,6 +43,21 @@ class Phase1AnalysisPolicyTest {
     }
 
     @Test
+    fun unlockedQrCandidateKeepsConsecutiveQrFramesUntilGeometryDisappears() {
+        val scheduler = Phase1AcquisitionScheduler()
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+
+        repeat(5) {
+            scheduler.missed(Phase1AnalysisPath.QR, qrCandidate = true)
+            assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+            assertEquals("SEARCH_QR", scheduler.state)
+        }
+
+        scheduler.missed(Phase1AnalysisPath.QR, qrCandidate = false)
+        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+    }
+
+    @Test
     fun lockedGridKeepsConsecutiveFramesDuringCarrierLikeMotion() {
         val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
         scheduler.locked(Phase1AnalysisPath.GRID)
