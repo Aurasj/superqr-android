@@ -30,7 +30,6 @@ data class CameraFrame(
     val height: Int,
     val sourceTransform: OutputTransform,
     val chromaReader: ImageProxyChromaSampler,
-    val qrDecoder: CameraQrDecoder,
     val sensorTimestamp: Long,
     val arrivalNs: Long,
     val cameraFps: Double,
@@ -234,7 +233,7 @@ class CameraManager(
             }
             if (!luma.packFrom(image)) return
             _resolutionLabel.value = "${luma.width}x${luma.height} decoder FOV"
-            chroma.bind(image)
+            chroma.bind(image).bindQrDecoder(qrReader.decoderFor(image))
             val sourceTransform = try { transforms.getOutputTransform(image) } catch (_: Throwable) { null } ?: return
             if (generation.get() != configuredGeneration) return
             onFrame?.invoke(
@@ -244,7 +243,6 @@ class CameraManager(
                     height = luma.height,
                     sourceTransform = sourceTransform,
                     chromaReader = chroma,
-                    qrDecoder = qrReader.decoderFor(image),
                     sensorTimestamp = sensorTimestamp,
                     arrivalNs = arrivalNs,
                     cameraFps = deliveredFps,
