@@ -59,11 +59,9 @@ class CameraManager(
     private var boundAnalysis: ImageAnalysis? = null
     private var boundCamera: Camera? = null
 
-    // This token belongs to CameraManager only. It invalidates callbacks and
-    // analyzer frames from an older CameraX binding; it is never exposed to the
-    // session/vision layers.
+    // CameraX callback invalidation only. This token never crosses into session/vision state.
     private val generation = AtomicInteger(0)
-    private val cameraDeliveredRate = V7AnalysisRateAccumulator(64)
+    private val cameraDeliveredRate = AnalysisRateAccumulator(64)
     private val transforms = ImageProxyTransformFactory().apply {
         setUsingCropRect(true)
         setUsingRotationDegrees(true)
@@ -83,24 +81,21 @@ class CameraManager(
         _resolutionLabel.value = ""
         val requestedGeneration = generation.incrementAndGet()
 
-        val executor = ContextCompat.getMainExecutor(context)
-        executor.execute {
+        ContextCompat.getMainExecutor(context).execute {
             try {
-                val p = ProcessCameraProvider.getInstance(context).get()
+                val cameraProvider = ProcessCameraProvider.getInstance(context).get()
                 if (generation.get() != requestedGeneration || _status.value != CameraStatus.STARTING) {
                     return@execute
                 }
-                provider = p
+                provider = cameraProvider
                 previewView.doOnLayout {
                     if (generation.get() != requestedGeneration || _status.value != CameraStatus.STARTING) {
                         return@doOnLayout
                     }
-                    bindCamera(p, lifecycleOwner, requestedGeneration)
+                    bindCamera(cameraProvider, lifecycleOwner, requestedGeneration)
                 }
             } catch (_: Throwable) {
-                if (generation.get() == requestedGeneration) {
-                    _status.value = CameraStatus.ERROR
-                }
+                if (generation.get() == requestedGeneration) _status.value = CameraStatus.ERROR
             }
         }
     }
@@ -111,10 +106,9 @@ class CameraManager(
         generation.incrementAndGet()
         boundAnalysis?.clearAnalyzer()
         boundAnalysis = null
-        try {
-            provider?.unbindAll()
-        } catch (_: Throwable) {}
+        try { provider?.unbindAll() } catch (_: Throwable) {}
         boundCamera = null
+        cameraDeliveredRate.reset()
         _cameraFps.value = 0.0
         _status.value = CameraStatus.IDLE
     }
@@ -125,18 +119,14 @@ class CameraManager(
     }
 
     private fun bindCamera(
-        provider: ProcessCameraProvider,
+        cameraProvider: ProcessCameraProvider,
         lifecycleOwner: LifecycleOwner,
         configuredGeneration: Int,
     ) {
         if (generation.get() != configuredGeneration || _status.value != CameraStatus.STARTING) return
-
         try {
-            provider.unbindAll()
-
-            val pv = previewView
-            val rotation = pv.display?.rotation ?: Surface.ROTATION_0
-
+            cameraProvider.unbindAll()
+            val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
             val resolutionSelector = ResolutionSelector.Builder()
                 .setAllowedResolutionMode(ResolutionSelector.PREFER_CAPTURE_RATE_OVER_HIGHER_RESOLUTION)
                 .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
@@ -144,25 +134,21 @@ class CameraManager(
                     ResolutionStrategy(
                         Size(TARGET_WIDTH, TARGET_HEIGHT),
                         ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
-                    ),
+                    )
                 )
                 .build()
 
             val preview = Preview.Builder()
                 .setTargetRotation(rotation)
                 .build()
-                .also { it.surfaceProvider = pv.surfaceProvider }
-
+                .also { it.surfaceProvider = previewView.surfaceProvider }
             val analysis = ImageAnalysis.Builder()
                 .setTargetRotation(rotation)
                 .setResolutionSelector(resolutionSelector)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
 
-            // A shared ViewPort is a correctness requirement for Phase 0. If it
-            // is unavailable we refuse to claim a running camera rather than
-            // silently running analysis with a lying/missing preview.
-            val viewPort = pv.viewPort
+            val viewPort = previewView.viewPort
             if (viewPort == null) {
                 _resolutionLabel.value = "VIEWPORT UNAVAILABLE"
                 _status.value = CameraStatus.ERROR
@@ -170,35 +156,25 @@ class CameraManager(
             }
 
             val useCases = listOf(preview, analysis)
-            val info = provider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
-            val base = SessionConfig.Builder(useCases)
-                .apply { setViewPort(viewPort) }
-                .build()
-            val ranges = try {
-                info.getSupportedFrameRateRanges(base)
-            } catch (_: Throwable) {
-                emptySet()
-            }
-
-            val chosen = ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
+            val info = cameraProvider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
+            val baseConfig = SessionConfig.Builder(useCases).apply { setViewPort(viewPort) }.build()
+            val ranges = try { info.getSupportedFrameRateRanges(baseConfig) } catch (_: Throwable) { emptySet() }
+            val chosenRange = ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
                 ?: ranges.filter { it.lower <= 30 && it.upper >= 30 }
                     .minByOrNull { it.upper - it.lower }
 
             val config = SessionConfig.Builder(useCases).apply {
                 setViewPort(viewPort)
-                if (chosen != null) setFrameRateRange(chosen)
+                if (chosenRange != null) setFrameRateRange(chosenRange)
             }.build()
 
             val luma = LumaFrameBuffer()
-            val chromaBuffers = ChromaSampleBuffers()
-            val chromaReader = ImageProxyChromaSampler(chromaBuffers)
-
+            val chroma = ImageProxyChromaSampler(ChromaSampleBuffers())
             analysis.setAnalyzer(analysisExecutor) { image ->
-                processFrame(image, luma, chromaReader, configuredGeneration)
+                processFrame(image, luma, chroma, configuredGeneration)
             }
             boundAnalysis = analysis
-
-            boundCamera = provider.bindToLifecycle(
+            boundCamera = cameraProvider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 config,
@@ -206,19 +182,16 @@ class CameraManager(
 
             if (generation.get() != configuredGeneration) {
                 analysis.clearAnalyzer()
-                provider.unbindAll()
+                cameraProvider.unbindAll()
                 return
             }
-
             _resolutionLabel.value = "${TARGET_WIDTH}x${TARGET_HEIGHT} target"
             _status.value = CameraStatus.RUNNING
         } catch (_: Throwable) {
             boundAnalysis?.clearAnalyzer()
             boundAnalysis = null
-            try { provider.unbindAll() } catch (_: Throwable) {}
-            if (generation.get() == configuredGeneration) {
-                _status.value = CameraStatus.ERROR
-            }
+            try { cameraProvider.unbindAll() } catch (_: Throwable) {}
+            if (generation.get() == configuredGeneration) _status.value = CameraStatus.ERROR
         }
     }
 
@@ -232,11 +205,10 @@ class CameraManager(
             image.close()
             return
         }
-
-        val sensorTs = image.imageInfo.timestamp
+        val sensorTimestamp = image.imageInfo.timestamp
         val arrivalNs = System.nanoTime()
-        cameraDeliveredRate.recordCompletion(sensorTs)
-        val deliveredFps = cameraDeliveredRate.computeFps(sensorTs)
+        cameraDeliveredRate.recordCompletion(sensorTimestamp)
+        val deliveredFps = cameraDeliveredRate.computeFps(sensorTimestamp)
         _cameraFps.value = deliveredFps
 
         try {
@@ -245,27 +217,19 @@ class CameraManager(
                 _resolutionLabel.value = "REJECTED ${crop.width()}x${crop.height()}"
                 return
             }
-
             if (!luma.packFrom(image)) return
             _resolutionLabel.value = "${luma.width}x${luma.height}"
             chroma.bind(image)
-
-            val sourceTx = try {
-                transforms.getOutputTransform(image)
-            } catch (_: Throwable) {
-                null
-            } ?: return
-
+            val sourceTransform = try { transforms.getOutputTransform(image) } catch (_: Throwable) { null } ?: return
             if (generation.get() != configuredGeneration) return
-
             onFrame?.invoke(
                 CameraFrame(
                     lumaBytes = luma.bytes,
                     width = luma.width,
                     height = luma.height,
-                    sourceTransform = sourceTx,
+                    sourceTransform = sourceTransform,
                     chromaReader = chroma,
-                    sensorTimestamp = sensorTs,
+                    sensorTimestamp = sensorTimestamp,
                     arrivalNs = arrivalNs,
                     cameraFps = deliveredFps,
                 )

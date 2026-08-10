@@ -1,94 +1,57 @@
 # SuperQR Android
 
-SuperQR Android is the receiver for offline screen-to-camera file transfer.
+SuperQR Android is the screen-to-camera receiver for the V7 rebuild.
 
-The user-facing app is a **single V7 scanner**. It reuses the physically validated V6 carrier detector/geometry as an internal acquisition foundation; there is no separate V6/V7 scanner mode in the product.
+## Current status
 
-## Fresh clone — Windows
+Development is on `rebuild/v7-phase0-clean` while the Android foundation is rebuilt before physical Phase 1 PHY selection.
 
-Prerequisites:
+The app has one launcher and one receiver screen. There is no separate V6 scanner or separate Phase 1 Lab application in the active app surface.
 
-- Git for Windows;
-- Android Studio;
-- Android SDK Platform 37;
-- JDK 17, or an Android Studio embedded JDK compatible with the project;
-- an ARM64 Android phone with USB debugging enabled for physical testing.
+Phase 2 remains preserved and dormant during Phase 0 / Phase 1 work.
 
-Clone the repository:
+## Active app architecture
 
-```powershell
-git clone https://github.com/Aurasj/superqr-android.git
-cd superqr-android
+```text
+app/
+  camera/       CameraX Preview + ImageAnalysis and coordinate transforms
+  phase1/       Phase 1 manifest, acquisition scheduling, framing, recording, vision adapter
+  session/      camera-session lifecycle and UI state
+  diagnostics/  export/share integration
+  ui/           Compose receiver UI and theme
 ```
 
-Then open the **repository root** in Android Studio. Let Gradle Sync finish and allow Android Studio to install any missing SDK components.
+The active Phase 1 vision adapter uses the dedicated V7 acquisition/decoder components (`V7CarrierAcquirer`, `V7Phase1QrDecoder`, `V7Phase1Receiver`). The underlying `vision/v7_capacity_lab` package name is retained temporarily to avoid a large algorithmic rename before physical validation; it is implementation history, not a second application architecture.
 
-Android Studio will create local machine state such as `local.properties`. This is intentional: `local.properties`, `.gradle/`, `.idea/` and build directories are ignored by Git and must not be copied from an old checkout or committed.
+Legacy V6 vision code remains in the `vision` module only where it is still a dependency or regression reference. It no longer defines the active Android UI/camera/session architecture. Further extraction/deletion happens only after the new V7 physical path is proven.
 
-No global Gradle installation is required. The repository includes `gradlew`, `gradlew.bat`, `gradle-wrapper.jar` and the pinned Gradle wrapper configuration.
+## Phase 0 camera contract
 
-Verify a fresh clone from PowerShell after Android Studio/SDK setup:
+- one real CameraX `PreviewView`, shown as a compact 16:9 viewfinder;
+- Preview and ImageAnalysis share one valid CameraX `ViewPort`;
+- ImageAnalysis targets 1280×720, 16:9, capture-rate preference and `KEEP_ONLY_LATEST`;
+- unexpectedly large analysis buffers are rejected;
+- analysis coordinates are mapped to Preview using CameraX `OutputTransform` / `CoordinateTransform`;
+- camera callback generations stay internal to the camera layer;
+- START begins a diagnostic session, STOP closes it, SHARE SESSION exports the session observations;
+- forensic exact-frame capture is a later Phase 0 slice and must bind lossless analyzed bytes to metadata from the same frame.
 
-```powershell
-.\gradlew.bat :vision:testDebugUnitTest :app:testDebugUnitTest :app:compileDebugKotlin
-```
-
-Build a debug APK:
-
-```powershell
-.\gradlew.bat :app:assembleDebug
-```
-
-To run on a phone, select the `app` run configuration in Android Studio, select the connected ARM64 device and press **Run**.
-
-The current project uses `compileSdk = 37`, `targetSdk = 37`, `minSdk = 26`. Debug/benchmark native builds currently target `arm64-v8a` for physical-phone optical testing.
-
-This repository is self-contained for normal build/test/run workflows and does not require a sibling `superqr-protocol` or `superqr-desktop` checkout.
-
-## Current V7 baseline
-
-- CameraX Preview + ImageAnalysis with `STRATEGY_KEEP_ONLY_LATEST`;
-- YUV_420_888 processing;
-- V6-proven carrier acquisition, anchors, orientation, homography and tracking;
-- V7 dense 40/48/56/64+ payload profiles;
-- current reliable baseline: **40×40 / 4 colors**;
-- AUTO optical profile detection from the marker, with debug force override;
-- CROSS_5 / CENTER_1 sampling;
-- calibrated soft classification, explicit erasures and bounded CRC-guided recovery;
-- exact-frame pre-FEC transport baseline pending V7 inner FEC + fountain stages;
-- rich live overlay/debug ZIP export.
-
-## V7.0 measurement foundation
-
-Debug now distinguishes:
-
-- camera-delivered FPS;
-- completed analysis FPS;
-- full analyzer pipeline time;
-- carrier detector time;
-- V7 profile/sampling/classification/transport times;
-- useful unique CRC-valid logical frames/s;
-- decoded pre-package payload KiB/s;
-- unexpected analyzer exception count.
-
-The debug ZIP `diagnostics.json` uses the canonical protocol measurement schema v1 and retains events, frame summaries, calibration and per-cell evidence.
-
-Configured/theoretical sender bitrate is not treated as actual file goodput.
-
-## Build & test
+## Build and test
 
 Windows:
 
 ```powershell
-.\gradlew.bat :vision:testDebugUnitTest :app:testDebugUnitTest :app:compileDebugKotlin
+.\gradlew.bat :vision:testDebugUnitTest :app:testDebugUnitTest :app:assembleBenchmark
 ```
 
 Linux/macOS:
 
 ```bash
-./gradlew :vision:testDebugUnitTest :app:testDebugUnitTest :app:compileDebugKotlin
+./gradlew :vision:testDebugUnitTest :app:testDebugUnitTest :app:assembleBenchmark
 ```
 
-## Architecture rule
+The CI workflow runs the same verification on `main` and `rebuild/v7-phase0-clean`.
 
-`app` owns Android lifecycle/UI/camera integration. `vision` owns optical decoding and protocol-facing receiver logic. V6 vision code remains the proven acquisition foundation; V7 evolves payload/transport above it without creating a second app or camera stack.
+## Physical exit gate
+
+Before Phase 0 is considered complete on Galaxy A53, verify repeated START/STOP/START, stable live preview, truthful QR/GRID detection states, correctly aligned preview overlays, robust tracking/reacquisition, and a shareable diagnostic session after STOP.
