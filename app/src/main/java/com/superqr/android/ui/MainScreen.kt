@@ -58,6 +58,7 @@ import com.superqr.android.camera.CoordinateMapper
 import com.superqr.android.diagnostics.SessionExporter
 import com.superqr.android.phase1.Phase1FramePoint
 import com.superqr.android.phase1.Phase1FramingGeometry
+import com.superqr.android.phase1.Phase1FramingMode
 import com.superqr.android.phase1.Phase1RunSnapshot
 import com.superqr.android.session.DiagnosticSession
 import com.superqr.android.session.SessionPhase
@@ -137,6 +138,14 @@ fun MainScreen(
 
             val framing = sessionState.framing
             val targetTransform = cameraManager.previewView.outputTransform
+            val showConfirmedOverlay = when (sessionState.phase) {
+                SessionPhase.QR_DETECTED, SessionPhase.QR_LOCKED ->
+                    framing.mode == Phase1FramingMode.QR && framing.candidateQuad?.size == 4
+                SessionPhase.GRID_DETECTED, SessionPhase.GRID_LOCKED, SessionPhase.RECEIVING ->
+                    framing.mode == Phase1FramingMode.GRID && framing.carrierQuad?.size == 4
+                else -> false
+            }
+
             Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
                 Card(
                     modifier = Modifier.fillMaxSize(),
@@ -148,7 +157,7 @@ fun MainScreen(
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
-                if (framing.carrierQuad != null || framing.candidateQuad != null) {
+                if (showConfirmedOverlay) {
                     PreviewOverlay(
                         framing = framing,
                         sourceTransform = sessionState.sourceTransform,
@@ -200,7 +209,7 @@ fun MainScreen(
                             session.startSession()
                             cameraManager.start(lifecycleOwner)
                         }) {
-                            Text("New Session")
+                            Text("START NEW")
                         }
                     }
                 }
@@ -255,7 +264,10 @@ private fun PreviewOverlay(
     targetTransform: OutputTransform?,
     modifier: Modifier = Modifier,
 ) {
-    val quad = framing.carrierQuad ?: framing.candidateQuad
+    val quad = when (framing.mode) {
+        Phase1FramingMode.QR -> framing.candidateQuad
+        Phase1FramingMode.GRID -> framing.carrierQuad
+    }
     if (quad == null || quad.size != 4 || sourceTransform == null || targetTransform == null) return
     val mappedQuad = mapFramePoints(quad, sourceTransform, targetTransform) ?: return
     val mappedFinders = framing.finderCenters.take(4).mapNotNull { point ->
