@@ -30,6 +30,7 @@ data class CameraFrame(
     val height: Int,
     val sourceTransform: OutputTransform,
     val chromaReader: ImageProxyChromaSampler,
+    val qrDecoder: CameraQrDecoder,
     val sensorTimestamp: Long,
     val arrivalNs: Long,
     val cameraFps: Double,
@@ -65,6 +66,7 @@ class CameraManager(
     // CameraX callback invalidation only. This token never crosses into session/vision state.
     private val generation = AtomicInteger(0)
     private val cameraDeliveredRate = AnalysisRateAccumulator(64)
+    private val qrReader = ZxingCppCameraQrReader()
     private val transforms = ImageProxyTransformFactory().apply {
         setUsingCropRect(true)
         setUsingRotationDegrees(true)
@@ -242,6 +244,7 @@ class CameraManager(
                     height = luma.height,
                     sourceTransform = sourceTransform,
                     chromaReader = chroma,
+                    qrDecoder = qrReader.decoderFor(image),
                     sensorTimestamp = sensorTimestamp,
                     arrivalNs = arrivalNs,
                     cameraFps = deliveredFps,
