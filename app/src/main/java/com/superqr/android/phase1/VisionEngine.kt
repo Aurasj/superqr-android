@@ -1,6 +1,7 @@
 package com.superqr.android.phase1
 
 import com.superqr.android.vision.v6.classification.ChromaPixelReader
+import com.superqr.android.vision.v7_capacity_lab.ExternalQrFrameDecoder
 import com.superqr.android.vision.v7_capacity_lab.V7CarrierAcquirer
 import com.superqr.android.vision.v7_capacity_lab.V7CarrierAcquisitionResult
 import com.superqr.android.vision.v7_capacity_lab.V7LabRunEnvelope
@@ -98,7 +99,7 @@ class VisionEngine(private val manifest: Phase1Manifest) {
         return if (scheduler.path == Phase1AnalysisPath.GRID) {
             analyzeGrid(luma, width, height, chromaReader, arrivalNs)
         } else {
-            analyzeQr(luma, width, height, arrivalNs)
+            analyzeQr(luma, width, height, chromaReader, arrivalNs)
         }
     }
 
@@ -231,9 +232,11 @@ class VisionEngine(private val manifest: Phase1Manifest) {
         luma: ByteArray,
         width: Int,
         height: Int,
+        chromaReader: ChromaPixelReader?,
         arrivalNs: Long,
     ): VisionResult {
-        val qr = qrDecoder.analyzeAuto(luma, width, height, qrExpectedBytes)
+        val external = (chromaReader as? ExternalQrFrameDecoder)?.decodeQr()
+        val qr = qrDecoder.analyzeAuto(luma, width, height, qrExpectedBytes, external)
         val completedNs = System.nanoTime()
         val envelope = qr.envelope
         val profile = envelope?.let { manifest.profile(it.profileId) }
