@@ -16,31 +16,23 @@ data class V7Phase1QrResult(
     val bytes: Int,
     val envelope: V7LabRunEnvelope? = null,
     val failure: String? = null,
-    /** Last detected QR quadrangle in exact ImageAnalysis luma coordinates, when OpenCV found one. */
+    /** QR quadrangle in exact ImageAnalysis luma coordinates. */
     val quad: List<DoubleArray>? = null,
 )
 
 /**
- * Binary-safe OpenCV QR control decoder with reused luma and QR geometry.
+ * Binary-safe OpenCV QR control decoder with perspective-correct dense-QR geometry.
  *
- * Full-frame detection is required while searching so the receiver sees exactly
- * what the operator sees. Geometry is only promoted to the reusable decode hot
- * path after a real payload decode succeeds. A geometry-only detection is not
- * trustworthy enough for dense V27/V40 QR controls: in particular the inferred
- * bottom-right corner can move because standard QR has no finder pattern there.
- * While only QR_DETECTED, every QR frame therefore gets a fresh full detection.
+ * OpenCV remains the primary payload decoder. Geometry-only V27/V40 detections get
+ * a second, independent ZXing geometry pass that requires the bottom-right alignment
+ * pattern and builds the same projective transform used by ZXing's QR detector.
+ * This avoids trying to infer BR from TL/TR/BL with affine/parallelogram math, which
+ * is invalid for a tilted screen under perspective.
  *
- * Overlay geometry never invents the bottom-right corner from TL/TR/BL. Three
- * projected corners are not sufficient to recover the fourth corner of a square
- * under arbitrary perspective, so affine/parallelogram completion is wrong for
- * tilted phones. Instead, every visible BR comes from an actual OpenCV QR
- * observation. When the three finder-anchored corners are effectively static we
- * use a short temporal median of those observed BR samples to suppress estimator
- * jitter while preserving the real projective shape. As soon as the finder
- * anchors move, the BR history is cleared and the newest raw geometry is surfaced
- * immediately. Raw OpenCV geometry remains untouched for actual QR decoding.
- *
- * Dense V27/V40 camera images also get a bounded QRCodeDetectorAruco fallback.
+ * The alignment-derived outer quadrangle is cached only while the three finder-side
+ * corners remain spatially consistent. Meaningful phone motion invalidates it and
+ * triggers a fresh projective solve. A frame with no QR geometry clears presentation
+ * geometry immediately; no stale border is held in space.
  */
 class V7Phase1QrDecoder : AutoCloseable {
     private var gray: Mat? = null
@@ -48,20 +40,16 @@ class V7Phase1QrDecoder : AutoCloseable {
     private var arucoDetector: QRCodeDetectorAruco? = null
     private var points: Mat? = null
     private var arucoPoints: Mat? = null
+    private val zxingGeometryDetector = ZxingQrGeometryDetector()
 
     /** True only after these points have produced a non-empty payload. */
     private var trustedPointsValid = false
     private var trustedWithAruco = false
     private var trustedDecodeMisses = 0
 
-    /** Presentation/guidance geometry; never fed back into QR decoding. */
+    /** Presentation/guidance geometry; never fed back into OpenCV decoding. */
     private var stableQuad: List<DoubleArray>? = null
-
-    /**
-     * Raw OpenCV BR observations collected only while TL/TR/BL remain static.
-     * These are real projective observations, not reconstructed corners.
-     */
-    private val staticBottomRightSamples = ArrayDeque<DoubleArray>()
+    private var projectiveQuad: List<DoubleArray>? = null
 
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
         val (payload, quad) = decode(luma, width, height)
@@ -78,7 +66,6 @@ class V7Phase1QrDecoder : AutoCloseable {
         return validatePayload(payload, version, expectedBytes, quad)
     }
 
-    /** Returns decoded payload plus perspective-preserving display geometry. */
     private fun decode(luma: ByteArray, width: Int, height: Int): Pair<ByteArray, List<DoubleArray>?> {
         require(width > 0 && height > 0 && luma.size >= width * height)
         ensureInitialized()
@@ -90,8 +77,6 @@ class V7Phase1QrDecoder : AutoCloseable {
         target.create(height, width, CvType.CV_8UC1)
         target.put(0, 0, luma)
 
-        // Reuse trusted decode geometry only while it keeps decoding. If it misses,
-        // reacquire immediately rather than showing stale points while the phone moves.
         if (trustedPointsValid && !detectedPoints.empty()) {
             val payload = if (trustedWithAruco) {
                 qrAruco.decodeBytes(target, detectedPoints)
@@ -101,11 +86,13 @@ class V7Phase1QrDecoder : AutoCloseable {
             val rawQuad = detectedPoints.toQuad()
             if (payload.isNotEmpty()) {
                 trustedDecodeMisses = 0
-                return payload to stabilizeQuad(rawQuad)
+                return payload to decodedPresentationQuad(rawQuad)
             }
             trustedDecodeMisses++
             if (trustedDecodeMisses < MAX_TRUSTED_DECODE_MISSES) {
-                return ByteArray(0) to stabilizeQuad(rawQuad)
+                return ByteArray(0) to rawQuad?.let {
+                    perspectivePresentationQuad(luma, width, height, it)
+                }
             }
             trustedPointsValid = false
             trustedWithAruco = false
@@ -118,7 +105,7 @@ class V7Phase1QrDecoder : AutoCloseable {
             trustedPointsValid = standardQuad != null
             trustedWithAruco = false
             trustedDecodeMisses = 0
-            return payload to stabilizeQuad(standardQuad)
+            return payload to decodedPresentationQuad(standardQuad)
         }
 
         val fallbackPayload = qrAruco.detectAndDecodeBytes(target, fallbackPoints)
@@ -128,7 +115,7 @@ class V7Phase1QrDecoder : AutoCloseable {
             trustedPointsValid = fallbackQuad != null
             trustedWithAruco = true
             trustedDecodeMisses = 0
-            return fallbackPayload to stabilizeQuad(fallbackQuad)
+            return fallbackPayload to decodedPresentationQuad(fallbackQuad)
         }
 
         val candidateQuad = chooseCandidateQuad(standardQuad, fallbackQuad)
@@ -136,7 +123,7 @@ class V7Phase1QrDecoder : AutoCloseable {
             trustedPointsValid = false
             trustedWithAruco = false
             trustedDecodeMisses = 0
-            return ByteArray(0) to stabilizeQuad(candidateQuad)
+            return ByteArray(0) to perspectivePresentationQuad(luma, width, height, candidateQuad)
         }
 
         trustedPointsValid = false
@@ -146,6 +133,67 @@ class V7Phase1QrDecoder : AutoCloseable {
         return ByteArray(0) to null
     }
 
+    private fun decodedPresentationQuad(raw: List<DoubleArray>?): List<DoubleArray>? {
+        if (raw == null || raw.size != 4) {
+            clearPresentationGeometry()
+            return null
+        }
+        val observed = copyQuad(raw)
+        stableQuad = observed
+        projectiveQuad = null
+        return observed
+    }
+
+    /**
+     * Prefer an alignment-pattern-derived projective quadrangle while OpenCV only
+     * has QR geometry. The expensive ZXing solve is refreshed only when finder-side
+     * motion means the cached projective mapping no longer matches the current view.
+     */
+    private fun perspectivePresentationQuad(
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        observedRaw: List<DoubleArray>,
+    ): List<DoubleArray> {
+        val observed = copyQuad(observedRaw)
+        val side = averageAnchoredSpan(observed).coerceAtLeast(1.0)
+        val motionThreshold = maxOf(MIN_PROJECTIVE_REFRESH_PX, side * PROJECTIVE_REFRESH_SIDE_FRACTION)
+        val cached = projectiveQuad
+        val needsRefresh = cached == null || anchorDistance(cached, observed) > motionThreshold
+
+        if (needsRefresh) {
+            val solved = zxingGeometryDetector.detectOuterQuad(luma, width, height)
+            if (solved != null && projectiveSolutionMatchesObserved(solved, observed, side)) {
+                projectiveQuad = copyQuad(solved)
+                stableQuad = copyQuad(solved)
+                return copyQuad(solved)
+            }
+
+            // Never hold an old perspective solve after meaningful camera motion.
+            if (cached != null) projectiveQuad = null
+        }
+
+        projectiveQuad?.let {
+            stableQuad = copyQuad(it)
+            return copyQuad(it)
+        }
+
+        // ZXing may fail on an individual frame. In that case surface the current
+        // real OpenCV quadrangle rather than inventing or holding a synthetic BR.
+        stableQuad = observed
+        return observed
+    }
+
+    private fun projectiveSolutionMatchesObserved(
+        solved: List<DoubleArray>,
+        observed: List<DoubleArray>,
+        side: Double,
+    ): Boolean {
+        if (solved.size != 4 || observed.size != 4) return false
+        val maxAnchorDifference = maxOf(MIN_PROJECTIVE_MATCH_PX, side * PROJECTIVE_MATCH_SIDE_FRACTION)
+        return anchorDistance(solved, observed) <= maxAnchorDifference
+    }
+
     private fun chooseCandidateQuad(
         standard: List<DoubleArray>?,
         fallback: List<DoubleArray>?,
@@ -153,87 +201,17 @@ class V7Phase1QrDecoder : AutoCloseable {
         standard == null -> fallback
         fallback == null -> standard
         stableQuad == null -> standard
-        // Ignore BR when comparing detector candidates; TL/TR/BL are the three
-        // QR finder-anchored corners and are the trustworthy geometric evidence.
         anchorDistance(standard, checkNotNull(stableQuad)) <=
             anchorDistance(fallback, checkNotNull(stableQuad)) -> standard
         else -> fallback
     }
 
-    private fun stabilizeQuad(raw: List<DoubleArray>?): List<DoubleArray>? {
-        if (raw == null || raw.size != 4) {
-            clearPresentationGeometry()
-            return null
-        }
-
-        // OpenCV QR ordering is TL, TR, BR, BL. Never synthesize BR from the other
-        // three corners: under perspective that would impose false affine geometry.
-        val observed = raw.map { doubleArrayOf(it[0], it[1]) }
-        val previous = stableQuad
-        if (previous == null || previous.size != 4) {
-            resetBottomRightHistory(observed[2])
-            stableQuad = observed
-            return observed
-        }
-
-        val side = averageAnchoredSpan(observed).coerceAtLeast(1.0)
-        val staticThreshold = maxOf(MIN_STATIC_ANCHOR_PX, side * STATIC_ANCHOR_SIDE_FRACTION)
-        val finderMotion = anchorDistance(previous, observed)
-
-        if (finderMotion > staticThreshold) {
-            // Genuine camera/phone motion. Do not smooth or carry old BR samples;
-            // surface the new projective observation immediately.
-            resetBottomRightHistory(observed[2])
-            stableQuad = observed
-            return observed
-        }
-
-        // Static scene: collect only genuine OpenCV BR observations and use their
-        // coordinate-wise median. This suppresses BR estimator jitter without
-        // changing the projective geometry implied by the camera view.
-        addBottomRightSample(observed[2])
-        val medianBr = medianBottomRight()
-        val next = listOf(
-            doubleArrayOf(observed[0][0], observed[0][1]),
-            doubleArrayOf(observed[1][0], observed[1][1]),
-            medianBr,
-            doubleArrayOf(observed[3][0], observed[3][1]),
-        )
-        stableQuad = next
-        return next
-    }
-
-    private fun addBottomRightSample(point: DoubleArray) {
-        staticBottomRightSamples.addLast(doubleArrayOf(point[0], point[1]))
-        while (staticBottomRightSamples.size > MAX_STATIC_BR_SAMPLES) {
-            staticBottomRightSamples.removeFirst()
-        }
-    }
-
-    private fun resetBottomRightHistory(point: DoubleArray) {
-        staticBottomRightSamples.clear()
-        staticBottomRightSamples.addLast(doubleArrayOf(point[0], point[1]))
-    }
-
-    private fun medianBottomRight(): DoubleArray {
-        if (staticBottomRightSamples.isEmpty()) return doubleArrayOf(0.0, 0.0)
-        val xs = staticBottomRightSamples.map { it[0] }.sorted()
-        val ys = staticBottomRightSamples.map { it[1] }.sorted()
-        return doubleArrayOf(median(xs), median(ys))
-    }
-
-    private fun median(values: List<Double>): Double {
-        val n = values.size
-        return if (n % 2 == 1) {
-            values[n / 2]
-        } else {
-            (values[n / 2 - 1] + values[n / 2]) * 0.5
-        }
-    }
+    private fun copyQuad(quad: List<DoubleArray>): List<DoubleArray> =
+        quad.map { doubleArrayOf(it[0], it[1]) }
 
     private fun clearPresentationGeometry() {
         stableQuad = null
-        staticBottomRightSamples.clear()
+        projectiveQuad = null
     }
 
     private fun pointDistance(a: DoubleArray, b: DoubleArray): Double =
@@ -294,11 +272,11 @@ class V7Phase1QrDecoder : AutoCloseable {
     }
 
     companion object {
-        // One failed tracked decode immediately falls back to a fresh detector pass.
         private const val MAX_TRUSTED_DECODE_MISSES = 1
-        private const val MAX_STATIC_BR_SAMPLES = 5
-        private const val STATIC_ANCHOR_SIDE_FRACTION = 0.012
-        private const val MIN_STATIC_ANCHOR_PX = 2.5
+        private const val PROJECTIVE_REFRESH_SIDE_FRACTION = 0.015
+        private const val MIN_PROJECTIVE_REFRESH_PX = 3.0
+        private const val PROJECTIVE_MATCH_SIDE_FRACTION = 0.15
+        private const val MIN_PROJECTIVE_MATCH_PX = 16.0
 
         fun validatePayload(
             payload: ByteArray,
