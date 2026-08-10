@@ -30,17 +30,14 @@ data class V7Phase1QrResult(
  * bottom-right corner can move because standard QR has no finder pattern there.
  * While only QR_DETECTED, every QR frame therefore gets a fresh full detection.
  *
- * A separately stabilized quadrangle is returned for overlay/framing guidance so
- * detector jitter does not make the visible border jump around. The stabilizer
- * treats TL/TR/BL as the anchored QR corners. If those three remain effectively
- * static while only BR jumps, BR is held instead of resetting the whole filter.
- * The stabilized overlay never replaces the raw OpenCV geometry used by
- * detectAndDecodeBytes().
+ * Overlay stabilization is deliberately motion-aware. When the three finder
+ * anchored corners (TL/TR/BL) are essentially static, bottom-right-only jitter
+ * may be suppressed and the quad lightly smoothed. As soon as those real finder
+ * anchors move, smoothing is bypassed and the newest geometry is surfaced
+ * immediately. A frame with no QR geometry clears the overlay immediately; no
+ * stale border is held across misses.
  *
  * Dense V27/V40 camera images also get a bounded QRCodeDetectorAruco fallback.
- * OpenCV 5 exposes it as a second QR detector based on ArUco-style finder search;
- * the fallback is only paid after the normal detector misses or finds geometry
- * without decoding a payload.
  */
 class V7Phase1QrDecoder : AutoCloseable {
     private var gray: Mat? = null
@@ -54,9 +51,8 @@ class V7Phase1QrDecoder : AutoCloseable {
     private var trustedWithAruco = false
     private var trustedDecodeMisses = 0
 
-    /** UI/guidance geometry; deliberately independent from raw decode geometry. */
+    /** Presentation/guidance geometry; never fed back into QR decoding. */
     private var stableQuad: List<DoubleArray>? = null
-    private var stableQuadMisses = 0
 
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
         val (payload, quad) = decode(luma, width, height)
@@ -73,7 +69,7 @@ class V7Phase1QrDecoder : AutoCloseable {
         return validatePayload(payload, version, expectedBytes, quad)
     }
 
-    /** Returns the decoded payload plus stable display geometry, when QR geometry exists. */
+    /** Returns decoded payload plus motion-responsive display geometry. */
     private fun decode(luma: ByteArray, width: Int, height: Int): Pair<ByteArray, List<DoubleArray>?> {
         require(width > 0 && height > 0 && luma.size >= width * height)
         ensureInitialized()
@@ -85,7 +81,8 @@ class V7Phase1QrDecoder : AutoCloseable {
         target.create(height, width, CvType.CV_8UC1)
         target.put(0, 0, luma)
 
-        // Reuse geometry only after that geometry has decoded a real payload.
+        // Reuse trusted decode geometry only while it keeps decoding. If it misses,
+        // reacquire immediately rather than showing stale points while the phone moves.
         if (trustedPointsValid && !detectedPoints.empty()) {
             val payload = if (trustedWithAruco) {
                 qrAruco.decodeBytes(target, detectedPoints)
@@ -136,7 +133,8 @@ class V7Phase1QrDecoder : AutoCloseable {
         trustedPointsValid = false
         trustedWithAruco = false
         trustedDecodeMisses = 0
-        return ByteArray(0) to holdStableQuadOnMiss()
+        stableQuad = null
+        return ByteArray(0) to null
     }
 
     private fun chooseCandidateQuad(
@@ -151,8 +149,11 @@ class V7Phase1QrDecoder : AutoCloseable {
     }
 
     private fun stabilizeQuad(raw: List<DoubleArray>?): List<DoubleArray>? {
-        if (raw == null || raw.size != 4) return holdStableQuadOnMiss()
-        stableQuadMisses = 0
+        if (raw == null || raw.size != 4) {
+            stableQuad = null
+            return null
+        }
+
         val observed = raw.map { doubleArrayOf(it[0], it[1]) }
         val previous = stableQuad
         if (previous == null || previous.size != 4) {
@@ -160,15 +161,24 @@ class V7Phase1QrDecoder : AutoCloseable {
             return observed
         }
 
-        // QR finder anchors are TL/TR/BL (indices 0/1/3 in OpenCV ordering).
-        // If these three barely move but inferred BR jumps, keep the previous BR.
-        val current = suppressBottomRightOnlyJump(previous, observed)
-        if (shouldResetSmoothing(previous, current)) {
-            stableQuad = current
-            return current
+        val side = averageSide(observed).coerceAtLeast(1.0)
+        val anchorStaticThreshold = maxOf(MIN_STATIC_ANCHOR_PX, side * STATIC_ANCHOR_SIDE_FRACTION)
+        val anchorIndices = intArrayOf(0, 1, 3)
+        val averageAnchorMotion = anchorIndices.sumOf { index ->
+            pointDistance(previous[index], observed[index])
+        } / anchorIndices.size.toDouble()
+
+        // Genuine phone/camera motion: never ease toward the new position. Surface
+        // the new detector geometry immediately so the border cannot lag in space.
+        if (averageAnchorMotion > anchorStaticThreshold) {
+            stableQuad = observed
+            return observed
         }
 
-        val alpha = QUAD_EMA_ALPHA
+        // Static scene: the three finder anchors agree, so suppress an isolated BR
+        // estimator jump and lightly smooth sub-pixel/finder jitter.
+        val current = suppressBottomRightOnlyJump(previous, observed)
+        val alpha = STATIC_QUAD_EMA_ALPHA
         val next = List(4) { index ->
             doubleArrayOf(
                 previous[index][0] + (current[index][0] - previous[index][0]) * alpha,
@@ -184,15 +194,9 @@ class V7Phase1QrDecoder : AutoCloseable {
         current: List<DoubleArray>,
     ): List<DoubleArray> {
         val side = averageSide(current).coerceAtLeast(1.0)
-        val anchorStillThreshold = maxOf(MIN_STATIC_ANCHOR_PX, side * STATIC_ANCHOR_SIDE_FRACTION)
         val bottomRightJumpThreshold = maxOf(MIN_BOTTOM_RIGHT_JUMP_PX, side * BOTTOM_RIGHT_JUMP_SIDE_FRACTION)
-        val anchorIndices = intArrayOf(0, 1, 3)
-        val averageAnchorMotion = anchorIndices.sumOf { index -> pointDistance(previous[index], current[index]) } /
-            anchorIndices.size.toDouble()
         val bottomRightMotion = pointDistance(previous[2], current[2])
-        if (averageAnchorMotion > anchorStillThreshold || bottomRightMotion <= bottomRightJumpThreshold) {
-            return current
-        }
+        if (bottomRightMotion <= bottomRightJumpThreshold) return current
         return List(4) { index ->
             if (index == 2) {
                 doubleArrayOf(previous[2][0], previous[2][1])
@@ -200,28 +204,6 @@ class V7Phase1QrDecoder : AutoCloseable {
                 doubleArrayOf(current[index][0], current[index][1])
             }
         }
-    }
-
-    private fun holdStableQuadOnMiss(): List<DoubleArray>? {
-        val held = stableQuad ?: return null
-        stableQuadMisses++
-        if (stableQuadMisses > MAX_STABLE_QUAD_HOLD_MISSES) {
-            stableQuad = null
-            stableQuadMisses = 0
-            return null
-        }
-        return held
-    }
-
-    private fun shouldResetSmoothing(previous: List<DoubleArray>, current: List<DoubleArray>): Boolean {
-        val side = averageSide(current).coerceAtLeast(1.0)
-        val resetDistance = maxOf(MIN_SMOOTHING_RESET_PX, side * SMOOTHING_RESET_SIDE_FRACTION)
-        // BR alone is not allowed to reset smoothing. A genuine camera move changes
-        // at least two of the three finder-anchored corners TL/TR/BL as well.
-        val movedAnchors = intArrayOf(0, 1, 3).count { index ->
-            pointDistance(previous[index], current[index]) > resetDistance
-        }
-        return movedAnchors >= 2
     }
 
     private fun pointDistance(a: DoubleArray, b: DoubleArray): Double =
@@ -282,17 +264,14 @@ class V7Phase1QrDecoder : AutoCloseable {
         trustedWithAruco = false
         trustedDecodeMisses = 0
         stableQuad = null
-        stableQuadMisses = 0
     }
 
     companion object {
-        private const val MAX_TRUSTED_DECODE_MISSES = 2
-        private const val MAX_STABLE_QUAD_HOLD_MISSES = 6
-        private const val QUAD_EMA_ALPHA = 0.22
-        private const val SMOOTHING_RESET_SIDE_FRACTION = 0.18
-        private const val MIN_SMOOTHING_RESET_PX = 18.0
-        private const val STATIC_ANCHOR_SIDE_FRACTION = 0.02
-        private const val MIN_STATIC_ANCHOR_PX = 4.0
+        // One failed tracked decode immediately falls back to a fresh detector pass.
+        private const val MAX_TRUSTED_DECODE_MISSES = 1
+        private const val STATIC_QUAD_EMA_ALPHA = 0.45
+        private const val STATIC_ANCHOR_SIDE_FRACTION = 0.015
+        private const val MIN_STATIC_ANCHOR_PX = 3.0
         private const val BOTTOM_RIGHT_JUMP_SIDE_FRACTION = 0.03
         private const val MIN_BOTTOM_RIGHT_JUMP_PX = 7.0
 
