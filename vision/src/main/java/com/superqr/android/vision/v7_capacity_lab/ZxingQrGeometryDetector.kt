@@ -6,21 +6,32 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.ResultPoint
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.common.PerspectiveTransform
+import com.google.zxing.qrcode.decoder.Decoder
 import com.google.zxing.qrcode.detector.Detector
 
+internal data class ZxingQrAnalysis(
+    val payload: ByteArray,
+    val outerQuad: List<DoubleArray>?,
+)
+
 /**
- * Perspective-correct QR outer quadrangle derived from finder patterns plus the
- * bottom-right alignment pattern.
+ * One bounded ZXing pass for dense QR controls.
  *
- * ZXing's QR detector uses TL/TR/BL finder centers to estimate the QR dimension,
- * searches near the provisional bottom-right for an alignment pattern, and then
- * builds a projective transform. We require that alignment pattern here: if it is
- * absent we deliberately return null instead of inventing BR with an affine
- * parallelogram approximation, which is wrong for a tilted screen/phone.
+ * The detector resolves finder patterns plus the bottom-right alignment pattern,
+ * then ZXing's QR decoder consumes the already sampled BitMatrix. This means the
+ * same expensive pass can provide both perspective-correct presentation geometry
+ * and a binary-safe payload fallback for V27/V40.
+ *
+ * Payload extraction deliberately uses DecoderResult.byteSegments. QRCodeReader's
+ * rawBytes are the corrected QR data-codeword stream (which also contains mode,
+ * length and padding bits); byteSegments are the actual BYTE-mode payload bytes
+ * emitted by DecodedBitStreamParser.
  */
 internal class ZxingQrGeometryDetector {
+    private val decoder = Decoder()
+    private val hints = mapOf(DecodeHintType.TRY_HARDER to true)
 
-    fun detectOuterQuad(luma: ByteArray, width: Int, height: Int): List<DoubleArray>? {
+    fun analyze(luma: ByteArray, width: Int, height: Int): ZxingQrAnalysis? {
         if (width <= 0 || height <= 0 || luma.size < width * height) return null
 
         return try {
@@ -35,24 +46,47 @@ internal class ZxingQrGeometryDetector {
                 false,
             )
             val bitmap = BinaryBitmap(HybridBinarizer(source))
-            val result = Detector(bitmap.blackMatrix).detect(
-                mapOf(DecodeHintType.TRY_HARDER to true),
-            )
-            val dimension = result.bits.width
-            val points = result.points
+            val detectorResult = Detector(bitmap.blackMatrix).detect(hints)
+            val dimension = detectorResult.bits.width
+            val points = detectorResult.points
 
-            // ZXing DetectorResult ordering for QR is BL, TL, TR, and optionally
-            // the bottom-right alignment pattern. Perspective-correct BR needs
-            // that fourth point; three finder centers alone are insufficient.
-            if (dimension <= 0 || points.size < 4) return null
-            val bottomLeft = points[0]
-            val topLeft = points[1]
-            val topRight = points[2]
-            val alignment = points[3]
-            projectOuterQuad(dimension, topLeft, topRight, bottomLeft, alignment)
+            val outerQuad = if (dimension > 0 && points.size >= 4) {
+                projectOuterQuad(
+                    dimension = dimension,
+                    topLeft = points[1],
+                    topRight = points[2],
+                    bottomLeft = points[0],
+                    alignment = points[3],
+                )
+            } else {
+                null
+            }
+
+            val payload = try {
+                val decoded = decoder.decode(detectorResult.bits, hints)
+                concatenateByteSegments(decoded.byteSegments)
+            } catch (_: Throwable) {
+                ByteArray(0)
+            }
+
+            ZxingQrAnalysis(payload = payload, outerQuad = outerQuad)
         } catch (_: Throwable) {
             null
         }
+    }
+
+    private fun concatenateByteSegments(segments: List<ByteArray>?): ByteArray {
+        if (segments.isNullOrEmpty()) return ByteArray(0)
+        if (segments.size == 1) return segments[0].copyOf()
+
+        val totalBytes = segments.sumOf { it.size }
+        val payload = ByteArray(totalBytes)
+        var offset = 0
+        for (segment in segments) {
+            segment.copyInto(payload, destinationOffset = offset)
+            offset += segment.size
+        }
+        return payload
     }
 
     private fun projectOuterQuad(
@@ -86,8 +120,7 @@ internal class ZxingQrGeometryDetector {
             bottomLeft.y,
         )
 
-        // Finder-center coordinates above live in the QR module coordinate system.
-        // Project the module-grid boundary (0..dimension), not the quiet zone.
+        // Project the QR module-grid boundary (quiet zone excluded).
         val corners = floatArrayOf(
             0f, 0f,
             dimension.toFloat(), 0f,
