@@ -7,6 +7,7 @@ import org.opencv.core.MatOfPoint2f
 import org.opencv.objdetect.QRCodeDetector
 import org.opencv.objdetect.QRCodeDetectorAruco
 import java.util.zip.CRC32
+import kotlin.math.abs
 import kotlin.math.hypot
 
 data class V7Phase1QrResult(
@@ -21,18 +22,18 @@ data class V7Phase1QrResult(
 )
 
 /**
- * Binary-safe OpenCV QR control decoder with perspective-correct dense-QR geometry.
+ * Binary-safe OpenCV QR control decoder with a bounded ZXing fallback for dense QR.
  *
- * OpenCV remains the primary payload decoder. Geometry-only V27/V40 detections get
- * a second, independent ZXing geometry pass that requires the bottom-right alignment
- * pattern and builds the same projective transform used by ZXing's QR detector.
- * This avoids trying to infer BR from TL/TR/BL with affine/parallelogram math, which
- * is invalid for a tilted screen under perspective.
+ * OpenCV remains the first payload path. When V27/V40 are only geometrically
+ * detected, one ZXing detector pass can both resolve alignment-based projective
+ * geometry and decode the already sampled QR BitMatrix. ZXing BYTE-mode segments
+ * are returned as the binary payload fallback.
  *
- * The alignment-derived outer quadrangle is cached only while the three finder-side
- * corners remain spatially consistent. Meaningful phone motion invalidates it and
- * triggers a fresh projective solve. A frame with no QR geometry clears presentation
- * geometry immediately; no stale border is held in space.
+ * A successful projective solve is anchored to the OpenCV TL/TR/BL observation from
+ * that exact frame. Small hand motion transports the already perspective-correct
+ * quadrangle with those three finder anchors, rather than rerunning TRY_HARDER on
+ * every frame. Meaningful motion triggers a fresh projective solve. Decode retries
+ * are also throttled, so dense QR cannot dominate the camera hot path.
  */
 class V7Phase1QrDecoder : AutoCloseable {
     private var gray: Mat? = null
@@ -42,7 +43,7 @@ class V7Phase1QrDecoder : AutoCloseable {
     private var arucoPoints: Mat? = null
     private val zxingGeometryDetector = ZxingQrGeometryDetector()
 
-    /** True only after these points have produced a non-empty payload. */
+    /** True only after these OpenCV points have produced a non-empty payload. */
     private var trustedPointsValid = false
     private var trustedWithAruco = false
     private var trustedDecodeMisses = 0
@@ -50,6 +51,8 @@ class V7Phase1QrDecoder : AutoCloseable {
     /** Presentation/guidance geometry; never fed back into OpenCV decoding. */
     private var stableQuad: List<DoubleArray>? = null
     private var projectiveQuad: List<DoubleArray>? = null
+    private var projectiveReferenceAnchors: List<DoubleArray>? = null
+    private var zxingRetryCountdown = 0
 
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
         val (payload, quad) = decode(luma, width, height)
@@ -90,9 +93,7 @@ class V7Phase1QrDecoder : AutoCloseable {
             }
             trustedDecodeMisses++
             if (trustedDecodeMisses < MAX_TRUSTED_DECODE_MISSES) {
-                return ByteArray(0) to rawQuad?.let {
-                    perspectivePresentationQuad(luma, width, height, it)
-                }
+                return ByteArray(0) to rawQuad
             }
             trustedPointsValid = false
             trustedWithAruco = false
@@ -123,7 +124,8 @@ class V7Phase1QrDecoder : AutoCloseable {
             trustedPointsValid = false
             trustedWithAruco = false
             trustedDecodeMisses = 0
-            return ByteArray(0) to perspectivePresentationQuad(luma, width, height, candidateQuad)
+            val fallback = denseQrFallback(luma, width, height, candidateQuad)
+            return fallback.payload to fallback.quad
         }
 
         trustedPointsValid = false
@@ -141,47 +143,113 @@ class V7Phase1QrDecoder : AutoCloseable {
         val observed = copyQuad(raw)
         stableQuad = observed
         projectiveQuad = null
+        projectiveReferenceAnchors = null
+        zxingRetryCountdown = 0
         return observed
     }
 
+    private data class DenseFallbackResult(
+        val payload: ByteArray,
+        val quad: List<DoubleArray>,
+    )
+
     /**
-     * Prefer an alignment-pattern-derived projective quadrangle while OpenCV only
-     * has QR geometry. The expensive ZXing solve is refreshed only when finder-side
-     * motion means the cached projective mapping no longer matches the current view.
+     * Throttled dense-QR fallback. A projective solve is refreshed only after
+     * meaningful finder-anchor motion; otherwise the cached projective quadrangle
+     * is transported with the live TL/TR/BL anchors. ZXing payload decoding is
+     * retried periodically even while geometry remains cached.
      */
-    private fun perspectivePresentationQuad(
+    private fun denseQrFallback(
         luma: ByteArray,
         width: Int,
         height: Int,
         observedRaw: List<DoubleArray>,
-    ): List<DoubleArray> {
+    ): DenseFallbackResult {
         val observed = copyQuad(observedRaw)
         val side = averageAnchoredSpan(observed).coerceAtLeast(1.0)
-        val motionThreshold = maxOf(MIN_PROJECTIVE_REFRESH_PX, side * PROJECTIVE_REFRESH_SIDE_FRACTION)
-        val cached = projectiveQuad
-        val needsRefresh = cached == null || anchorDistance(cached, observed) > motionThreshold
+        val refreshThreshold = maxOf(MIN_PROJECTIVE_REFRESH_PX, side * PROJECTIVE_REFRESH_SIDE_FRACTION)
+        val reference = projectiveReferenceAnchors
+        val geometryNeedsRefresh = projectiveQuad == null || reference == null ||
+            anchorDistance(reference, observed) > refreshThreshold
+        val shouldRunZxing = geometryNeedsRefresh || zxingRetryCountdown <= 0
 
-        if (needsRefresh) {
-            val solved = zxingGeometryDetector.detectOuterQuad(luma, width, height)
-            if (solved != null && projectiveSolutionMatchesObserved(solved, observed, side)) {
-                projectiveQuad = copyQuad(solved)
-                stableQuad = copyQuad(solved)
-                return copyQuad(solved)
+        if (shouldRunZxing) {
+            val analysis = zxingGeometryDetector.analyze(luma, width, height)
+            zxingRetryCountdown = ZXING_RETRY_INTERVAL_FRAMES
+
+            val solved = analysis?.outerQuad
+            val acceptedSolve = solved != null && projectiveSolutionMatchesObserved(solved, observed, side)
+            if (acceptedSolve) {
+                projectiveQuad = copyQuad(checkNotNull(solved))
+                projectiveReferenceAnchors = copyQuad(observed)
+            } else if (geometryNeedsRefresh) {
+                // Never hold a stale perspective solve after meaningful motion.
+                projectiveQuad = null
+                projectiveReferenceAnchors = null
             }
 
-            // Never hold an old perspective solve after meaningful camera motion.
-            if (cached != null) projectiveQuad = null
+            val presentation = currentProjectivePresentation(observed) ?: observed
+            stableQuad = copyQuad(presentation)
+            val zxingPayload = analysis?.payload ?: ByteArray(0)
+            if (zxingPayload.isNotEmpty()) {
+                return DenseFallbackResult(zxingPayload, presentation)
+            }
+            return DenseFallbackResult(ByteArray(0), presentation)
         }
 
-        projectiveQuad?.let {
-            stableQuad = copyQuad(it)
-            return copyQuad(it)
-        }
+        zxingRetryCountdown--
+        val presentation = currentProjectivePresentation(observed) ?: observed
+        stableQuad = copyQuad(presentation)
+        return DenseFallbackResult(ByteArray(0), presentation)
+    }
 
-        // ZXing may fail on an individual frame. In that case surface the current
-        // real OpenCV quadrangle rather than inventing or holding a synthetic BR.
-        stableQuad = observed
-        return observed
+    /**
+     * Carry an already perspective-correct quad through small inter-frame hand
+     * motion using the current finder anchors. This does not infer BR from three
+     * corners; BR came from an alignment-based projective solve. The affine carry
+     * is only an inter-frame approximation until the next projective refresh.
+     */
+    private fun currentProjectivePresentation(observed: List<DoubleArray>): List<DoubleArray>? {
+        val sourceQuad = projectiveQuad ?: return null
+        val reference = projectiveReferenceAnchors ?: return null
+        return transportQuad(reference, observed, sourceQuad)
+    }
+
+    private fun transportQuad(
+        reference: List<DoubleArray>,
+        current: List<DoubleArray>,
+        sourceQuad: List<DoubleArray>,
+    ): List<DoubleArray>? {
+        if (reference.size != 4 || current.size != 4 || sourceQuad.size != 4) return null
+        val a = reference[0]
+        val b = reference[1]
+        val c = reference[3]
+        val bx = b[0] - a[0]
+        val by = b[1] - a[1]
+        val cx = c[0] - a[0]
+        val cy = c[1] - a[1]
+        val det = bx * cy - by * cx
+        if (!det.isFinite() || abs(det) < 1e-6) return null
+
+        val na = current[0]
+        val nb = current[1]
+        val nc = current[3]
+        val nbx = nb[0] - na[0]
+        val nby = nb[1] - na[1]
+        val ncx = nc[0] - na[0]
+        val ncy = nc[1] - na[1]
+
+        val transported = sourceQuad.map { point ->
+            val px = point[0] - a[0]
+            val py = point[1] - a[1]
+            val u = (px * cy - py * cx) / det
+            val v = (bx * py - by * px) / det
+            val x = na[0] + u * nbx + v * ncx
+            val y = na[1] + u * nby + v * ncy
+            doubleArrayOf(x, y)
+        }
+        if (transported.any { point -> point.any { coordinate -> !coordinate.isFinite() } }) return null
+        return transported
     }
 
     private fun projectiveSolutionMatchesObserved(
@@ -212,6 +280,8 @@ class V7Phase1QrDecoder : AutoCloseable {
     private fun clearPresentationGeometry() {
         stableQuad = null
         projectiveQuad = null
+        projectiveReferenceAnchors = null
+        zxingRetryCountdown = 0
     }
 
     private fun pointDistance(a: DoubleArray, b: DoubleArray): Double =
@@ -273,8 +343,9 @@ class V7Phase1QrDecoder : AutoCloseable {
 
     companion object {
         private const val MAX_TRUSTED_DECODE_MISSES = 1
-        private const val PROJECTIVE_REFRESH_SIDE_FRACTION = 0.015
-        private const val MIN_PROJECTIVE_REFRESH_PX = 3.0
+        private const val ZXING_RETRY_INTERVAL_FRAMES = 8
+        private const val PROJECTIVE_REFRESH_SIDE_FRACTION = 0.04
+        private const val MIN_PROJECTIVE_REFRESH_PX = 6.0
         private const val PROJECTIVE_MATCH_SIDE_FRACTION = 0.15
         private const val MIN_PROJECTIVE_MATCH_PX = 16.0
 
