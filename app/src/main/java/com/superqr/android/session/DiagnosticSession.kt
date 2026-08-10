@@ -14,7 +14,12 @@ import com.superqr.android.phase1.VisionResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
  * Session-local frame gate. The token never crosses into CameraManager; it exists only
@@ -50,6 +55,20 @@ internal class SessionFrameGate {
     }
 }
 
+private data class CapturedQrFrame(
+    val sequence: Int,
+    val width: Int,
+    val height: Int,
+    val sensorTimestampNs: Long,
+    val arrivalNs: Long,
+    val pipelineMs: Double,
+    val failure: String?,
+    val schedulerState: String,
+    val quad: List<DoubleArray>?,
+    val diagnostics: Map<String, Any?>,
+    val luma: ByteArray,
+)
+
 class DiagnosticSession(private val context: Context) {
     private val _sessionState = MutableStateFlow(SessionState())
     val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
@@ -59,6 +78,8 @@ class DiagnosticSession(private val context: Context) {
     private val recorder = Phase1ObservationRecorder()
     private val analysisRate = AnalysisRateAccumulator(64)
     private val frameGate = SessionFrameGate()
+    private val capturedQrFrames = ArrayList<CapturedQrFrame>(MAX_CAPTURED_QR_FRAMES)
+    private var lastQrCaptureSequence = Int.MIN_VALUE / 2
     private var wasTracking = false
     private var wasLost = false
     private var observedFrames = 0
@@ -94,6 +115,7 @@ class DiagnosticSession(private val context: Context) {
                     "analyzed_frame_count" to observedFrames,
                     "final_phase" to _sessionState.value.phase.name,
                     "final_profile" to _sessionState.value.profileName,
+                    "forensic_qr_frames" to capturedQrFrames.size,
                 ),
             )
         }
@@ -114,6 +136,8 @@ class DiagnosticSession(private val context: Context) {
         engine.reset()
         recorder.reset()
         analysisRate.reset()
+        capturedQrFrames.clear()
+        lastQrCaptureSequence = Int.MIN_VALUE / 2
         wasTracking = false
         wasLost = false
         observedFrames = 0
@@ -157,6 +181,7 @@ class DiagnosticSession(private val context: Context) {
             analysisRate.recordCompletion(completedNs)
             val analysisFps = analysisRate.computeFps(completedNs)
             observedFrames++
+            captureQrFailureIfSelected(frame, result, observedFrames)
 
             result.gridObservation?.let { observation ->
                 recorder.record(
@@ -241,13 +266,45 @@ class DiagnosticSession(private val context: Context) {
         }
     }
 
-    private fun frameExtras(frame: CameraFrame, result: VisionResult, path: String): Map<String, Any?> = mapOf(
-        "capture_width" to frame.width,
-        "capture_height" to frame.height,
-        "sensor_timestamp_ns" to frame.sensorTimestamp,
-        "analysis_path" to path,
-        "acquisition_state" to result.schedulerState,
-    )
+    private fun captureQrFailureIfSelected(frame: CameraFrame, result: VisionResult, sequence: Int) {
+        if (capturedQrFrames.size >= MAX_CAPTURED_QR_FRAMES) return
+        if (sequence - lastQrCaptureSequence < QR_CAPTURE_MIN_GAP_FRAMES) return
+        if (result.path != Phase1AnalysisPath.QR) return
+        val qr = result.qrResult ?: return
+        if (qr.valid || qr.quad == null) return
+        if (qr.diagnostics["zxing_attempted"] != true) return
+
+        capturedQrFrames += CapturedQrFrame(
+            sequence = sequence,
+            width = frame.width,
+            height = frame.height,
+            sensorTimestampNs = frame.sensorTimestamp,
+            arrivalNs = frame.arrivalNs,
+            pipelineMs = result.pipelineMs,
+            failure = qr.failure,
+            schedulerState = result.schedulerState,
+            quad = qr.quad.map { it.copyOf() },
+            diagnostics = LinkedHashMap(qr.diagnostics),
+            // Event-selected exact normalized analyzer luma. No normal-frame copy.
+            luma = frame.lumaBytes.copyOf(),
+        )
+        lastQrCaptureSequence = sequence
+    }
+
+    private fun frameExtras(frame: CameraFrame, result: VisionResult, path: String): Map<String, Any?> = buildMap {
+        put("capture_width", frame.width)
+        put("capture_height", frame.height)
+        put("sensor_timestamp_ns", frame.sensorTimestamp)
+        put("analysis_path", path)
+        put("acquisition_state", result.schedulerState)
+        result.qrResult?.let { qr ->
+            put("qr_failure", qr.failure)
+            put("qr_decoded", qr.decoded)
+            put("qr_valid", qr.valid)
+            put("qr_payload_bytes", qr.bytes)
+            if (qr.diagnostics.isNotEmpty()) put("qr_decoder", qr.diagnostics)
+        }
+    }
 
     private fun derivePhase(result: VisionResult): SessionPhase = when (result.path) {
         Phase1AnalysisPath.GRID -> deriveGridPhase(result)
@@ -287,10 +344,9 @@ class DiagnosticSession(private val context: Context) {
             return SessionPhase.QR_LOCKED
         }
         if (qr.decoded || qr.quad != null) {
-            // qr.quad is emitted only by OpenCV's native QRCodeDetector, not by
-            // the generic carrier contour path. A valid native QR quadrangle is
-            // therefore real QR detection even when a rolling/mixed frame prevents
-            // payload decode on this particular exposure.
+            // qr.quad is emitted only by native QR detectors, not by the generic
+            // carrier contour path. It is therefore real QR detection even when
+            // payload decode fails on this exposure.
             wasTracking = true
             wasLost = false
             return SessionPhase.QR_DETECTED
@@ -302,7 +358,118 @@ class DiagnosticSession(private val context: Context) {
     }
 
     fun snapshot(): Phase1RunSnapshot = recorder.snapshot()
-    fun exportSession(): File? = if (recorder.hasLines) recorder.export(context.cacheDir) else null
+
+    fun exportSession(): File? {
+        if (!recorder.hasLines && capturedQrFrames.isEmpty()) return null
+        val file = File(context.cacheDir, "superqr-phase1-${recorder.campaignId.take(8)}.zip")
+        val state = _sessionState.value
+        val snapshot = recorder.snapshot()
+        val observationLines = recorder.currentObservationLines()
+        val captures = capturedQrFrames.toList()
+
+        ZipOutputStream(file.outputStream().buffered()).use { zip ->
+            val sessionJson = JSONObject()
+                .put("format", "superqr_phase0_diagnostic_bundle")
+                .put("schema_version", 1)
+                .put("campaign_id", recorder.campaignId)
+                .put("phase", state.phase.name)
+                .put("profile", state.profileName)
+                .put("analyzed_frames", state.analyzedFrames)
+                .put("camera_fps", state.cameraFps)
+                .put("analysis_fps", state.analysisFps)
+                .put("pipeline_ms", state.pipelineMs)
+                .put("qr_forensic_frame_count", captures.size)
+            zip.writeTextEntry("session.json", sessionJson.toString(2))
+
+            val summaryJson = JSONObject()
+                .put("campaign_id", snapshot.campaignId)
+                .put("run_id", snapshot.runId)
+                .put("profile", snapshot.profileName)
+                .put("sender_state", snapshot.senderState)
+                .put("sync_status", snapshot.syncStatus)
+                .put("geometry_state", snapshot.geometryState)
+                .put("analyzed_frames", snapshot.analyzedFrames)
+                .put("observations", snapshot.observations)
+                .put("valid_frames", snapshot.validFrames)
+                .put("unique_frames", snapshot.uniqueFrames)
+                .put("mean_pipeline_ms", snapshot.meanPipelineMs)
+                .put("p95_pipeline_ms", snapshot.p95PipelineMs)
+                .put("camera_fps", snapshot.cameraFps)
+                .put("capture_width", snapshot.captureWidth)
+                .put("capture_height", snapshot.captureHeight)
+                .put("last_failure", snapshot.lastFailure ?: JSONObject.NULL)
+                .put("failure_summary", snapshot.failureSummary)
+            zip.writeTextEntry("summary.json", summaryJson.toString(2))
+
+            val observations = if (observationLines.isEmpty()) "" else observationLines.joinToString("\n", postfix = "\n")
+            zip.writeTextEntry("observations.jsonl", observations)
+
+            captures.forEachIndexed { index, capture ->
+                val stem = "frames/qr_fail_%03d".format(index + 1)
+                zip.writePgmEntry("$stem.pgm", capture)
+                val metadata = JSONObject()
+                    .put("sequence", capture.sequence)
+                    .put("width", capture.width)
+                    .put("height", capture.height)
+                    .put("sensor_timestamp_ns", capture.sensorTimestampNs)
+                    .put("arrival_ns", capture.arrivalNs)
+                    .put("pipeline_ms", capture.pipelineMs)
+                    .put("failure", capture.failure ?: JSONObject.NULL)
+                    .put("scheduler_state", capture.schedulerState)
+                    .put("luma_sha256", sha256(capture.luma))
+                    .put("quad", quadJson(capture.quad))
+                    .put("qr_decoder", mapJson(capture.diagnostics))
+                zip.writeTextEntry("$stem.json", metadata.toString(2))
+            }
+        }
+        return file
+    }
+
+    private fun ZipOutputStream.writeTextEntry(name: String, text: String) {
+        putNextEntry(ZipEntry(name))
+        write(text.toByteArray(Charsets.UTF_8))
+        closeEntry()
+    }
+
+    private fun ZipOutputStream.writePgmEntry(name: String, capture: CapturedQrFrame) {
+        putNextEntry(ZipEntry(name))
+        write("P5\n${capture.width} ${capture.height}\n255\n".toByteArray(Charsets.US_ASCII))
+        write(capture.luma)
+        closeEntry()
+    }
+
+    private fun mapJson(values: Map<String, Any?>): JSONObject = JSONObject().apply {
+        values.forEach { (key, value) -> put(key, jsonValue(value)) }
+    }
+
+    private fun quadJson(quad: List<DoubleArray>?): Any {
+        if (quad == null) return JSONObject.NULL
+        return JSONArray().apply {
+            quad.forEach { point ->
+                put(JSONArray().apply {
+                    put(point[0])
+                    put(point[1])
+                })
+            }
+        }
+    }
+
+    private fun jsonValue(value: Any?): Any = when (value) {
+        null -> JSONObject.NULL
+        is JSONObject, is JSONArray, is String, is Number, is Boolean -> value
+        is Map<*, *> -> JSONObject().apply {
+            value.forEach { (key, nested) -> if (key != null) put(key.toString(), jsonValue(nested)) }
+        }
+        is Iterable<*> -> JSONArray().apply { value.forEach { put(jsonValue(it)) } }
+        is DoubleArray -> JSONArray().apply { value.forEach { put(it) } }
+        is FloatArray -> JSONArray().apply { value.forEach { put(it.toDouble()) } }
+        is IntArray -> JSONArray().apply { value.forEach { put(it) } }
+        is LongArray -> JSONArray().apply { value.forEach { put(it) } }
+        else -> value.toString()
+    }
+
+    private fun sha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private inline fun updateState(transform: (SessionState) -> SessionState) {
         _sessionState.value = transform(_sessionState.value)
@@ -311,6 +478,12 @@ class DiagnosticSession(private val context: Context) {
     fun close() {
         frameGate.stop()
         sessionActive = false
+        capturedQrFrames.clear()
         engine.close()
+    }
+
+    companion object {
+        private const val MAX_CAPTURED_QR_FRAMES = 3
+        private const val QR_CAPTURE_MIN_GAP_FRAMES = 8
     }
 }
