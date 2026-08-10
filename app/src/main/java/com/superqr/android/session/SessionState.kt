@@ -1,8 +1,8 @@
 package com.superqr.android.session
 
 import androidx.camera.view.transform.OutputTransform
-import com.superqr.android.ui.phase1.Phase1FramingGeometry
-import com.superqr.android.ui.phase1.Phase1TrackingState
+import com.superqr.android.phase1.Phase1FramingGeometry
+import com.superqr.android.phase1.Phase1TrackingState
 
 enum class SessionPhase(val label: String) {
     IDLE("Ready"),
@@ -21,7 +21,6 @@ data class SessionState(
     val phase: SessionPhase = SessionPhase.IDLE,
     val trackingState: Phase1TrackingState = Phase1TrackingState.SEARCHING,
     val framing: Phase1FramingGeometry = Phase1FramingGeometry.empty(),
-    /** CameraX transform from the exact ImageAnalysis frame that produced [framing]. */
     val sourceTransform: OutputTransform? = null,
     val profileName: String = "",
     val cameraFps: Double = 0.0,

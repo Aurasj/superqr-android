@@ -5,7 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.superqr.android.ui.MainScreen
-import com.superqr.android.ui.v6.theme.SuperQRAndroidTheme
+import com.superqr.android.ui.theme.SuperQRAndroidTheme
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -17,10 +17,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             SuperQRAndroidTheme {
-                MainScreen(
-                    analysisExecutor = analysisExecutor,
-                    cacheDir = cacheDir,
-                )
+                MainScreen(analysisExecutor = analysisExecutor)
             }
         }
     }

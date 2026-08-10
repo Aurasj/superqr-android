@@ -3,45 +3,28 @@ package com.superqr.android.session
 import android.content.Context
 import com.superqr.android.camera.CameraFrame
 import com.superqr.android.camera.V7AnalysisRateAccumulator
-import com.superqr.android.ui.phase1.Phase1AnalysisPath
-import com.superqr.android.ui.phase1.Phase1AnalysisPolicy
-import com.superqr.android.ui.phase1.Phase1Manifest
-import com.superqr.android.ui.phase1.Phase1ObservationRecorder
-import com.superqr.android.ui.phase1.Phase1RunSnapshot
-import com.superqr.android.ui.phase1.Phase1TrackingState
-import com.superqr.android.vision.VisionEngine
-import com.superqr.android.vision.VisionResult
+import com.superqr.android.phase1.Phase1AnalysisPath
+import com.superqr.android.phase1.Phase1AnalysisPolicy
+import com.superqr.android.phase1.Phase1Manifest
+import com.superqr.android.phase1.Phase1ObservationRecorder
+import com.superqr.android.phase1.Phase1RunSnapshot
+import com.superqr.android.phase1.Phase1TrackingState
+import com.superqr.android.phase1.VisionEngine
+import com.superqr.android.phase1.VisionResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 
-/**
- * Session-owned frame gate. CameraX callback generations deliberately do not
- * cross this boundary: camera restart bookkeeping and campaign lifecycle are
- * independent concerns.
- */
 internal class SessionFrameGate {
     private var accepting = false
 
-    @Synchronized
-    fun start() {
-        accepting = true
-    }
-
-    @Synchronized
-    fun stop() {
-        accepting = false
-    }
-
-    @Synchronized
-    fun acceptsFrames(): Boolean = accepting
+    @Synchronized fun start() { accepting = true }
+    @Synchronized fun stop() { accepting = false }
+    @Synchronized fun acceptsFrames(): Boolean = accepting
 }
 
-class DiagnosticSession(
-    private val context: Context,
-    private val cacheDir: File,
-) {
+class DiagnosticSession(private val context: Context) {
     private val _sessionState = MutableStateFlow(SessionState())
     val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
 
@@ -54,7 +37,6 @@ class DiagnosticSession(
     private var wasTracking = false
     private var wasLost = false
     private var observedFrames = 0
-    private var hasRecordedObservations = false
 
     fun startSession() {
         resetForNewSession()
@@ -69,7 +51,8 @@ class DiagnosticSession(
         frameGate.stop()
         val current = _sessionState.value
         _sessionState.value = current.copy(
-            phase = if (current.hasObservations) SessionPhase.COMPLETE else SessionPhase.IDLE,
+            phase = if (recorder.hasLines) SessionPhase.COMPLETE else SessionPhase.IDLE,
+            hasObservations = recorder.hasLines,
         )
     }
 
@@ -85,7 +68,6 @@ class DiagnosticSession(
         wasTracking = false
         wasLost = false
         observedFrames = 0
-        hasRecordedObservations = false
         _sessionState.value = SessionState(campaignId = recorder.campaignId)
     }
 
@@ -102,14 +84,13 @@ class DiagnosticSession(
             return
         }
 
-        val arrivalNs = frame.arrivalNs
         val result = try {
             engine.analyze(
                 luma = frame.lumaBytes,
                 width = frame.width,
                 height = frame.height,
                 chromaReader = frame.chromaReader,
-                arrivalNs = arrivalNs,
+                arrivalNs = frame.arrivalNs,
             )
         } catch (t: Throwable) {
             updateState {
@@ -124,11 +105,9 @@ class DiagnosticSession(
         val completedNs = System.nanoTime()
         analysisRate.recordCompletion(completedNs)
         val analysisFps = analysisRate.computeFps(completedNs)
-
         observedFrames++
 
-        val gridObs = result.gridObservation
-        if (gridObs != null) {
+        result.gridObservation?.let { gridObs ->
             recorder.record(
                 profile = gridObs.profile,
                 dwellEpochs = result.envelope?.dwellEpochs ?: 3,
@@ -150,29 +129,23 @@ class DiagnosticSession(
                 errorCellCount = gridObs.errorCellCount,
                 erasureCellIndexes = gridObs.erasureCellIndexes,
                 erasureCellCount = gridObs.erasureCellCount,
-                extra = mapOf(
-                    "capture_width" to frame.width,
-                    "capture_height" to frame.height,
-                    "sensor_timestamp_ns" to frame.sensorTimestamp,
-                    "analysis_path" to "GRID",
-                    "acquisition_state" to result.schedulerState,
-                    "pipeline_ms" to result.pipelineMs,
-                ),
+                extra = frameExtras(frame, result, "GRID"),
             )
-            hasRecordedObservations = true
         }
 
-        val qrObs = result.qrObservation
-        if (qrObs != null) {
+        result.qrObservation?.let { qrObs ->
+            val envelope = requireNotNull(result.envelope) {
+                "QR observation must carry its validated run envelope"
+            }
             recorder.observeSender(
                 profile = qrObs.profile,
-                envelope = result.envelope!!,
+                envelope = envelope,
                 sync = "QR_LOCKED",
                 geometry = qrObs.geometrySource,
             )
             recorder.record(
                 profile = qrObs.profile,
-                dwellEpochs = result.envelope.dwellEpochs,
+                dwellEpochs = envelope.dwellEpochs,
                 completedNs = completedNs,
                 frameIndex = qrObs.frameIndex,
                 observedBits = qrObs.profile.frameBytes * 8,
@@ -183,21 +156,14 @@ class DiagnosticSession(
                 pipelineMs = result.pipelineMs,
                 allocationBytes = 0,
                 gcEvents = 0,
-                envelope = result.envelope,
+                envelope = envelope,
                 sync = "QR_LOCKED",
                 geometry = qrObs.geometrySource,
-                extra = mapOf(
-                    "capture_width" to frame.width,
-                    "capture_height" to frame.height,
-                    "sensor_timestamp_ns" to frame.sensorTimestamp,
-                    "analysis_path" to "QR",
-                ),
+                extra = frameExtras(frame, result, "QR"),
             )
-            hasRecordedObservations = true
         }
 
-        // Keep search diagnostics bounded until the forensic recorder lands.
-        if (gridObs == null && qrObs == null && observedFrames % 15 == 0) {
+        if (result.gridObservation == null && result.qrObservation == null && observedFrames % 15 == 0) {
             val failureReason = when (result.path) {
                 Phase1AnalysisPath.GRID -> result.carrierAcquisition?.bestSyncStatus ?: "GRID_NO_CANDIDATE"
                 Phase1AnalysisPath.QR -> result.qrResult?.failure ?: "QR_NOT_DECODED"
@@ -208,21 +174,13 @@ class DiagnosticSession(
                 pipelineMs = result.pipelineMs,
                 geometry = result.trackingState.name,
                 sync = result.schedulerState,
-                extra = mapOf(
-                    "capture_width" to frame.width,
-                    "capture_height" to frame.height,
-                    "analysis_path" to result.path.name,
-                    "acquisition_state" to result.schedulerState,
-                ),
+                extra = frameExtras(frame, result, result.path.name),
             )
-            hasRecordedObservations = true
         }
-
-        val phase = derivePhase(result)
 
         updateState {
             it.copy(
-                phase = phase,
+                phase = derivePhase(result),
                 trackingState = result.trackingState,
                 framing = result.framing,
                 sourceTransform = frame.sourceTransform,
@@ -231,84 +189,83 @@ class DiagnosticSession(
                 analysisFps = analysisFps,
                 pipelineMs = result.pipelineMs,
                 analyzedFrames = observedFrames,
-                hasObservations = hasRecordedObservations,
+                hasObservations = recorder.hasLines,
                 campaignId = recorder.campaignId,
                 error = result.qrResult?.failure,
             )
         }
     }
 
+    private fun frameExtras(frame: CameraFrame, result: VisionResult, path: String): Map<String, Any?> =
+        mapOf(
+            "capture_width" to frame.width,
+            "capture_height" to frame.height,
+            "sensor_timestamp_ns" to frame.sensorTimestamp,
+            "analysis_path" to path,
+            "acquisition_state" to result.schedulerState,
+        )
+
     private fun derivePhase(result: VisionResult): SessionPhase {
-        when (result.path) {
-            Phase1AnalysisPath.GRID -> {
-                if (result.carrierAcquisition == null) {
-                    val next = if (wasTracking || wasLost) SessionPhase.LOST else SessionPhase.SEARCHING
-                    wasTracking = false
-                    wasLost = true
-                    return next
-                }
-
-                if (wasLost && !result.carrierAcquisition.acquired) {
-                    wasTracking = false
-                    return SessionPhase.REACQUIRING
-                }
-
-                wasTracking = true
-                wasLost = false
-
-                if (!result.carrierAcquisition.acquired) return SessionPhase.SEARCHING
-                if (result.envelope == null) return SessionPhase.GRID_DETECTED
-
-                if (result.envelope.state == com.superqr.android.vision.v7_capacity_lab.V7LabRunState.RUNNING) {
-                    return SessionPhase.RECEIVING
-                }
-
-                return SessionPhase.GRID_LOCKED
-            }
-
-            Phase1AnalysisPath.QR -> {
-                val qr = result.qrResult
-                if (qr == null) {
-                    wasTracking = false
-                    wasLost = true
-                    return SessionPhase.SEARCHING
-                }
-
-                if (qr.valid) {
-                    wasTracking = true
-                    wasLost = false
-                    return SessionPhase.QR_LOCKED
-                }
-
-                if (qr.decoded) {
-                    wasTracking = true
-                    wasLost = false
-                    return SessionPhase.QR_DETECTED
-                }
-
-                wasTracking = result.framing.trackingState == Phase1TrackingState.TRACKING
-                wasLost = !wasTracking
-
-                val qrQuad = qr.quad
-                return if (qrQuad != null && qrQuad.size == 4) {
-                    SessionPhase.QR_DETECTED
-                } else if (wasTracking || wasLost) {
-                    SessionPhase.LOST
-                } else {
-                    SessionPhase.SEARCHING
-                }
-            }
+        return when (result.path) {
+            Phase1AnalysisPath.GRID -> deriveGridPhase(result)
+            Phase1AnalysisPath.QR -> deriveQrPhase(result)
         }
     }
 
-    fun shareSession(context: Context): File = recorder.exportAndShare(context)
+    private fun deriveGridPhase(result: VisionResult): SessionPhase {
+        val acquisition = result.carrierAcquisition
+        if (acquisition == null) {
+            val next = if (wasTracking || wasLost) SessionPhase.LOST else SessionPhase.SEARCHING
+            wasTracking = false
+            wasLost = true
+            return next
+        }
+        if (wasLost && !acquisition.acquired) {
+            wasTracking = false
+            return SessionPhase.REACQUIRING
+        }
+        wasTracking = true
+        wasLost = false
+        if (!acquisition.acquired) return SessionPhase.SEARCHING
+        if (result.envelope == null) return SessionPhase.GRID_DETECTED
+        return if (result.envelope.state == com.superqr.android.vision.v7_capacity_lab.V7LabRunState.RUNNING) {
+            SessionPhase.RECEIVING
+        } else {
+            SessionPhase.GRID_LOCKED
+        }
+    }
+
+    private fun deriveQrPhase(result: VisionResult): SessionPhase {
+        val qr = result.qrResult
+        if (qr == null) {
+            wasTracking = false
+            wasLost = true
+            return SessionPhase.SEARCHING
+        }
+        if (qr.valid) {
+            wasTracking = true
+            wasLost = false
+            return SessionPhase.QR_LOCKED
+        }
+        if (qr.decoded) {
+            wasTracking = true
+            wasLost = false
+            return SessionPhase.QR_DETECTED
+        }
+        wasTracking = result.framing.trackingState == Phase1TrackingState.TRACKING
+        wasLost = !wasTracking
+        return if (qr.quad?.size == 4) {
+            SessionPhase.QR_DETECTED
+        } else if (wasTracking || wasLost) {
+            SessionPhase.LOST
+        } else {
+            SessionPhase.SEARCHING
+        }
+    }
 
     fun snapshot(): Phase1RunSnapshot = recorder.snapshot()
 
-    fun exportDebugBundle(context: Context): File? {
-        if (!hasRecordedObservations) return null
-        return recorder.exportAndShare(context)
-    }
+    fun exportSession(): File? = if (recorder.hasLines) recorder.export(context.cacheDir) else null
 
     private inline fun updateState(transform: (SessionState) -> SessionState) {
         _sessionState.value = transform(_sessionState.value)

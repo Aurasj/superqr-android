@@ -56,17 +56,17 @@ import com.superqr.android.camera.CameraManager
 import com.superqr.android.camera.CameraStatus
 import com.superqr.android.camera.CoordinateMapper
 import com.superqr.android.diagnostics.SessionExporter
+import com.superqr.android.phase1.Phase1FramePoint
+import com.superqr.android.phase1.Phase1FramingGeometry
+import com.superqr.android.phase1.Phase1RunSnapshot
 import com.superqr.android.session.DiagnosticSession
 import com.superqr.android.session.SessionPhase
-import com.superqr.android.ui.phase1.Phase1FramePoint
-import com.superqr.android.ui.phase1.Phase1FramingGeometry
-import java.io.File
+import com.superqr.android.session.SessionState
 import java.util.concurrent.ExecutorService
 
 @Composable
 fun MainScreen(
     analysisExecutor: ExecutorService,
-    cacheDir: File,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -83,10 +83,9 @@ fun MainScreen(
     ) { permission = it }
 
     val cameraManager = remember { CameraManager(context, analysisExecutor) }
-    val session = remember { DiagnosticSession(context, cacheDir) }
+    val session = remember { DiagnosticSession(context) }
     val sessionState by session.sessionState.collectAsState()
     val cameraStatus by cameraManager.status.collectAsState()
-
     var showDiagnostics by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -122,17 +121,8 @@ fun MainScreen(
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text(
-                "SuperQR",
-                color = Color.White,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-            )
-            Text(
-                "V7 receiver",
-                color = Color.White.copy(alpha = 0.55f),
-                fontSize = 13.sp,
-            )
+            Text("SuperQR", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text("V7 receiver", color = Color.White.copy(alpha = 0.55f), fontSize = 13.sp)
             Spacer(Modifier.height(12.dp))
 
             if (!permission) {
@@ -145,7 +135,7 @@ fun MainScreen(
             }
 
             val framing = sessionState.framing
-            val previewTargetTransform = cameraManager.previewView.outputTransform
+            val targetTransform = cameraManager.previewView.outputTransform
             Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
                 Card(
                     modifier = Modifier.fillMaxSize(),
@@ -157,32 +147,28 @@ fun MainScreen(
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
-
                 if (framing.carrierQuad != null || framing.candidateQuad != null) {
                     PreviewOverlay(
                         framing = framing,
                         sourceTransform = sessionState.sourceTransform,
-                        targetTransform = previewTargetTransform,
+                        targetTransform = targetTransform,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
 
             Spacer(Modifier.height(8.dp))
-            StatusBar(phase = sessionState.phase, profileName = sessionState.profileName)
+            StatusBar(sessionState.phase, sessionState.profileName)
             Spacer(Modifier.height(8.dp))
-
             MetricsRow(
-                cameraFps = sessionState.cameraFps,
-                analysisFps = sessionState.analysisFps,
-                pipelineMs = sessionState.pipelineMs,
-                profileName = sessionState.profileName,
+                sessionState.cameraFps,
+                sessionState.analysisFps,
+                sessionState.pipelineMs,
+                sessionState.profileName,
             )
-
             Spacer(Modifier.height(12.dp))
 
             val isRunning = cameraStatus == CameraStatus.RUNNING || cameraStatus == CameraStatus.STARTING
-
             if (!isRunning && sessionState.phase == SessionPhase.COMPLETE) {
                 Column(
                     Modifier.fillMaxWidth().padding(8.dp),
@@ -195,25 +181,11 @@ fun MainScreen(
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                     )
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = Color.White.copy(alpha = 0.07f)
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                "Campaign: ${sessionState.campaignId.take(8)}",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                            )
-                            Text(
-                                "${sessionState.analyzedFrames} frames analyzed",
-                                color = Color.White.copy(alpha = 0.7f),
-                                fontSize = 12.sp,
-                            )
-                        }
-                    }
+                    Text(
+                        "${sessionState.analyzedFrames} frames • ${sessionState.campaignId.take(8)}",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 12.sp,
+                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         OutlinedButton(onClick = { SessionExporter.shareSession(context, session) }) {
                             Text("SHARE SESSION", fontWeight = FontWeight.Bold)
@@ -226,47 +198,37 @@ fun MainScreen(
                         }
                     }
                 }
+            } else if (isRunning) {
+                Button(
+                    onClick = {
+                        cameraManager.stop()
+                        session.stopSession()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE53935)),
+                ) {
+                    Text("STOP CAMERA", fontWeight = FontWeight.Bold)
+                }
             } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (isRunning) {
-                        Button(
-                            onClick = {
-                                cameraManager.stop()
-                                session.stopSession()
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE53935)),
-                        ) {
-                            Text("STOP CAMERA", fontWeight = FontWeight.Bold)
-                        }
-                    } else {
-                        Button(
-                            onClick = {
-                                session.startSession()
-                                cameraManager.start(lifecycleOwner)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF43A047)),
-                        ) {
-                            Text("START CAMERA", fontWeight = FontWeight.Bold)
-                        }
-                    }
+                Button(
+                    onClick = {
+                        session.startSession()
+                        cameraManager.start(lifecycleOwner)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF43A047)),
+                ) {
+                    Text("START CAMERA", fontWeight = FontWeight.Bold)
                 }
             }
 
             Spacer(Modifier.height(12.dp))
-
             TextButton(onClick = { showDiagnostics = !showDiagnostics }) {
                 Text(
                     if (showDiagnostics) "Hide Diagnostics" else "Show Diagnostics",
                     color = Color.White.copy(alpha = 0.55f),
                 )
             }
-
             if (showDiagnostics) {
-                DiagnosticsPanel(
-                    sessionState = sessionState,
-                    snapshot = session.snapshot(),
-                    modifier = Modifier.weight(1f),
-                )
+                DiagnosticsPanel(sessionState, session.snapshot(), Modifier.weight(1f))
             } else {
                 Spacer(Modifier.weight(1f))
             }
@@ -283,7 +245,6 @@ private fun PreviewOverlay(
 ) {
     val quad = framing.carrierQuad ?: framing.candidateQuad
     if (quad == null || quad.size != 4 || sourceTransform == null || targetTransform == null) return
-
     val mappedQuad = mapFramePoints(quad, sourceTransform, targetTransform) ?: return
     val mappedFinders = framing.finderCenters.take(4).mapNotNull { point ->
         CoordinateMapper.mapPoint(sourceTransform, targetTransform, point.x, point.y)?.let {
@@ -294,81 +255,47 @@ private fun PreviewOverlay(
     Canvas(modifier = modifier) {
         val path = Path().apply {
             moveTo(mappedQuad[0].x, mappedQuad[0].y)
-            for (i in 1 until mappedQuad.size) lineTo(mappedQuad[i].x, mappedQuad[i].y)
+            for (index in 1 until mappedQuad.size) lineTo(mappedQuad[index].x, mappedQuad[index].y)
             close()
         }
-        drawPath(path, color = Color(0xFF7CB7FF), style = Stroke(width = 2.5f))
-
-        for (point in mappedQuad) {
-            drawCircle(Color.White, radius = 4f, center = point)
-        }
-        for (point in mappedFinders) {
-            drawCircle(Color(0xFFF2CC60), radius = 3f, center = point)
-        }
+        drawPath(path, Color(0xFF7CB7FF), style = Stroke(width = 2.5f))
+        mappedQuad.forEach { drawCircle(Color.White, 4f, it) }
+        mappedFinders.forEach { drawCircle(Color(0xFFF2CC60), 3f, it) }
     }
 }
 
 private fun mapFramePoints(
     points: List<Phase1FramePoint>,
-    sourceTransform: OutputTransform,
-    targetTransform: OutputTransform,
+    source: OutputTransform,
+    target: OutputTransform,
 ): List<Offset>? {
-    if (points.isEmpty()) return emptyList()
     val raw = FloatArray(points.size * 2)
     points.forEachIndexed { index, point ->
         raw[index * 2] = point.x
         raw[index * 2 + 1] = point.y
     }
-    if (!CoordinateMapper.mapPoints(sourceTransform, targetTransform, raw)) return null
+    if (!CoordinateMapper.mapPoints(source, target, raw)) return null
     return List(points.size) { index -> Offset(raw[index * 2], raw[index * 2 + 1]) }
 }
 
 @Composable
-private fun StatusBar(
-    phase: SessionPhase,
-    profileName: String,
-) {
+private fun StatusBar(phase: SessionPhase, profileName: String) {
     val phaseColor = when (phase) {
         SessionPhase.SEARCHING -> Color(0xFFF2CC60)
-        SessionPhase.QR_DETECTED, SessionPhase.QR_LOCKED -> Color(0xFF7CB7FF)
-        SessionPhase.GRID_DETECTED -> Color(0xFF7CB7FF)
-        SessionPhase.GRID_LOCKED, SessionPhase.RECEIVING -> Color(0xFF7EE787)
+        SessionPhase.QR_DETECTED, SessionPhase.QR_LOCKED, SessionPhase.GRID_DETECTED -> Color(0xFF7CB7FF)
+        SessionPhase.GRID_LOCKED, SessionPhase.RECEIVING, SessionPhase.COMPLETE -> Color(0xFF7EE787)
         SessionPhase.LOST, SessionPhase.REACQUIRING -> Color(0xFFFF7B72)
-        SessionPhase.COMPLETE -> Color(0xFF7EE787)
         else -> Color.White.copy(alpha = 0.55f)
     }
-
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            phase.label,
-            color = phaseColor,
-            fontWeight = FontWeight.Bold,
-            fontSize = 16.sp,
-        )
-        if (profileName.isNotEmpty()) {
-            Text(
-                profileName,
-                color = Color(0xFF7CB7FF),
-                fontSize = 11.sp,
-            )
-        }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(phase.label, color = phaseColor, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        if (profileName.isNotEmpty()) Text(profileName, color = Color(0xFF7CB7FF), fontSize = 11.sp)
     }
 }
 
 @Composable
-private fun MetricsRow(
-    cameraFps: Double,
-    analysisFps: Double,
-    pipelineMs: Double,
-    profileName: String,
-) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceEvenly,
-    ) {
+private fun MetricsRow(cameraFps: Double, analysisFps: Double, pipelineMs: Double, profileName: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
         MetricChip("Camera", "%.1f fps".format(cameraFps))
         MetricChip("Analysis", "%.1f fps".format(analysisFps))
         MetricChip("Pipeline", "%.1f ms".format(pipelineMs))
@@ -379,103 +306,56 @@ private fun MetricsRow(
 @Composable
 private fun MetricChip(label: String, value: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            value,
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Text(
-            label,
-            color = Color.White.copy(alpha = 0.45f),
-            fontSize = 10.sp,
-        )
+        Text(value, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        Text(label, color = Color.White.copy(alpha = 0.45f), fontSize = 10.sp)
     }
 }
 
 @Composable
-private fun DiagnosticsPanel(
-    sessionState: com.superqr.android.session.SessionState,
-    snapshot: com.superqr.android.ui.phase1.Phase1RunSnapshot,
-    modifier: Modifier = Modifier,
-) {
+private fun DiagnosticsPanel(state: SessionState, snapshot: Phase1RunSnapshot, modifier: Modifier = Modifier) {
     Column(
-        modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(4.dp),
+        modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(4.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         SectionHeader("Session")
-        Text(
-            "Campaign: ${sessionState.campaignId.take(8)} · Frames: ${sessionState.analyzedFrames}",
-            color = Color.White.copy(alpha = 0.7f),
-            fontSize = 12.sp,
-        )
-
+        DiagnosticText("Campaign: ${state.campaignId.take(8)} · Frames: ${state.analyzedFrames}")
         SectionHeader("Tracking")
-        Text(
-            "State: ${sessionState.trackingState.label} · Path: ${sessionState.profileName}",
-            color = Color.White.copy(alpha = 0.7f),
-            fontSize = 12.sp,
-        )
-
+        DiagnosticText("State: ${state.trackingState.label} · Profile: ${state.profileName}")
         SectionHeader("Performance")
-        Text(
+        DiagnosticText(
             "Pipeline: %.1f ms · Camera: %.1f fps · Analysis: %.1f fps".format(
-                sessionState.pipelineMs,
-                sessionState.cameraFps,
-                sessionState.analysisFps,
-            ),
-            color = Color.White.copy(alpha = 0.7f),
-            fontSize = 12.sp,
+                state.pipelineMs, state.cameraFps, state.analysisFps,
+            )
         )
-
         if (snapshot.observations > 0) {
             SectionHeader("Observations")
-            Text(
+            DiagnosticText(
                 "Observed: ${snapshot.observations} · Valid: ${snapshot.validFrames} · " +
-                    "Unique: ${snapshot.uniqueFrames} · FEC valid: ${snapshot.innerFecFrames}",
-                color = Color.White.copy(alpha = 0.7f),
-                fontSize = 12.sp,
+                    "Unique: ${snapshot.uniqueFrames} · FEC valid: ${snapshot.innerFecFrames}"
             )
-            Text(
-                "BER: %.4f · Erasure rate: %.4f · Goodput: %.2f KiB/s".format(
-                    snapshot.bitErrorRate,
-                    snapshot.erasureRate,
-                    snapshot.goodputKibS,
-                ),
-                color = Color.White.copy(alpha = 0.7f),
-                fontSize = 12.sp,
+            DiagnosticText(
+                "BER: %.4f · Erasures: %.4f · Goodput: %.2f KiB/s".format(
+                    snapshot.bitErrorRate, snapshot.erasureRate, snapshot.goodputKibS,
+                )
             )
         }
-
         if (snapshot.failureSummary.isNotEmpty()) {
             SectionHeader("Failures")
-            Text(
-                snapshot.failureSummary,
-                color = Color(0xFFFF7B72),
-                fontSize = 12.sp,
-            )
+            Text(snapshot.failureSummary, color = Color(0xFFFF7B72), fontSize = 12.sp)
         }
-
-        if (sessionState.error != null) {
+        state.error?.let {
             SectionHeader("Last Error")
-            Text(
-                sessionState.error,
-                color = Color(0xFFFF7B72),
-                fontSize = 12.sp,
-            )
+            Text(it, color = Color(0xFFFF7B72), fontSize = 12.sp)
         }
     }
+}
+
+@Composable
+private fun DiagnosticText(text: String) {
+    Text(text, color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
 }
 
 @Composable
 private fun SectionHeader(title: String) {
-    Text(
-        title.uppercase(),
-        color = Color(0xFF7CB7FF),
-        fontSize = 11.sp,
-        fontWeight = FontWeight.Bold,
-    )
+    Text(title.uppercase(), color = Color(0xFF7CB7FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
 }
