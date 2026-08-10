@@ -102,7 +102,7 @@ internal class ZxingQrGeometryDetector {
                 corners[index * 2 + 1].toDouble(),
             )
         }
-        if (quad.flatten().any { !it.isFinite() }) return null
+        if (quad.any { point -> point.any { coordinate -> !coordinate.isFinite() } }) return null
         return quad
     }
 }
