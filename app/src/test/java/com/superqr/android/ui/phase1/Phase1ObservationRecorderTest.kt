@@ -80,7 +80,7 @@ class Phase1ObservationRecorderTest {
     }
 
     @Test
-    fun readyRunningDoneFlowScoresOnlyRunningPayloadAndFreezesElapsedTime() {
+    fun readyRunningDoneFlowFreezesMetricsButKeepsBoundedNextCarrierDiagnostics() {
         val recorder = Phase1ObservationRecorder()
         val profile = Phase1Profile.Grid(
             3, "mono_128x100_qrlike",
@@ -111,8 +111,9 @@ class Phase1ObservationRecorderTest {
 
         val linesAtDone = recorder.jsonLinesForTest().size
         recorder.recordFailure(
-            "V7_NO_COMPLETE_CARRIER_GEOMETRY", 300, 12.0,
-            "V7_SYNC_NOT_VALIDATED", "V7_NO_COMPLETE_CARRIER_GEOMETRY",
+            "QR_NOT_DECODED", 300, 12.0,
+            "QR_NATIVE_FULL_FRAME", "SEARCH_QR",
+            extra = mapOf("analysis_path" to "QR", "qr_scan_scope" to "FULL_ANALYSIS_FRAME"),
         )
         val stable = recorder.snapshot(9_000_000_000L)
         assertEquals("DONE", stable.senderState)
@@ -120,6 +121,21 @@ class Phase1ObservationRecorderTest {
         assertEquals("LOCKED", stable.syncStatus)
         assertEquals(snapshot.analyzedFrames, stable.analyzedFrames)
         assertEquals(snapshot.elapsedSeconds, stable.elapsedSeconds, 0.0)
-        assertEquals(linesAtDone, recorder.jsonLinesForTest().size)
+        assertEquals(linesAtDone + 1, recorder.jsonLinesForTest().size)
+
+        val transition = JSONObject(recorder.jsonLinesForTest().last())
+        assertTrue(transition.getBoolean("transition_diagnostic"))
+        assertEquals("SEARCHING_NEXT", transition.getString("sender_state"))
+        assertEquals("QR_NOT_DECODED", transition.getString("failure_reason"))
+        assertEquals("FULL_ANALYSIS_FRAME", transition.getString("qr_scan_scope"))
+        assertTrue(transition.isNull("run_token"))
+
+        // Once the bounded transition window expires, terminal camera frames do
+        // not grow the export forever.
+        recorder.recordFailure(
+            "QR_NOT_DECODED", 8_000_000_201L, 12.0,
+            "QR_NATIVE_FULL_FRAME", "SEARCH_QR",
+        )
+        assertEquals(linesAtDone + 1, recorder.jsonLinesForTest().size)
     }
 }
