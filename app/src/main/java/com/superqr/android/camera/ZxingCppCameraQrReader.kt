@@ -65,13 +65,16 @@ class ZxingCppCameraQrReader {
         return try {
             val results = reader.read(image)
             val success = results.firstOrNull { result ->
+                val bytes = result.bytes
                 result.format == BarcodeReader.Format.QR_CODE &&
                     result.error == null &&
-                    !result.bytes.isNullOrEmpty()
+                    bytes != null &&
+                    bytes.isNotEmpty()
             }
+            val successBytes = success?.bytes
             val firstError = results.firstOrNull { it.error != null }?.error
             CameraQrDecodeResult(
-                payload = success?.bytes?.copyOf() ?: ByteArray(0),
+                payload = successBytes?.copyOf() ?: ByteArray(0),
                 elapsedMs = elapsedMs(startedNs),
                 resultCount = results.size,
                 errorType = firstError?.type?.name,
