@@ -15,11 +15,11 @@ object SessionExporter {
             file,
         )
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/x-ndjson"
+            type = "application/zip"
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        context.startActivity(Intent.createChooser(intent, "Share SuperQR session"))
+        context.startActivity(Intent.createChooser(intent, "Share SuperQR diagnostic bundle"))
         return true
     }
 }
