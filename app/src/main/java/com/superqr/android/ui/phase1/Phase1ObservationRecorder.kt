@@ -114,11 +114,47 @@ class Phase1ObservationRecorder {
         sync: String,
         extra: Map<String, Any?> = emptyMap(),
     ): Phase1RunSnapshot {
-        // The optical carrier intentionally disappears after DONE. Preserve the
-        // completed run summary until a different run token/profile is seen;
-        // otherwise ordinary post-campaign camera frames contaminate the final
-        // metrics and replace DONE with a misleading acquisition warning.
-        if (senderState == "DONE") return snapshot(completedNs)
+        // The terminal run metrics must stay frozen after DONE. However the next
+        // profile may use a completely different carrier (GRID -> QR), and until
+        // that new carrier decodes there is no new optical run token to reset us.
+        // Preserve a short bounded transition trace without charging those search
+        // frames to the completed run. This makes QR_NOT_DECODED diagnosable while
+        // preventing an indefinitely running camera from growing the export forever.
+        if (senderState == "DONE") {
+            if (runEndedNs > 0L && completedNs >= runEndedNs &&
+                completedNs - runEndedNs <= POST_DONE_SEARCH_WINDOW_NS
+            ) {
+                val json = JSONObject()
+                    .put("profile", "AUTO_SEARCH_NEXT")
+                    .put("campaign_id", campaignId)
+                    .put("run_id", "SEARCH_NEXT")
+                    .put("run_token", JSONObject.NULL)
+                    .put("previous_run_id", runId)
+                    .put("previous_run_token", runToken ?: JSONObject.NULL)
+                    .put("sender_state", "SEARCHING_NEXT")
+                    .put("sync_status", sync)
+                    .put("geometry_source", geometry)
+                    .put("dwell_epochs", currentDwell())
+                    .put("completed_ns", completedNs)
+                    .put("pipeline_ms", pipelineMs)
+                    .put("allocation_bytes", 0)
+                    .put("gc_events", 0)
+                    .put("scored", false)
+                    .put("observed_bits", 0)
+                    .put("bit_errors", 0)
+                    .put("erased_bits", 0)
+                    .put("frame_valid", false)
+                    .put("post_fec_valid", false)
+                    .put("raw_valid", false)
+                    .put("inner_fec_valid", false)
+                    .put("innovative_bytes", 0)
+                    .put("failure_reason", reason)
+                    .put("transition_diagnostic", true)
+                putExtras(json, extra)
+                lines += json.toString()
+            }
+            return snapshot(completedNs)
+        }
         noteAnalysis(completedNs, pipelineMs)
         geometryState = geometry; syncStatus = sync; lastFailure = reason
         failureCounts[reason] = (failureCounts[reason] ?: 0) + 1
@@ -232,12 +268,6 @@ class Phase1ObservationRecorder {
         json.put(key, array)
     }
 
-    /**
-     * Android's JSONObject does not recursively serialize primitive JVM arrays;
-     * a List<DoubleArray> otherwise becomes strings such as "[D@491343f" in the
-     * exported JSONL. Convert diagnostic structures explicitly so every physical
-     * campaign remains machine-readable and reproducible.
-     */
     private fun putExtras(json: JSONObject, extra: Map<String, Any?>) {
         for ((key, value) in extra) json.put(key, jsonValue(value))
     }
@@ -292,5 +322,9 @@ class Phase1ObservationRecorder {
         file.bufferedWriter().use { writer -> for (line in lines) { writer.write(line); writer.newLine() } }
         V7DebugExporter.shareFile(context, file, "application/x-ndjson")
         return file
+    }
+
+    private companion object {
+        const val POST_DONE_SEARCH_WINDOW_NS = 8_000_000_000L
     }
 }
