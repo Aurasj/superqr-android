@@ -1,7 +1,8 @@
 package com.superqr.android.session
 
-import com.superqr.android.ui.phase1.Phase1FramingGeometry
-import com.superqr.android.ui.phase1.Phase1TrackingState
+import com.superqr.android.phase1.Phase1FramingGeometry
+import com.superqr.android.phase1.Phase1FramingStatus
+import com.superqr.android.phase1.Phase1TrackingState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -129,7 +130,7 @@ class DiagnosticSessionTest {
         val geom = Phase1FramingGeometry(
             frameWidth = 1280,
             frameHeight = 720,
-            status = com.superqr.android.ui.phase1.Phase1FramingStatus.GOOD,
+            status = Phase1FramingStatus.GOOD,
             source = "V7_SYNC_TRACKED",
         )
         assertEquals(Phase1TrackingState.TRACKING, geom.trackingState)
