@@ -2,6 +2,7 @@ package com.superqr.android.ui.phase1
 
 import com.superqr.android.vision.v7_capacity_lab.V7CarrierAcquisitionResult
 import com.superqr.android.vision.v7_capacity_lab.V7CarrierSpec
+import com.superqr.android.vision.v7_capacity_lab.V7Phase1QrResult
 import kotlin.math.max
 
 data class Phase1FramePoint(val x: Float, val y: Float)
@@ -36,17 +37,22 @@ object Phase1FrameFit {
     }
 }
 
+enum class Phase1FramingMode { GRID, QR }
+
 enum class Phase1FramingStatus(val label: String) {
     ALIGNING("ALIGNING CAMERA"),
     GOOD("FRAMING GOOD"),
     MOVE_BACK("MOVE PHONE BACK"),
     NOT_FOUND("CARRIER NOT FOUND"),
+    QR_SEARCHING("QR SEARCHING"),
+    QR_GOOD("QR FRAMING GOOD"),
 }
 
 data class Phase1FramingGeometry(
     val frameWidth: Int,
     val frameHeight: Int,
     val status: Phase1FramingStatus,
+    val mode: Phase1FramingMode = Phase1FramingMode.GRID,
     val finderCenters: List<Phase1FramePoint> = emptyList(),
     val finderQuads: List<List<Phase1FramePoint>> = emptyList(),
     val carrierQuad: List<Phase1FramePoint>? = null,
@@ -80,7 +86,7 @@ object Phase1FramingEvaluator {
         spec: V7CarrierSpec,
     ): Phase1FramingGeometry {
         if (frameWidth <= 0 || frameHeight <= 0) return Phase1FramingGeometry.empty()
-        val safeInset = max(MIN_SAFE_INSET_PX, minOf(frameWidth, frameHeight) * SAFE_INSET_FRACTION)
+        val safeInset = safeInset(frameWidth, frameHeight)
         if (acquisition == null) {
             return Phase1FramingGeometry(
                 frameWidth, frameHeight, Phase1FramingStatus.NOT_FOUND,
@@ -102,11 +108,6 @@ object Phase1FramingEvaluator {
             val visibleFinderQuads = finderQuads.filter { quad ->
                 quad.all { point -> point.x in 0f..(frameWidth - 1f) && point.y in 0f..(frameHeight - 1f) }
             }
-            // Once protected sync has validated the homography, projected finder
-            // visibility is more trustworthy for operator framing than the
-            // contour detector's one-frame evidence count. A finder can be fully
-            // inside the camera frame yet temporarily disappear from thresholded
-            // contours under moire/rolling scan.
             val projectedVisibleFinders = visibleFinderQuads.size
             val safelyFramed = finderQuads.size == 4 && projectedVisibleFinders == 4 &&
                 minimumMargin != null && minimumMargin >= safeInset
@@ -148,6 +149,28 @@ object Phase1FramingEvaluator {
             source = acquisition.source,
         )
     }
+
+    /** Guidance for standard-QR controls from the exact frame given to OpenCV. */
+    fun evaluateQr(frameWidth: Int, frameHeight: Int, qr: V7Phase1QrResult): Phase1FramingGeometry {
+        if (frameWidth <= 0 || frameHeight <= 0) return Phase1FramingGeometry.empty()
+        val valid = qr.valid && qr.envelope != null
+        return Phase1FramingGeometry(
+            frameWidth = frameWidth,
+            frameHeight = frameHeight,
+            status = if (valid) Phase1FramingStatus.QR_GOOD else Phase1FramingStatus.QR_SEARCHING,
+            mode = Phase1FramingMode.QR,
+            safeInsetPx = safeInset(frameWidth, frameHeight),
+            detail = when {
+                valid -> "QR decoded from this exact full ImageAnalysis frame"
+                qr.decoded -> "QR detected but payload validation failed: ${qr.failure ?: "invalid payload"}"
+                else -> "Keep the complete QR inside the dashed safe area; OpenCV scans this full frame"
+            },
+            source = if (valid) "QR_NATIVE_LOCKED" else "QR_NATIVE_SEARCH",
+        )
+    }
+
+    private fun safeInset(frameWidth: Int, frameHeight: Int): Float =
+        max(MIN_SAFE_INSET_PX, minOf(frameWidth, frameHeight) * SAFE_INSET_FRACTION)
 
     private fun diagnosticPoint(values: DoubleArray): Phase1FramePoint? {
         if (values.size < 2 || !values[0].isFinite() || !values[1].isFinite()) return null
