@@ -73,188 +73,165 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                 try {
                     provider = future.get()
                     try {
-                            provider?.unbindAll()
-                            val rotation = activity?.window?.decorView?.display?.rotation ?: Surface.ROTATION_0
-                            val resolutionSelector = ResolutionSelector.Builder()
-                                .setAllowedResolutionMode(ResolutionSelector.PREFER_CAPTURE_RATE_OVER_HIGHER_RESOLUTION)
-                                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
-                                .setResolutionStrategy(
-                                    ResolutionStrategy(
-                                        Size(Phase1AnalysisPolicy.TARGET_WIDTH, Phase1AnalysisPolicy.TARGET_HEIGHT),
-                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
-                                    ),
-                                )
-                                .build()
-                            analysis = ImageAnalysis.Builder()
-                                .setTargetRotation(rotation)
-                                .setResolutionSelector(resolutionSelector)
-                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build()
-                            val openCv = OpenCvRuntime.ensureLoaded()
-                            carrierAcquirer = V7CarrierAcquirer(manifest.carrierSpec)
-                            qrDecoder = V7Phase1QrDecoder()
-                            val luma = LumaFrameBuffer()
-                            val chroma = ChromaSampleBuffers()
-                            val chromaReader = ImageProxyChromaSampler(chroma)
-                            var activeGridId = -1
-                            var gridReceiver: V7Phase1Receiver? = null
-                            val scheduler = Phase1AcquisitionScheduler()
-                            var deliveredFrames = 0
-                            var warmupFrames = 0
-                            var warmupStartedNs = 0L
-                            var resolutionRejected = false
-                            var cameraLabel = "CAMERA • 1280×720 target • OpenCV ${openCv.version}"
-                            var previewSuppressed = false
+                        provider?.unbindAll()
+                        val rotation = activity?.window?.decorView?.display?.rotation ?: Surface.ROTATION_0
+                        val resolutionSelector = ResolutionSelector.Builder()
+                            .setAllowedResolutionMode(ResolutionSelector.PREFER_CAPTURE_RATE_OVER_HIGHER_RESOLUTION)
+                            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                            .setResolutionStrategy(
+                                ResolutionStrategy(
+                                    Size(Phase1AnalysisPolicy.TARGET_WIDTH, Phase1AnalysisPolicy.TARGET_HEIGHT),
+                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
+                                ),
+                            )
+                            .build()
+                        analysis = ImageAnalysis.Builder()
+                            .setTargetRotation(rotation)
+                            .setResolutionSelector(resolutionSelector)
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                        val openCv = OpenCvRuntime.ensureLoaded()
+                        carrierAcquirer = V7CarrierAcquirer(manifest.carrierSpec)
+                        qrDecoder = V7Phase1QrDecoder()
+                        val luma = LumaFrameBuffer()
+                        val chroma = ChromaSampleBuffers()
+                        val chromaReader = ImageProxyChromaSampler(chroma)
+                        var activeGridId = -1
+                        var gridReceiver: V7Phase1Receiver? = null
+                        val scheduler = Phase1AcquisitionScheduler()
+                        var deliveredFrames = 0
+                        var warmupFrames = 0
+                        var warmupStartedNs = 0L
+                        var resolutionRejected = false
+                        var cameraLabel = "CAMERA • 1280×720 target • OpenCV ${openCv.version}"
+                        var previewSuppressed = false
 
-                            fun updatePreviewSuppression(value: Boolean) {
-                                if (value == previewSuppressed) return
-                                previewSuppressed = value
-                                previewPublisher.setMeasuring(value)
-                                mainExecutor.execute {
-                                    if (generation.get() == myGeneration) {
-                                        alignmentPreview = alignmentPreview.copy(measuring = value)
-                                    }
+                        fun updatePreviewSuppression(value: Boolean) {
+                            if (value == previewSuppressed) return
+                            previewSuppressed = value
+                            previewPublisher.setMeasuring(value)
+                            mainExecutor.execute {
+                                if (generation.get() == myGeneration) {
+                                    alignmentPreview = alignmentPreview.copy(measuring = value)
                                 }
                             }
+                        }
 
-                            analysis!!.setAnalyzer(analysisExecutor) { image ->
-                                val arrivalNs = System.nanoTime()
-                                val gcStart = gcCount()
-                                @Suppress("DEPRECATION") val allocStart = Debug.getThreadAllocSize().toLong()
-                                try {
-                                    val crop = image.cropRect
-                                    if (!Phase1AnalysisPolicy.accepts(crop.width(), crop.height())) {
-                                        if (!resolutionRejected) mainExecutor.execute {
-                                            cameraState = "ERROR • Camera delivered ${crop.width()}×${crop.height()}; analysis is capped at ${Phase1AnalysisPolicy.MAX_ANALYSIS_PIXELS} pixels"
+                        fun publishPreview(framing: Phase1FramingGeometry, arrivalNs: Long) {
+                            if (previewSuppressed) return
+                            previewPublisher.offer(
+                                luma.bytes, luma.width, luma.height, framing, arrivalNs,
+                            ) { preview ->
+                                mainExecutor.execute {
+                                    if (generation.get() == myGeneration && !previewSuppressed) alignmentPreview = preview
+                                    else preview.bitmap?.recycle()
+                                }
+                            }
+                        }
+
+                        analysis!!.setAnalyzer(analysisExecutor) { image ->
+                            val arrivalNs = System.nanoTime()
+                            val gcStart = gcCount()
+                            @Suppress("DEPRECATION") val allocStart = Debug.getThreadAllocSize().toLong()
+                            try {
+                                val crop = image.cropRect
+                                if (!Phase1AnalysisPolicy.accepts(crop.width(), crop.height())) {
+                                    if (!resolutionRejected) mainExecutor.execute {
+                                        cameraState = "ERROR • Camera delivered ${crop.width()}×${crop.height()}; analysis is capped at ${Phase1AnalysisPolicy.MAX_ANALYSIS_PIXELS} pixels"
+                                    }
+                                    resolutionRejected = true
+                                    return@setAnalyzer
+                                }
+                                if (!luma.packFrom(image)) return@setAnalyzer
+                                if (warmupStartedNs == 0L) warmupStartedNs = arrivalNs
+                                warmupFrames++
+                                if (!Phase1AnalysisPolicy.warmupComplete(warmupStartedNs, arrivalNs, warmupFrames)) {
+                                    if (warmupFrames == 1 || warmupFrames % 4 == 0) mainExecutor.execute {
+                                        if (generation.get() == myGeneration) cameraState = "$cameraLabel • ${luma.width}×${luma.height} • WARMUP"
+                                    }
+                                    return@setAnalyzer
+                                }
+                                if (warmupFrames == Phase1AnalysisPolicy.MIN_WARMUP_FRAMES || deliveredFrames == 0) mainExecutor.execute {
+                                    if (generation.get() == myGeneration) cameraState = "$cameraLabel • ${luma.width}×${luma.height} • ANALYZING"
+                                }
+                                val packedNs = System.nanoTime()
+                                if (scheduler.path == Phase1AnalysisPath.GRID) {
+                                    val acquisition = carrierAcquirer!!.analyze(
+                                        luma.bytes, luma.width, luma.height,
+                                        diagnostics = !previewSuppressed,
+                                    )
+                                    val acquisitionDoneNs = System.nanoTime()
+                                    val h = acquisition.canonicalToImageHomography
+                                    if (h == null) {
+                                        if (deliveredFrames % 30 == 0) {
+                                            Log.i(
+                                                "SuperQR-V7Carrier",
+                                                "source=${acquisition.source} candidates=${acquisition.candidateCount} " +
+                                                    "contours=${acquisition.contourCount} attempts=${acquisition.syncAttempts} " +
+                                                    "finderHypotheses=${acquisition.finderHypothesisCount} " +
+                                                    "best=${acquisition.bestSyncStatus} topContrast=${acquisition.sync.topContrast} " +
+                                                    "bottomContrast=${acquisition.sync.bottomContrast} " +
+                                                    "margin=${acquisition.sync.minimumCellMargin} " +
+                                                    "quad=${acquisition.detectedQuad?.joinToString { it.joinToString(prefix = "[", postfix = "]") }} " +
+                                                    "candidateSummary=${acquisition.candidateSummary}",
+                                            )
                                         }
-                                        resolutionRejected = true
-                                        return@setAnalyzer
-                                    }
-                                    if (!luma.packFrom(image)) return@setAnalyzer
-                                    if (warmupStartedNs == 0L) warmupStartedNs = arrivalNs
-                                    warmupFrames++
-                                    if (!Phase1AnalysisPolicy.warmupComplete(warmupStartedNs, arrivalNs, warmupFrames)) {
-                                        if (warmupFrames == 1 || warmupFrames % 4 == 0) mainExecutor.execute {
-                                            if (generation.get() == myGeneration) cameraState = "$cameraLabel • ${luma.width}×${luma.height} • WARMUP"
-                                        }
-                                        return@setAnalyzer
-                                    }
-                                    if (warmupFrames == Phase1AnalysisPolicy.MIN_WARMUP_FRAMES || deliveredFrames == 0) mainExecutor.execute {
-                                        if (generation.get() == myGeneration) cameraState = "$cameraLabel • ${luma.width}×${luma.height} • ANALYZING"
-                                    }
-                                    val packedNs = System.nanoTime()
-                                    if (scheduler.path == Phase1AnalysisPath.GRID) {
-                                        val acquisition = carrierAcquirer!!.analyze(
-                                            luma.bytes, luma.width, luma.height,
-                                            diagnostics = !previewSuppressed,
+                                        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = acquisition.carrierLike)
+                                        recorder.recordFailure(
+                                            acquisition.bestSyncStatus, acquisitionDoneNs,
+                                            (acquisitionDoneNs - arrivalNs) / 1_000_000.0,
+                                            acquisition.source, acquisition.sync.status,
+                                            mapOf(
+                                                "sensor_timestamp_ns" to image.imageInfo.timestamp,
+                                                "capture_width" to luma.width, "capture_height" to luma.height,
+                                                "analysis_path" to "GRID", "acquisition_state" to scheduler.state,
+                                                "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
+                                                "acquisition_ms" to (acquisitionDoneNs - packedNs) / 1_000_000.0,
+                                                "contours_considered" to acquisition.contourCount,
+                                                "quad_candidates" to acquisition.candidateCount,
+                                                "sync_hypotheses_tested" to acquisition.syncAttempts,
+                                                "best_sync_status" to acquisition.bestSyncStatus,
+                                                "top_sync_contrast" to acquisition.sync.topContrast,
+                                                "bottom_sync_contrast" to acquisition.sync.bottomContrast,
+                                                "minimum_sync_cell_margin" to acquisition.sync.minimumCellMargin,
+                                                "detected_quad" to acquisition.detectedQuad,
+                                            ),
                                         )
-                                        val acquisitionDoneNs = System.nanoTime()
-                                        val h = acquisition.canonicalToImageHomography
-                                        if (h == null) {
-                                            if (deliveredFrames % 30 == 0) {
-                                                Log.i(
-                                                    "SuperQR-V7Carrier",
-                                                    "source=${acquisition.source} candidates=${acquisition.candidateCount} " +
-                                                        "contours=${acquisition.contourCount} attempts=${acquisition.syncAttempts} " +
-                                                        "finderHypotheses=${acquisition.finderHypothesisCount} " +
-                                                        "best=${acquisition.bestSyncStatus} topContrast=${acquisition.sync.topContrast} " +
-                                                        "bottomContrast=${acquisition.sync.bottomContrast} " +
-                                                        "margin=${acquisition.sync.minimumCellMargin} " +
-                                                        "quad=${acquisition.detectedQuad?.joinToString { it.joinToString(prefix = "[", postfix = "]") }} " +
-                                                        "candidateSummary=${acquisition.candidateSummary}",
+                                    } else {
+                                        val sync = acquisition.sync
+                                        val syncDoneNs = acquisitionDoneNs
+                                        val envelope = sync.envelope
+                                        val profile = envelope?.let { manifest.profile(it.profileId) }
+                                        if (envelope != null && profile is Phase1Profile.Grid) {
+                                            updatePreviewSuppression(envelope.state == V7LabRunState.RUNNING)
+                                            scheduler.locked(Phase1AnalysisPath.GRID)
+                                            recorder.observeSender(profile, envelope, sync.status, acquisition.source)
+                                            if (envelope.state == V7LabRunState.RUNNING) {
+                                                if (activeGridId != profile.id) {
+                                                    gridReceiver = V7Phase1Receiver(profile.receiverProfile, manifest.seed)
+                                                    activeGridId = profile.id
+                                                }
+                                                val reader = if (profile.receiverProfile.bitsPerCell == 2) chromaReader.bind(image) else null
+                                                val result = gridReceiver!!.analyze(
+                                                    h, luma.bytes, luma.width, luma.height, reader,
+                                                    synchronizedFrameIndex = envelope.frameIndex,
                                                 )
-                                            }
-                                            scheduler.missed(
-                                                Phase1AnalysisPath.GRID,
-                                                carrierCandidate = acquisition.carrierLike,
-                                            )
-                                            recorder.recordFailure(
-                                                acquisition.bestSyncStatus, acquisitionDoneNs,
-                                                (acquisitionDoneNs - arrivalNs) / 1_000_000.0,
-                                                acquisition.source, acquisition.sync.status,
-                                                mapOf(
-                                                    "sensor_timestamp_ns" to image.imageInfo.timestamp,
-                                                    "capture_width" to luma.width, "capture_height" to luma.height,
-                                                    "analysis_path" to "GRID", "acquisition_state" to scheduler.state,
-                                                    "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
-                                                    "acquisition_ms" to (acquisitionDoneNs - packedNs) / 1_000_000.0,
-                                                    "contours_considered" to acquisition.contourCount,
-                                                    "quad_candidates" to acquisition.candidateCount,
-                                                    "sync_hypotheses_tested" to acquisition.syncAttempts,
-                                                    "best_sync_status" to acquisition.bestSyncStatus,
-                                                    "top_sync_contrast" to acquisition.sync.topContrast,
-                                                    "bottom_sync_contrast" to acquisition.sync.bottomContrast,
-                                                    "minimum_sync_cell_margin" to acquisition.sync.minimumCellMargin,
-                                                    "detected_quad" to acquisition.detectedQuad,
-                                                ),
-                                            )
-                                        } else {
-                                            val sync = acquisition.sync
-                                            val syncDoneNs = acquisitionDoneNs
-                                            val envelope = sync.envelope
-                                            val profile = envelope?.let { manifest.profile(it.profileId) }
-                                            if (envelope != null && profile is Phase1Profile.Grid) {
-                                                // READY is the operator's alignment guard. Keep the exact
-                                                // analysis preview live there; suppress it only when measured
-                                                // RUNNING data actually begins.
-                                                updatePreviewSuppression(envelope.state == V7LabRunState.RUNNING)
-                                                scheduler.locked(Phase1AnalysisPath.GRID)
-                                                recorder.observeSender(profile, envelope, sync.status, acquisition.source)
-                                                if (envelope.state == V7LabRunState.RUNNING) {
-                                                    if (activeGridId != profile.id) {
-                                                        gridReceiver = V7Phase1Receiver(profile.receiverProfile, manifest.seed)
-                                                        activeGridId = profile.id
-                                                    }
-                                                    val reader = if (profile.receiverProfile.bitsPerCell == 2) chromaReader.bind(image) else null
-                                                    val result = gridReceiver!!.analyze(
-                                                        h, luma.bytes, luma.width, luma.height, reader,
-                                                        synchronizedFrameIndex = envelope.frameIndex,
-                                                    )
-                                                    val completedNs = System.nanoTime()
-                                                    @Suppress("DEPRECATION") val allocation = (Debug.getThreadAllocSize().toLong() - allocStart).coerceAtLeast(0)
-                                                    val reason = when {
-                                                        result.postFecValid -> null
-                                                        result.erasedBits > 0 -> "INNER_FEC_FAILED_WITH_ERASURES"
-                                                        else -> "INNER_FEC_FAILED_WITH_ERRORS"
-                                                    }
-                                                    recorder.record(
-                                                        profile, envelope.dwellEpochs, completedNs, result.frameIndex?.toLong(),
-                                                        result.observedBits, result.bitErrors, result.erasedBits,
-                                                        result.frameValid, result.postFecValid,
-                                                        (completedNs - arrivalNs) / 1_000_000.0, allocation,
-                                                        (gcCount() - gcStart).coerceAtLeast(0), envelope,
-                                                        sync.status, acquisition.source, reason,
-                                                        result.errorCellIndexes, result.errorCellCount,
-                                                        result.erasureCellIndexes, result.erasureCellCount,
-                                                        mapOf(
-                                                            "sensor_timestamp_ns" to image.imageInfo.timestamp,
-                                                            "capture_width" to luma.width, "capture_height" to luma.height,
-                                                            "analysis_path" to "GRID", "acquisition_state" to scheduler.state,
-                                                            "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
-                                                            "acquisition_ms" to (acquisitionDoneNs - packedNs) / 1_000_000.0,
-                                                            "sync_ms" to 0.0,
-                                                            "payload_ms" to (completedNs - syncDoneNs) / 1_000_000.0,
-                                                            "byte_errors" to result.byteErrors, "byte_erasures" to result.byteErasures,
-                                                            "valid_samples" to result.validSamples, "black_y" to result.blackY, "white_y" to result.whiteY,
-                                                            "contours_considered" to acquisition.contourCount,
-                                                            "quad_candidates" to acquisition.candidateCount,
-                                                            "sync_hypotheses_tested" to acquisition.syncAttempts,
-                                                            "top_sync_contrast" to sync.topContrast,
-                                                            "bottom_sync_contrast" to sync.bottomContrast,
-                                                            "minimum_sync_cell_margin" to sync.minimumCellMargin,
-                                                        ),
-                                                    )
-                                                }
-                                            } else {
-                                                scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = acquisition.carrierLike)
+                                                val completedNs = System.nanoTime()
+                                                @Suppress("DEPRECATION") val allocation = (Debug.getThreadAllocSize().toLong() - allocStart).coerceAtLeast(0)
                                                 val reason = when {
-                                                    envelope == null -> sync.status
-                                                    profile == null -> "SYNC_UNKNOWN_PROFILE_${envelope.profileId}"
-                                                    else -> "SYNC_PROFILE_CARRIER_MISMATCH"
+                                                    result.postFecValid -> null
+                                                    result.erasedBits > 0 -> "INNER_FEC_FAILED_WITH_ERASURES"
+                                                    else -> "INNER_FEC_FAILED_WITH_ERRORS"
                                                 }
-                                                recorder.recordFailure(
-                                                    reason, syncDoneNs, (syncDoneNs - arrivalNs) / 1_000_000.0,
-                                                    acquisition.source, sync.status,
+                                                recorder.record(
+                                                    profile, envelope.dwellEpochs, completedNs, result.frameIndex?.toLong(),
+                                                    result.observedBits, result.bitErrors, result.erasedBits,
+                                                    result.frameValid, result.postFecValid,
+                                                    (completedNs - arrivalNs) / 1_000_000.0, allocation,
+                                                    (gcCount() - gcStart).coerceAtLeast(0), envelope,
+                                                    sync.status, acquisition.source, reason,
+                                                    result.errorCellIndexes, result.errorCellCount,
+                                                    result.erasureCellIndexes, result.erasureCellCount,
                                                     mapOf(
                                                         "sensor_timestamp_ns" to image.imageInfo.timestamp,
                                                         "capture_width" to luma.width, "capture_height" to luma.height,
@@ -262,6 +239,9 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                                         "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
                                                         "acquisition_ms" to (acquisitionDoneNs - packedNs) / 1_000_000.0,
                                                         "sync_ms" to 0.0,
+                                                        "payload_ms" to (completedNs - syncDoneNs) / 1_000_000.0,
+                                                        "byte_errors" to result.byteErrors, "byte_erasures" to result.byteErasures,
+                                                        "valid_samples" to result.validSamples, "black_y" to result.blackY, "white_y" to result.whiteY,
                                                         "contours_considered" to acquisition.contourCount,
                                                         "quad_candidates" to acquisition.candidateCount,
                                                         "sync_hypotheses_tested" to acquisition.syncAttempts,
@@ -271,100 +251,136 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
                                                     ),
                                                 )
                                             }
-                                        }
-
-                                        // The preview and overlay are produced only from this exact
-                                        // GRID analysis frame and its own acquisition result. Never
-                                        // overlay geometry from a previous GRID frame onto a later QR
-                                        // analysis frame while the search scheduler alternates paths.
-                                        if (!previewSuppressed) {
-                                            val framing = Phase1FramingEvaluator.evaluate(
-                                                luma.width, luma.height, acquisition, manifest.carrierSpec,
-                                            )
-                                            previewPublisher.offer(
-                                                luma.bytes, luma.width, luma.height, framing, arrivalNs,
-                                            ) { preview ->
-                                                mainExecutor.execute {
-                                                    if (generation.get() == myGeneration && !previewSuppressed) alignmentPreview = preview
-                                                    else preview.bitmap?.recycle()
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        val qr = qrDecoder!!.analyzeAuto(luma.bytes, luma.width, luma.height, qrExpected)
-                                        val completedNs = System.nanoTime()
-                                        val envelope = qr.envelope
-                                        val profile = envelope?.let { manifest.profile(it.profileId) }
-                                        if (envelope != null && profile is Phase1Profile.Qr) {
-                                            updatePreviewSuppression(envelope.state == V7LabRunState.RUNNING)
-                                            scheduler.locked(Phase1AnalysisPath.QR)
-                                            recorder.observeSender(profile, envelope, "QR_LOCKED", "QR_NATIVE")
-                                            if (envelope.state == V7LabRunState.RUNNING && qr.valid) {
-                                                recorder.record(
-                                                    profile, envelope.dwellEpochs, completedNs, qr.frameIndex,
-                                                    profile.frameBytes * 8, 0, 0, true, true,
-                                                    (completedNs - arrivalNs) / 1_000_000.0,
-                                                    (Debug.getThreadAllocSize().toLong() - allocStart).coerceAtLeast(0),
-                                                    (gcCount() - gcStart).coerceAtLeast(0), envelope,
-                                                    "QR_LOCKED", "QR_NATIVE", extra = mapOf(
-                                                        "sensor_timestamp_ns" to image.imageInfo.timestamp,
-                                                        "capture_width" to luma.width, "capture_height" to luma.height,
-                                                        "analysis_path" to "QR", "acquisition_state" to scheduler.state,
-                                                        "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
-                                                        "qr_ms" to (completedNs - packedNs) / 1_000_000.0,
-                                                    ),
-                                                )
-                                            } else if (envelope.state == V7LabRunState.RUNNING) {
-                                                recorder.recordFailure(
-                                                    qr.failure ?: "QR_PAYLOAD_INVALID", completedNs,
-                                                    (completedNs - arrivalNs) / 1_000_000.0, "QR_NATIVE", "QR_LOCKED",
-                                                    mapOf("capture_width" to luma.width, "capture_height" to luma.height,
-                                                        "analysis_path" to "QR", "qr_ms" to (completedNs - packedNs) / 1_000_000.0),
-                                                )
-                                            }
                                         } else {
-                                            scheduler.missed(Phase1AnalysisPath.QR)
+                                            scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = acquisition.carrierLike)
+                                            val reason = when {
+                                                envelope == null -> sync.status
+                                                profile == null -> "SYNC_UNKNOWN_PROFILE_${envelope.profileId}"
+                                                else -> "SYNC_PROFILE_CARRIER_MISMATCH"
+                                            }
                                             recorder.recordFailure(
-                                                qr.failure ?: "QR_NOT_DECODED", completedNs,
-                                                (completedNs - arrivalNs) / 1_000_000.0, "QR_NATIVE", scheduler.state,
+                                                reason, syncDoneNs, (syncDoneNs - arrivalNs) / 1_000_000.0,
+                                                acquisition.source, sync.status,
                                                 mapOf(
                                                     "sensor_timestamp_ns" to image.imageInfo.timestamp,
                                                     "capture_width" to luma.width, "capture_height" to luma.height,
-                                                    "analysis_path" to "QR", "acquisition_state" to scheduler.state,
+                                                    "analysis_path" to "GRID", "acquisition_state" to scheduler.state,
                                                     "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
-                                                    "qr_ms" to (completedNs - packedNs) / 1_000_000.0,
+                                                    "acquisition_ms" to (acquisitionDoneNs - packedNs) / 1_000_000.0,
+                                                    "sync_ms" to 0.0,
+                                                    "contours_considered" to acquisition.contourCount,
+                                                    "quad_candidates" to acquisition.candidateCount,
+                                                    "sync_hypotheses_tested" to acquisition.syncAttempts,
+                                                    "top_sync_contrast" to sync.topContrast,
+                                                    "bottom_sync_contrast" to sync.bottomContrast,
+                                                    "minimum_sync_cell_margin" to sync.minimumCellMargin,
                                                 ),
                                             )
                                         }
                                     }
-                                    deliveredFrames++
-                                    if (deliveredFrames % 3 == 0) mainExecutor.execute {
-                                        if (generation.get() == myGeneration) status = recorder.snapshot()
+
+                                    if (!previewSuppressed) {
+                                        publishPreview(
+                                            Phase1FramingEvaluator.evaluate(
+                                                luma.width, luma.height, acquisition, manifest.carrierSpec,
+                                            ),
+                                            arrivalNs,
+                                        )
                                     }
-                                } catch (t: Throwable) {
-                                    mainExecutor.execute { cameraState = "ERROR • ${t.message ?: t.javaClass.simpleName}" }
-                                } finally {
-                                    image.close()
+                                } else {
+                                    val qr = qrDecoder!!.analyzeAuto(luma.bytes, luma.width, luma.height, qrExpected)
+                                    val completedNs = System.nanoTime()
+                                    val envelope = qr.envelope
+                                    val profile = envelope?.let { manifest.profile(it.profileId) }
+                                    if (envelope != null && profile is Phase1Profile.Qr) {
+                                        updatePreviewSuppression(envelope.state == V7LabRunState.RUNNING)
+                                        scheduler.locked(Phase1AnalysisPath.QR)
+                                        recorder.observeSender(profile, envelope, "QR_LOCKED", "QR_NATIVE_FULL_FRAME")
+                                        if (envelope.state == V7LabRunState.RUNNING && qr.valid) {
+                                            recorder.record(
+                                                profile, envelope.dwellEpochs, completedNs, qr.frameIndex,
+                                                profile.frameBytes * 8, 0, 0, true, true,
+                                                (completedNs - arrivalNs) / 1_000_000.0,
+                                                (Debug.getThreadAllocSize().toLong() - allocStart).coerceAtLeast(0),
+                                                (gcCount() - gcStart).coerceAtLeast(0), envelope,
+                                                "QR_LOCKED", "QR_NATIVE_FULL_FRAME", extra = mapOf(
+                                                    "sensor_timestamp_ns" to image.imageInfo.timestamp,
+                                                    "capture_width" to luma.width, "capture_height" to luma.height,
+                                                    "analysis_path" to "QR", "acquisition_state" to scheduler.state,
+                                                    "qr_scan_scope" to "FULL_ANALYSIS_FRAME",
+                                                    "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
+                                                    "qr_ms" to (completedNs - packedNs) / 1_000_000.0,
+                                                ),
+                                            )
+                                        } else if (envelope.state == V7LabRunState.RUNNING) {
+                                            recorder.recordFailure(
+                                                qr.failure ?: "QR_PAYLOAD_INVALID", completedNs,
+                                                (completedNs - arrivalNs) / 1_000_000.0, "QR_NATIVE_FULL_FRAME", "QR_LOCKED",
+                                                mapOf(
+                                                    "capture_width" to luma.width, "capture_height" to luma.height,
+                                                    "analysis_path" to "QR", "qr_scan_scope" to "FULL_ANALYSIS_FRAME",
+                                                    "qr_ms" to (completedNs - packedNs) / 1_000_000.0,
+                                                ),
+                                            )
+                                        }
+                                    } else {
+                                        scheduler.missed(Phase1AnalysisPath.QR)
+                                        recorder.recordFailure(
+                                            qr.failure ?: "QR_NOT_DECODED", completedNs,
+                                            (completedNs - arrivalNs) / 1_000_000.0, "QR_NATIVE_FULL_FRAME", scheduler.state,
+                                            mapOf(
+                                                "sensor_timestamp_ns" to image.imageInfo.timestamp,
+                                                "capture_width" to luma.width, "capture_height" to luma.height,
+                                                "analysis_path" to "QR", "acquisition_state" to scheduler.state,
+                                                "qr_scan_scope" to "FULL_ANALYSIS_FRAME",
+                                                "luma_pack_ms" to (packedNs - arrivalNs) / 1_000_000.0,
+                                                "qr_ms" to (completedNs - packedNs) / 1_000_000.0,
+                                            ),
+                                        )
+                                    }
+
+                                    // QR search/READY uses the exact same normalized full luma frame
+                                    // as OpenCV. There is no independent Preview use case and no hidden
+                                    // center ROI. Once synchronized RUNNING begins this path freezes too.
+                                    if (!previewSuppressed) {
+                                        publishPreview(
+                                            Phase1FramingEvaluator.evaluateQr(luma.width, luma.height, qr),
+                                            arrivalNs,
+                                        )
+                                    }
                                 }
+                                deliveredFrames++
+                                if (deliveredFrames % 3 == 0) mainExecutor.execute {
+                                    if (generation.get() == myGeneration) status = recorder.snapshot()
+                                }
+                            } catch (t: Throwable) {
+                                mainExecutor.execute { cameraState = "ERROR • ${t.message ?: t.javaClass.simpleName}" }
+                            } finally {
+                                image.close()
                             }
-                            // ImageAnalysis is the only camera output. The UI renders a
-                            // throttled copy of the same normalized luma buffer and never
-                            // attaches an independent Preview viewport that can crop or
-                            // transform the operator's view differently from the receiver.
-                            val base = SessionConfig.Builder(listOf(analysis!!))
-                            val info = provider!!.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
-                            val ranges = try { info.getSupportedFrameRateRanges(base.build()) } catch (_: Throwable) { emptySet() }
-                            val chosen = ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
-                                ?: ranges.filter { it.lower <= 30 && it.upper >= 30 }.minByOrNull { it.upper - it.lower }
-                            val config = SessionConfig.Builder(listOf(analysis!!)).apply {
-                                if (chosen != null) setFrameRateRange(chosen)
-                            }.build()
-                            provider!!.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, config)
-                            val fpsLabel = if (chosen == null) "AUTO FPS" else "${chosen.lower}-${chosen.upper} FPS"
-                            cameraLabel = "CAMERA $fpsLabel • 1280×720 target • OpenCV ${openCv.version}"
-                            cameraState = "$cameraLabel • WARMUP"
-                    } catch (t: Throwable) { cameraState = "ERROR • ${t.message ?: "camera"}" }
-                } catch (t: Throwable) { cameraState = "ERROR • ${t.message ?: "provider"}" }
+                        }
+
+                        // ImageAnalysis is the only camera output. The UI renders a throttled copy
+                        // of the same normalized luma buffer. GRID and QR acquisition therefore
+                        // share one visible/full-frame coordinate system with no Preview crop drift.
+                        val base = SessionConfig.Builder(listOf(analysis!!))
+                        val info = provider!!.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
+                        val ranges = try { info.getSupportedFrameRateRanges(base.build()) } catch (_: Throwable) { emptySet() }
+                        val chosen = ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
+                            ?: ranges.filter { it.lower <= 30 && it.upper >= 30 }.minByOrNull { it.upper - it.lower }
+                        val config = SessionConfig.Builder(listOf(analysis!!)).apply {
+                            if (chosen != null) setFrameRateRange(chosen)
+                        }.build()
+                        provider!!.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, config)
+                        val fpsLabel = if (chosen == null) "AUTO FPS" else "${chosen.lower}-${chosen.upper} FPS"
+                        cameraLabel = "CAMERA $fpsLabel • 1280×720 target • OpenCV ${openCv.version}"
+                        cameraState = "$cameraLabel • WARMUP"
+                    } catch (t: Throwable) {
+                        cameraState = "ERROR • ${t.message ?: "camera"}"
+                    }
+                } catch (t: Throwable) {
+                    cameraState = "ERROR • ${t.message ?: "provider"}"
+                }
             }, mainExecutor)
         }
         onDispose {
@@ -401,4 +417,8 @@ fun Phase1LabScreen(analysisExecutor: ExecutorService, modifier: Modifier = Modi
     )
 }
 
-private fun gcCount(): Long = try { Debug.getRuntimeStat("art.gc.gc-count").toLongOrNull() ?: 0L } catch (_: Throwable) { 0L }
+private fun gcCount(): Long = try {
+    Debug.getRuntimeStat("art.gc.gc-count").toLongOrNull() ?: 0L
+} catch (_: Throwable) {
+    0L
+}
