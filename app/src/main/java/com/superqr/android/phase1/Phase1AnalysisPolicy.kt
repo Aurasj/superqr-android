@@ -19,15 +19,17 @@ enum class Phase1AnalysisPath { GRID, QR }
 
 /**
  * Keeps expensive QR and GRID acquisition paths from running serially on every
- * frame. Search begins with QR, alternates while unlocked, and hands a truly
- * lost GRID lock to a short QR transition probe before allowing another cold
- * GRID contour search.
+ * frame. Search begins with QR and alternates only while neither path has real
+ * geometric evidence. Once either detector sees a plausible carrier/QR, that
+ * path receives consecutive frames so acquisition can stabilize before we try
+ * the opposite PHY.
  *
  * A carrier-like miss while GRID is already locked is deliberately NOT treated
  * as a lost lock. V7CarrierAcquirer uses these frames for bounded TRACK_HOLD /
- * optical-flow recovery during phone motion or scale change. Switching to QR
- * during that hold starves the tracker of consecutive frames and can force an
- * unnecessary 150-250 ms cold contour acquisition.
+ * optical-flow recovery during phone motion or scale change. Likewise, a QR
+ * quadrangle without a decoded payload is still real QR acquisition evidence;
+ * switching to GRID on the next frame starves dense V27/V40 detection and makes
+ * the UI flicker between QR and search states.
  */
 class Phase1AcquisitionScheduler(
     private val unlockAfterMisses: Int = 2,
@@ -57,13 +59,21 @@ class Phase1AcquisitionScheduler(
         transitionProbesRemaining = 0
     }
 
-    fun missed(path: Phase1AnalysisPath, carrierCandidate: Boolean = false) {
+    fun missed(
+        path: Phase1AnalysisPath,
+        carrierCandidate: Boolean = false,
+        qrCandidate: Boolean = false,
+    ) {
+        val hasPathEvidence = when (path) {
+            Phase1AnalysisPath.GRID -> carrierCandidate
+            Phase1AnalysisPath.QR -> qrCandidate
+        }
+
         if (lockedPath == path) {
-            // GRID's carrier acquirer intentionally emits carrierLike=true for
-            // TRACK_HOLD and other bounded recovery evidence. Keep feeding GRID
-            // consecutive frames while that evidence exists instead of jumping
-            // to QR and destroying motion/scale continuity.
-            if (path == Phase1AnalysisPath.GRID && carrierCandidate) {
+            // Keep feeding consecutive frames while the currently selected PHY
+            // still has real geometric evidence. This is TRACK_HOLD for GRID and
+            // a native QR quadrangle for QR.
+            if (hasPathEvidence) {
                 misses = 0
                 nextSearchPath = path
                 return
@@ -91,10 +101,7 @@ class Phase1AcquisitionScheduler(
             transitionProbePath = null
         }
 
-        nextSearchPath = when {
-            path == Phase1AnalysisPath.GRID && carrierCandidate -> Phase1AnalysisPath.GRID
-            else -> opposite(path)
-        }
+        nextSearchPath = if (hasPathEvidence) path else opposite(path)
     }
 
     fun reset() {
