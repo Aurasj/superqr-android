@@ -28,6 +28,34 @@ class DiagnosticSessionTest {
     }
 
     @Test
+    fun `frame started before stop cannot commit after stop`() {
+        val gate = SessionFrameGate()
+        gate.start()
+        val token = gate.enter()
+        assertNotNull(token)
+
+        gate.stop()
+        var committed = false
+        val accepted = gate.commitIfCurrent(requireNotNull(token)) { committed = true }
+
+        assertFalse(accepted)
+        assertFalse(committed)
+    }
+
+    @Test
+    fun `fresh frame can commit in current session`() {
+        val gate = SessionFrameGate()
+        gate.start()
+        val token = requireNotNull(gate.enter())
+        var committed = false
+
+        val accepted = gate.commitIfCurrent(token) { committed = true }
+
+        assertTrue(accepted)
+        assertTrue(committed)
+    }
+
+    @Test
     fun `all phases have non-empty labels`() {
         SessionPhase.entries.forEach { phase ->
             assertTrue("Phase ${phase.name} has empty label", phase.label.isNotEmpty())
