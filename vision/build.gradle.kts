@@ -23,6 +23,7 @@ android {
 
 dependencies {
     implementation(libs.open.cv)
+    implementation(libs.zxing.core)
     testImplementation(libs.junit)
     testImplementation(libs.json)
 }
