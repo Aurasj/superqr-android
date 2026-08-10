@@ -3,7 +3,7 @@ package com.superqr.android.phase1
 /** Hard real-time guardrails for the physical PHY receiver. */
 object Phase1AnalysisPolicy {
     const val TARGET_WIDTH = 1280
-    const val TARGET_HEIGHT = 720
+    const val TARGET_HEIGHT = 960
     const val MAX_ANALYSIS_PIXELS = 1280 * 960
     const val MIN_WARMUP_FRAMES = 8
     const val MIN_WARMUP_NS = 750_000_000L
