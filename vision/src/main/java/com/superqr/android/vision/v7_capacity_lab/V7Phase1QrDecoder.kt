@@ -15,10 +15,22 @@ data class V7Phase1QrResult(
     val failure: String? = null,
 )
 
-/** Binary-safe OpenCV QR control decoder with a reused full-frame luma Mat. */
+/**
+ * Binary-safe OpenCV QR control decoder with reused luma and QR geometry.
+ *
+ * Full-frame detection is required while searching so the receiver sees exactly
+ * what the operator sees. Once OpenCV has found a QR quadrangle, however, the
+ * phone/display geometry is effectively static for a physical lab run. Reusing
+ * those points through decodeBytes() removes repeated full-image finder scans
+ * from the hot path. Bounded misses fall back to full detection so V27 -> V40,
+ * phone motion, and reacquisition remain safe.
+ */
 class V7Phase1QrDecoder : AutoCloseable {
     private var gray: Mat? = null
     private var detector: QRCodeDetector? = null
+    private var points: Mat? = null
+    private var trackedPointsValid = false
+    private var trackedDecodeMisses = 0
 
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
         val payload = decode(luma, width, height)
@@ -37,29 +49,56 @@ class V7Phase1QrDecoder : AutoCloseable {
 
     private fun decode(luma: ByteArray, width: Int, height: Int): ByteArray {
         require(width > 0 && height > 0 && luma.size >= width * height)
-        if (detector == null) {
-            OpenCvRuntime.ensureLoaded()
-            gray = Mat()
-            detector = QRCodeDetector()
-        }
+        ensureInitialized()
         val target = checkNotNull(gray)
+        val qr = checkNotNull(detector)
+        val detectedPoints = checkNotNull(points)
         target.create(height, width, CvType.CV_8UC1)
         target.put(0, 0, luma)
 
-        // Do not hide a central square crop from the operator. The UI preview is
-        // the exact normalized ImageAnalysis frame, so QR acquisition must search
-        // that same complete frame. This also prevents a valid off-center QR from
-        // being fully visible in the UI while silently falling outside a decoder ROI.
-        return detector!!.detectAndDecodeBytes(target)
+        if (trackedPointsValid && !detectedPoints.empty()) {
+            val payload = qr.decodeBytes(target, detectedPoints)
+            if (payload.isNotEmpty()) {
+                trackedDecodeMisses = 0
+                return payload
+            }
+            trackedDecodeMisses++
+            if (trackedDecodeMisses < MAX_TRACKED_DECODE_MISSES) return ByteArray(0)
+            trackedPointsValid = false
+            trackedDecodeMisses = 0
+        }
+
+        // Search the exact complete normalized ImageAnalysis frame. Supplying an
+        // output points Mat lets the next frames bypass detection once geometry
+        // is known. Even if this frame is a rolling transition and payload decode
+        // fails, useful detected points may still seed the next frame's fast path.
+        val payload = qr.detectAndDecodeBytes(target, detectedPoints)
+        trackedPointsValid = !detectedPoints.empty()
+        trackedDecodeMisses = 0
+        return payload
+    }
+
+    private fun ensureInitialized() {
+        if (detector != null) return
+        OpenCvRuntime.ensureLoaded()
+        gray = Mat()
+        detector = QRCodeDetector()
+        points = Mat()
     }
 
     override fun close() {
         gray?.release()
+        points?.release()
         gray = null
+        points = null
         detector = null
+        trackedPointsValid = false
+        trackedDecodeMisses = 0
     }
 
     companion object {
+        private const val MAX_TRACKED_DECODE_MISSES = 2
+
         fun validatePayload(payload: ByteArray, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
             if (payload.isEmpty()) return V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED")
             if (payload.size != expectedBytes) return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_LENGTH")
