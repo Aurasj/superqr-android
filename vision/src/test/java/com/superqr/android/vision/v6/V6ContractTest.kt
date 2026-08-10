@@ -36,7 +36,7 @@ class V6ContractTest {
     @Test
     fun testObjectKeyOrderInvariance() {
         val contractFile = File("src/main/assets/visual_contract.json")
-        val rawContent = contractFile.readText(Charsets.UTF_8)
+        val rawContent = contractFile.readText(Charsets.UTF_8).replace("\r\n", "\n")
 
         val modifiedContent = rawContent.replace(
             "\"canvas\": {\n    \"width\": 1000,\n    \"height\": 1000\n  },\n  \"quiet_zone\"",
