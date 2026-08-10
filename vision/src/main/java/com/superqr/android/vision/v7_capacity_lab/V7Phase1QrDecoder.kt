@@ -7,7 +7,6 @@ import org.opencv.core.MatOfPoint2f
 import org.opencv.objdetect.QRCodeDetector
 import org.opencv.objdetect.QRCodeDetectorAruco
 import java.util.zip.CRC32
-import kotlin.math.abs
 import kotlin.math.hypot
 
 data class V7Phase1QrResult(
@@ -31,14 +30,15 @@ data class V7Phase1QrResult(
  * bottom-right corner can move because standard QR has no finder pattern there.
  * While only QR_DETECTED, every QR frame therefore gets a fresh full detection.
  *
- * Overlay geometry intentionally trusts the three finder-anchored QR corners
- * (TL/TR/BL) and does not trust OpenCV's raw bottom-right estimate. The visible
- * BR is reconstructed from those three anchors. On the first observation it is
- * the affine/parallelogram completion TR + BL - TL; on following observations
- * the previous BR is transported by the affine transform defined by the three
- * current finder anchors. This keeps a static BR fixed while still following
- * real phone translation/scale/rotation immediately. Raw OpenCV geometry remains
- * untouched for actual QR decoding.
+ * Overlay geometry never invents the bottom-right corner from TL/TR/BL. Three
+ * projected corners are not sufficient to recover the fourth corner of a square
+ * under arbitrary perspective, so affine/parallelogram completion is wrong for
+ * tilted phones. Instead, every visible BR comes from an actual OpenCV QR
+ * observation. When the three finder-anchored corners are effectively static we
+ * use a short temporal median of those observed BR samples to suppress estimator
+ * jitter while preserving the real projective shape. As soon as the finder
+ * anchors move, the BR history is cleared and the newest raw geometry is surfaced
+ * immediately. Raw OpenCV geometry remains untouched for actual QR decoding.
  *
  * Dense V27/V40 camera images also get a bounded QRCodeDetectorAruco fallback.
  */
@@ -57,6 +57,12 @@ class V7Phase1QrDecoder : AutoCloseable {
     /** Presentation/guidance geometry; never fed back into QR decoding. */
     private var stableQuad: List<DoubleArray>? = null
 
+    /**
+     * Raw OpenCV BR observations collected only while TL/TR/BL remain static.
+     * These are real projective observations, not reconstructed corners.
+     */
+    private val staticBottomRightSamples = ArrayDeque<DoubleArray>()
+
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
         val (payload, quad) = decode(luma, width, height)
         return validatePayload(payload, expectedVersion, expectedBytes, quad)
@@ -72,7 +78,7 @@ class V7Phase1QrDecoder : AutoCloseable {
         return validatePayload(payload, version, expectedBytes, quad)
     }
 
-    /** Returns decoded payload plus finder-anchor-derived display geometry. */
+    /** Returns decoded payload plus perspective-preserving display geometry. */
     private fun decode(luma: ByteArray, width: Int, height: Int): Pair<ByteArray, List<DoubleArray>?> {
         require(width > 0 && height > 0 && luma.size >= width * height)
         ensureInitialized()
@@ -136,7 +142,7 @@ class V7Phase1QrDecoder : AutoCloseable {
         trustedPointsValid = false
         trustedWithAruco = false
         trustedDecodeMisses = 0
-        stableQuad = null
+        clearPresentationGeometry()
         return ByteArray(0) to null
     }
 
@@ -156,79 +162,78 @@ class V7Phase1QrDecoder : AutoCloseable {
 
     private fun stabilizeQuad(raw: List<DoubleArray>?): List<DoubleArray>? {
         if (raw == null || raw.size != 4) {
-            stableQuad = null
+            clearPresentationGeometry()
             return null
         }
 
-        // OpenCV QR ordering is TL, TR, BR, BL. Surface the three real finder
-        // anchors immediately; only BR is reconstructed for presentation.
+        // OpenCV QR ordering is TL, TR, BR, BL. Never synthesize BR from the other
+        // three corners: under perspective that would impose false affine geometry.
         val observed = raw.map { doubleArrayOf(it[0], it[1]) }
         val previous = stableQuad
-        val reconstructedBr = if (previous == null || previous.size != 4) {
-            parallelogramBottomRight(observed)
-        } else {
-            transportBottomRight(previous, observed) ?: parallelogramBottomRight(observed)
+        if (previous == null || previous.size != 4) {
+            resetBottomRightHistory(observed[2])
+            stableQuad = observed
+            return observed
         }
 
+        val side = averageAnchoredSpan(observed).coerceAtLeast(1.0)
+        val staticThreshold = maxOf(MIN_STATIC_ANCHOR_PX, side * STATIC_ANCHOR_SIDE_FRACTION)
+        val finderMotion = anchorDistance(previous, observed)
+
+        if (finderMotion > staticThreshold) {
+            // Genuine camera/phone motion. Do not smooth or carry old BR samples;
+            // surface the new projective observation immediately.
+            resetBottomRightHistory(observed[2])
+            stableQuad = observed
+            return observed
+        }
+
+        // Static scene: collect only genuine OpenCV BR observations and use their
+        // coordinate-wise median. This suppresses BR estimator jitter without
+        // changing the projective geometry implied by the camera view.
+        addBottomRightSample(observed[2])
+        val medianBr = medianBottomRight()
         val next = listOf(
             doubleArrayOf(observed[0][0], observed[0][1]),
             doubleArrayOf(observed[1][0], observed[1][1]),
-            reconstructedBr,
+            medianBr,
             doubleArrayOf(observed[3][0], observed[3][1]),
         )
         stableQuad = next
         return next
     }
 
-    /**
-     * Affine coordinates of previous BR relative to previous TL/TR/BL are
-     * transported onto the current TL/TR/BL. This follows real motion from the
-     * finder anchors without consulting the noisy current raw BR estimate.
-     */
-    private fun transportBottomRight(
-        previous: List<DoubleArray>,
-        current: List<DoubleArray>,
-    ): DoubleArray? {
-        if (previous.size != 4 || current.size != 4) return null
-        val a = previous[0]
-        val b = previous[1]
-        val c = previous[3]
-        val p = previous[2]
-
-        val bx = b[0] - a[0]
-        val by = b[1] - a[1]
-        val cx = c[0] - a[0]
-        val cy = c[1] - a[1]
-        val px = p[0] - a[0]
-        val py = p[1] - a[1]
-        val det = bx * cy - by * cx
-        if (!det.isFinite() || abs(det) < 1e-6) return null
-
-        val u = (px * cy - py * cx) / det
-        val v = (bx * py - by * px) / det
-        if (!u.isFinite() || !v.isFinite()) return null
-
-        val na = current[0]
-        val nb = current[1]
-        val nc = current[3]
-        val nbx = nb[0] - na[0]
-        val nby = nb[1] - na[1]
-        val ncx = nc[0] - na[0]
-        val ncy = nc[1] - na[1]
-        val x = na[0] + u * nbx + v * ncx
-        val y = na[1] + u * nby + v * ncy
-        if (!x.isFinite() || !y.isFinite()) return null
-        return doubleArrayOf(x, y)
+    private fun addBottomRightSample(point: DoubleArray) {
+        staticBottomRightSamples.addLast(doubleArrayOf(point[0], point[1]))
+        while (staticBottomRightSamples.size > MAX_STATIC_BR_SAMPLES) {
+            staticBottomRightSamples.removeFirst()
+        }
     }
 
-    private fun parallelogramBottomRight(quad: List<DoubleArray>): DoubleArray {
-        val tl = quad[0]
-        val tr = quad[1]
-        val bl = quad[3]
-        return doubleArrayOf(
-            tr[0] + bl[0] - tl[0],
-            tr[1] + bl[1] - tl[1],
-        )
+    private fun resetBottomRightHistory(point: DoubleArray) {
+        staticBottomRightSamples.clear()
+        staticBottomRightSamples.addLast(doubleArrayOf(point[0], point[1]))
+    }
+
+    private fun medianBottomRight(): DoubleArray {
+        if (staticBottomRightSamples.isEmpty()) return doubleArrayOf(0.0, 0.0)
+        val xs = staticBottomRightSamples.map { it[0] }.sorted()
+        val ys = staticBottomRightSamples.map { it[1] }.sorted()
+        return doubleArrayOf(median(xs), median(ys))
+    }
+
+    private fun median(values: List<Double>): Double {
+        val n = values.size
+        return if (n % 2 == 1) {
+            values[n / 2]
+        } else {
+            (values[n / 2 - 1] + values[n / 2]) * 0.5
+        }
+    }
+
+    private fun clearPresentationGeometry() {
+        stableQuad = null
+        staticBottomRightSamples.clear()
     }
 
     private fun pointDistance(a: DoubleArray, b: DoubleArray): Double =
@@ -238,6 +243,13 @@ class V7Phase1QrDecoder : AutoCloseable {
         if (a.size != 4 || b.size != 4) return Double.POSITIVE_INFINITY
         val anchors = intArrayOf(0, 1, 3)
         return anchors.sumOf { index -> pointDistance(a[index], b[index]) } / anchors.size.toDouble()
+    }
+
+    private fun averageAnchoredSpan(quad: List<DoubleArray>): Double {
+        if (quad.size != 4) return 0.0
+        val top = pointDistance(quad[0], quad[1])
+        val left = pointDistance(quad[0], quad[3])
+        return (top + left) * 0.5
     }
 
     private fun Mat.toQuad(): List<DoubleArray>? {
@@ -278,12 +290,15 @@ class V7Phase1QrDecoder : AutoCloseable {
         trustedPointsValid = false
         trustedWithAruco = false
         trustedDecodeMisses = 0
-        stableQuad = null
+        clearPresentationGeometry()
     }
 
     companion object {
         // One failed tracked decode immediately falls back to a fresh detector pass.
         private const val MAX_TRUSTED_DECODE_MISSES = 1
+        private const val MAX_STATIC_BR_SAMPLES = 5
+        private const val STATIC_ANCHOR_SIDE_FRACTION = 0.012
+        private const val MIN_STATIC_ANCHOR_PX = 2.5
 
         fun validatePayload(
             payload: ByteArray,
