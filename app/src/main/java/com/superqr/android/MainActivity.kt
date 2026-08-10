@@ -4,9 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.ui.Modifier
-import com.superqr.android.ui.scanner.AdaptiveSuperQRScannerScreen
+import com.superqr.android.ui.MainScreen
 import com.superqr.android.ui.v6.theme.SuperQRAndroidTheme
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -19,11 +17,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             SuperQRAndroidTheme {
-                AdaptiveSuperQRScannerScreen(
+                MainScreen(
                     analysisExecutor = analysisExecutor,
-                    lifecycleOwner = this,
-                    modifier = Modifier.fillMaxSize(),
-                    onBack = { finish() },
+                    cacheDir = cacheDir,
                 )
             }
         }
