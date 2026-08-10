@@ -35,6 +35,25 @@ class Phase1AnalysisPolicyTest {
     }
 
     @Test
+    fun lockedGridKeepsConsecutiveFramesDuringCarrierLikeMotion() {
+        val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
+        scheduler.locked(Phase1AnalysisPath.GRID)
+
+        repeat(5) {
+            scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
+            assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+            assertEquals("GRID_LOCKED", scheduler.state)
+        }
+
+        // Once carrier evidence actually disappears, the normal lost-lock policy resumes.
+        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = false)
+        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = false)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        assertEquals("TRANSITION_QR_PROBE", scheduler.state)
+    }
+
+    @Test
     fun lostGridLockProbesQrBeforeColdGridSearch() {
         val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
         scheduler.locked(Phase1AnalysisPath.GRID)
