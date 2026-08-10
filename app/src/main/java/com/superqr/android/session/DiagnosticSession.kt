@@ -48,14 +48,26 @@ class DiagnosticSession(private val context: Context) {
         if (!sessionActive) return
         frameGate.stop()
         sessionActive = false
-        recorder.recordSessionStop(
-            completedNs = System.nanoTime(),
-            analyzedFrameCount = observedFrames,
-            extra = mapOf(
-                "final_phase" to _sessionState.value.phase.name,
-                "final_profile" to _sessionState.value.profileName,
-            ),
-        )
+
+        // Every explicit Start/Stop cycle must leave a shareable diagnostic artifact,
+        // even when no QR/carrier was ever confirmed. This also keeps COMPLETE stable
+        // until the operator explicitly starts a new session.
+        if (!recorder.hasLines) {
+            recorder.recordFailure(
+                reason = "SESSION_STOP_NO_DETECTION",
+                completedNs = System.nanoTime(),
+                pipelineMs = _sessionState.value.pipelineMs,
+                geometry = _sessionState.value.trackingState.name,
+                sync = "STOPPED",
+                extra = mapOf(
+                    "session_event" to "STOP",
+                    "analyzed_frame_count" to observedFrames,
+                    "final_phase" to _sessionState.value.phase.name,
+                    "final_profile" to _sessionState.value.profileName,
+                ),
+            )
+        }
+
         _sessionState.value = _sessionState.value.copy(
             phase = SessionPhase.COMPLETE,
             hasObservations = recorder.hasLines,
@@ -230,9 +242,8 @@ class DiagnosticSession(private val context: Context) {
             return SessionPhase.QR_DETECTED
         }
 
-        // A raw OpenCV quadrilateral is only a candidate. It is deliberately not
-        // surfaced as a QR detection because random high-contrast objects can
-        // produce transient quads while the camera scans a normal scene.
+        // OpenCV can propose transient quadrilaterals in normal scenes. A raw quad
+        // is only a candidate and must never be presented to the user as QR detection.
         wasTracking = false
         wasLost = false
         return SessionPhase.SEARCHING
