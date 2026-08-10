@@ -26,16 +26,19 @@ data class V7Phase1QrResult(
 /**
  * Binary-safe OpenCV QR control decoder with a bounded ZXing fallback for dense QR.
  *
- * OpenCV remains the first payload path. When V27/V40 are only geometrically
- * detected, one ZXing detector pass can both resolve alignment-based projective
- * geometry and decode the already sampled QR BitMatrix. ZXing BYTE-mode segments
- * are returned as the binary payload fallback.
+ * OpenCV remains the first payload path. When it finds native QR geometry but cannot
+ * decode the payload, Phase 1 passes its finite known QR dimensions to ZXing. ZXing
+ * keeps its measured finder/alignment geometry but can correct an adjacent-version
+ * module-count mistake before Reed-Solomon decode.
+ *
+ * ArUco is a geometry fallback only when standard OpenCV found no QR quadrangle.
+ * Running a second full detect+decode after standard OpenCV already found geometry
+ * was redundant on dense V27/V40 and dominated the physical hot path.
  *
  * A successful projective solve is anchored to the OpenCV TL/TR/BL observation from
  * that exact frame. Small hand motion transports the already perspective-correct
  * quadrangle with those three finder anchors, rather than rerunning TRY_HARDER on
- * every frame. Meaningful motion triggers a fresh projective solve. Decode retries
- * are also throttled, so dense QR cannot dominate the camera hot path.
+ * every frame. Meaningful motion triggers a fresh projective solve.
  */
 class V7Phase1QrDecoder : AutoCloseable {
     private var gray: Mat? = null
@@ -58,12 +61,18 @@ class V7Phase1QrDecoder : AutoCloseable {
     private var zxingRetryCountdown = 0
 
     fun analyze(luma: ByteArray, width: Int, height: Int, expectedVersion: Int, expectedBytes: Int): V7Phase1QrResult {
-        val (payload, quad) = decode(luma, width, height)
+        val expectedDimensions = intArrayOf(qrDimension(expectedVersion))
+        val (payload, quad) = decode(luma, width, height, expectedDimensions)
         return attachDiagnostics(validatePayload(payload, expectedVersion, expectedBytes, quad))
     }
 
     fun analyzeAuto(luma: ByteArray, width: Int, height: Int, expectedBytesByVersion: Map<Int, Int>): V7Phase1QrResult {
-        val (payload, quad) = decode(luma, width, height)
+        val expectedDimensions = expectedBytesByVersion.keys
+            .map(::qrDimension)
+            .distinct()
+            .sorted()
+            .toIntArray()
+        val (payload, quad) = decode(luma, width, height, expectedDimensions)
         if (payload.isEmpty()) {
             return attachDiagnostics(
                 V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED", quad = quad)
@@ -92,10 +101,16 @@ class V7Phase1QrDecoder : AutoCloseable {
     private fun attachDiagnostics(result: V7Phase1QrResult): V7Phase1QrResult =
         result.copy(diagnostics = LinkedHashMap(lastDiagnostics))
 
-    private fun decode(luma: ByteArray, width: Int, height: Int): Pair<ByteArray, List<DoubleArray>?> {
+    private fun decode(
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        expectedDimensions: IntArray,
+    ): Pair<ByteArray, List<DoubleArray>?> {
         require(width > 0 && height > 0 && luma.size >= width * height)
         lastDiagnostics.clear()
         lastDiagnostics["decode_source"] = "NONE"
+        lastDiagnostics["known_qr_dimensions"] = expectedDimensions.copyOf()
         ensureInitialized()
         val target = checkNotNull(gray)
         val qr = checkNotNull(detector)
@@ -148,28 +163,34 @@ class V7Phase1QrDecoder : AutoCloseable {
             return payload to decodedPresentationQuad(standardQuad)
         }
 
-        val arucoStartNs = System.nanoTime()
-        val fallbackPayload = qrAruco.detectAndDecodeBytes(target, fallbackPoints)
-        val arucoMs = elapsedMs(arucoStartNs)
-        val fallbackQuad = fallbackPoints.toQuad()
-        lastDiagnostics["opencv_aruco_ms"] = arucoMs
-        lastDiagnostics["opencv_aruco_geometry"] = fallbackQuad != null
-        lastDiagnostics["opencv_aruco_payload_bytes"] = fallbackPayload.size
-        if (fallbackPayload.isNotEmpty()) {
-            lastDiagnostics["decode_source"] = "OPENCV_ARUCO"
-            fallbackPoints.copyTo(detectedPoints)
-            trustedPointsValid = fallbackQuad != null
-            trustedWithAruco = true
-            trustedDecodeMisses = 0
-            return fallbackPayload to decodedPresentationQuad(fallbackQuad)
+        var fallbackQuad: List<DoubleArray>? = null
+        if (standardQuad == null) {
+            lastDiagnostics["opencv_aruco_attempted"] = true
+            val arucoStartNs = System.nanoTime()
+            val fallbackPayload = qrAruco.detectAndDecodeBytes(target, fallbackPoints)
+            val arucoMs = elapsedMs(arucoStartNs)
+            fallbackQuad = fallbackPoints.toQuad()
+            lastDiagnostics["opencv_aruco_ms"] = arucoMs
+            lastDiagnostics["opencv_aruco_geometry"] = fallbackQuad != null
+            lastDiagnostics["opencv_aruco_payload_bytes"] = fallbackPayload.size
+            if (fallbackPayload.isNotEmpty()) {
+                lastDiagnostics["decode_source"] = "OPENCV_ARUCO"
+                fallbackPoints.copyTo(detectedPoints)
+                trustedPointsValid = fallbackQuad != null
+                trustedWithAruco = true
+                trustedDecodeMisses = 0
+                return fallbackPayload to decodedPresentationQuad(fallbackQuad)
+            }
+        } else {
+            lastDiagnostics["opencv_aruco_attempted"] = false
         }
 
-        val candidateQuad = chooseCandidateQuad(standardQuad, fallbackQuad)
+        val candidateQuad = standardQuad ?: fallbackQuad
         if (candidateQuad != null) {
             trustedPointsValid = false
             trustedWithAruco = false
             trustedDecodeMisses = 0
-            val fallback = denseQrFallback(luma, width, height, candidateQuad)
+            val fallback = denseQrFallback(luma, width, height, candidateQuad, expectedDimensions)
             if (fallback.payload.isNotEmpty()) lastDiagnostics["decode_source"] = "ZXING"
             return fallback.payload to fallback.quad
         }
@@ -211,6 +232,7 @@ class V7Phase1QrDecoder : AutoCloseable {
         width: Int,
         height: Int,
         observedRaw: List<DoubleArray>,
+        expectedDimensions: IntArray,
     ): DenseFallbackResult {
         val observed = copyQuad(observedRaw)
         val side = averageAnchoredSpan(observed).coerceAtLeast(1.0)
@@ -222,7 +244,7 @@ class V7Phase1QrDecoder : AutoCloseable {
 
         if (shouldRunZxing) {
             lastDiagnostics["zxing_attempted"] = true
-            val analysis = zxingGeometryDetector.analyze(luma, width, height)
+            val analysis = zxingGeometryDetector.analyze(luma, width, height, expectedDimensions)
             recordZxingDiagnostics(analysis)
             zxingRetryCountdown = ZXING_RETRY_INTERVAL_FRAMES
 
@@ -266,8 +288,11 @@ class V7Phase1QrDecoder : AutoCloseable {
         analysis.exceptionType?.let { lastDiagnostics["zxing_exception"] = it }
         analysis.exceptionMessage?.takeIf { it.isNotBlank() }?.let { lastDiagnostics["zxing_exception_message"] = it }
         analysis.dimension?.let { lastDiagnostics["zxing_dimension"] = it }
+        analysis.sampledDimension?.let { lastDiagnostics["zxing_sampled_dimension"] = it }
+        lastDiagnostics["zxing_forced_dimension"] = analysis.forcedDimension
         lastDiagnostics["zxing_point_count"] = analysis.pointCount
         analysis.detectMs?.let { lastDiagnostics["zxing_detect_ms"] = it }
+        analysis.sampleMs?.let { lastDiagnostics["zxing_sample_ms"] = it }
         analysis.decodeMs?.let { lastDiagnostics["zxing_decode_ms"] = it }
         lastDiagnostics["zxing_total_ms"] = analysis.totalMs
     }
@@ -329,18 +354,6 @@ class V7Phase1QrDecoder : AutoCloseable {
         if (solved.size != 4 || observed.size != 4) return false
         val maxAnchorDifference = maxOf(MIN_PROJECTIVE_MATCH_PX, side * PROJECTIVE_MATCH_SIDE_FRACTION)
         return anchorDistance(solved, observed) <= maxAnchorDifference
-    }
-
-    private fun chooseCandidateQuad(
-        standard: List<DoubleArray>?,
-        fallback: List<DoubleArray>?,
-    ): List<DoubleArray>? = when {
-        standard == null -> fallback
-        fallback == null -> standard
-        stableQuad == null -> standard
-        anchorDistance(standard, checkNotNull(stableQuad)) <=
-            anchorDistance(fallback, checkNotNull(stableQuad)) -> standard
-        else -> fallback
     }
 
     private fun copyQuad(quad: List<DoubleArray>): List<DoubleArray> =
@@ -421,6 +434,11 @@ class V7Phase1QrDecoder : AutoCloseable {
         private const val MIN_PROJECTIVE_REFRESH_PX = 6.0
         private const val PROJECTIVE_MATCH_SIDE_FRACTION = 0.15
         private const val MIN_PROJECTIVE_MATCH_PX = 16.0
+
+        private fun qrDimension(version: Int): Int {
+            require(version in 1..40) { "invalid QR version $version" }
+            return 17 + 4 * version
+        }
 
         fun validatePayload(
             payload: ByteArray,
