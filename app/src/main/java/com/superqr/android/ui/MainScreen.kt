@@ -86,6 +86,7 @@ fun MainScreen(
     val session = remember { DiagnosticSession(context) }
     val sessionState by session.sessionState.collectAsState()
     val cameraStatus by cameraManager.status.collectAsState()
+    val resolutionLabel by cameraManager.resolutionLabel.collectAsState()
     var showDiagnostics by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -158,7 +159,12 @@ fun MainScreen(
             }
 
             Spacer(Modifier.height(8.dp))
-            StatusBar(sessionState.phase, sessionState.profileName)
+            StatusBlock(
+                phase = sessionState.phase,
+                profileName = sessionState.profileName,
+                guidance = framing.status.label.takeIf { framing.frameWidth > 0 },
+                cameraStatus = cameraStatus,
+            )
             Spacer(Modifier.height(8.dp))
             MetricsRow(
                 sessionState.cameraFps,
@@ -228,7 +234,13 @@ fun MainScreen(
                 )
             }
             if (showDiagnostics) {
-                DiagnosticsPanel(sessionState, session.snapshot(), Modifier.weight(1f))
+                DiagnosticsPanel(
+                    state = sessionState,
+                    snapshot = session.snapshot(),
+                    cameraStatus = cameraStatus,
+                    resolutionLabel = resolutionLabel,
+                    modifier = Modifier.weight(1f),
+                )
             } else {
                 Spacer(Modifier.weight(1f))
             }
@@ -279,17 +291,37 @@ private fun mapFramePoints(
 }
 
 @Composable
-private fun StatusBar(phase: SessionPhase, profileName: String) {
-    val phaseColor = when (phase) {
-        SessionPhase.SEARCHING -> Color(0xFFF2CC60)
-        SessionPhase.QR_DETECTED, SessionPhase.QR_LOCKED, SessionPhase.GRID_DETECTED -> Color(0xFF7CB7FF)
-        SessionPhase.GRID_LOCKED, SessionPhase.RECEIVING, SessionPhase.COMPLETE -> Color(0xFF7EE787)
-        SessionPhase.LOST, SessionPhase.REACQUIRING -> Color(0xFFFF7B72)
+private fun StatusBlock(
+    phase: SessionPhase,
+    profileName: String,
+    guidance: String?,
+    cameraStatus: CameraStatus,
+) {
+    val phaseColor = when {
+        cameraStatus == CameraStatus.ERROR -> Color(0xFFFF7B72)
+        phase == SessionPhase.SEARCHING -> Color(0xFFF2CC60)
+        phase == SessionPhase.QR_DETECTED || phase == SessionPhase.QR_LOCKED || phase == SessionPhase.GRID_DETECTED -> Color(0xFF7CB7FF)
+        phase == SessionPhase.GRID_LOCKED || phase == SessionPhase.RECEIVING || phase == SessionPhase.COMPLETE -> Color(0xFF7EE787)
+        phase == SessionPhase.LOST || phase == SessionPhase.REACQUIRING -> Color(0xFFFF7B72)
         else -> Color.White.copy(alpha = 0.55f)
     }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(phase.label, color = phaseColor, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        if (profileName.isNotEmpty()) Text(profileName, color = Color(0xFF7CB7FF), fontSize = 11.sp)
+    val primaryStatus = if (cameraStatus == CameraStatus.ERROR) "Camera error" else phase.label
+
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(primaryStatus, color = phaseColor, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            if (profileName.isNotEmpty()) {
+                Text(profileName, color = Color(0xFF7CB7FF), fontSize = 11.sp)
+            }
+        }
+        if (guidance != null && cameraStatus == CameraStatus.RUNNING) {
+            Text(
+                guidance,
+                color = if (guidance.contains("GOOD")) Color(0xFF7EE787) else Color(0xFFF2CC60),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
     }
 }
 
@@ -312,13 +344,21 @@ private fun MetricChip(label: String, value: String) {
 }
 
 @Composable
-private fun DiagnosticsPanel(state: SessionState, snapshot: Phase1RunSnapshot, modifier: Modifier = Modifier) {
+private fun DiagnosticsPanel(
+    state: SessionState,
+    snapshot: Phase1RunSnapshot,
+    cameraStatus: CameraStatus,
+    resolutionLabel: String,
+    modifier: Modifier = Modifier,
+) {
     Column(
         modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(4.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         SectionHeader("Session")
         DiagnosticText("Campaign: ${state.campaignId.take(8)} · Frames: ${state.analyzedFrames}")
+        SectionHeader("Camera")
+        DiagnosticText("${cameraStatus.name} · ${resolutionLabel.ifEmpty { "resolution pending" }}")
         SectionHeader("Tracking")
         DiagnosticText("State: ${state.trackingState.label} · Profile: ${state.profileName}")
         SectionHeader("Performance")
