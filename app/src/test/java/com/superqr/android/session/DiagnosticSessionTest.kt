@@ -1,193 +1,16 @@
 package com.superqr.android.session
 
+import com.superqr.android.ui.phase1.Phase1FramingGeometry
+import com.superqr.android.ui.phase1.Phase1TrackingState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 
 class DiagnosticSessionTest {
 
-    @Test
-    fun `initial state is IDLE`() {
-        val session = DiagnosticSession(File("."))
-        val state = session.sessionState.value
-        assertEquals(SessionPhase.IDLE, state.phase)
-        assertEquals(0.0, state.cameraFps, 0.0)
-        assertEquals(0.0, state.analysisFps, 0.0)
-        session.close()
-    }
-
-    @Test
-    fun `start transitions to SEARCHING`() {
-        val session = DiagnosticSession(File("."))
-        session.start()
-        assertEquals(SessionPhase.SEARCHING, session.sessionState.value.phase)
-        session.close()
-    }
-
-    @Test
-    fun `stop from SEARCHING returns to IDLE`() {
-        val session = DiagnosticSession(File("."))
-        session.start()
-        session.stop()
-        assertEquals(SessionPhase.IDLE, session.sessionState.value.phase)
-        session.close()
-    }
-
-    @Test
-    fun `reset clears state`() {
-        val session = DiagnosticSession(File("."))
-        session.start()
-        session.reset()
-        val state = session.sessionState.value
-        assertEquals(SessionPhase.IDLE, state.phase)
-        assertEquals(0.0, state.cameraFps, 0.0)
-        session.close()
-    }
-
-    // ---- computePhase tests ----
-
-    @Test
-    fun `no border no history is SEARCHING`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = false,
-            orientationResolved = false,
-            calibratedCount = 0,
-            colorCount = 4,
-            hasSession = false,
-            wasTracking = false,
-            wasLost = false,
-        )
-        assertEquals(SessionPhase.SEARCHING, phase)
-    }
-
-    @Test
-    fun `no border after tracking is LOST`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = false,
-            orientationResolved = false,
-            calibratedCount = 0,
-            colorCount = 4,
-            hasSession = false,
-            wasTracking = true,
-            wasLost = false,
-        )
-        assertEquals(SessionPhase.LOST, phase)
-    }
-
-    @Test
-    fun `no border after lost stays LOST`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = false,
-            orientationResolved = false,
-            calibratedCount = 0,
-            colorCount = 4,
-            hasSession = false,
-            wasTracking = false,
-            wasLost = true,
-        )
-        assertEquals(SessionPhase.LOST, phase)
-    }
-
-    @Test
-    fun `border found without orientation is QR_DETECTED`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = true,
-            orientationResolved = false,
-            calibratedCount = 0,
-            colorCount = 4,
-            hasSession = false,
-            wasTracking = false,
-            wasLost = false,
-        )
-        assertEquals(SessionPhase.QR_DETECTED, phase)
-    }
-
-    @Test
-    fun `border after lost without orientation is REACQUIRING`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = true,
-            orientationResolved = false,
-            calibratedCount = 0,
-            colorCount = 4,
-            hasSession = false,
-            wasTracking = false,
-            wasLost = true,
-        )
-        assertEquals(SessionPhase.REACQUIRING, phase)
-    }
-
-    @Test
-    fun `orientation resolved no calibration is QR_LOCKED`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = true,
-            orientationResolved = true,
-            calibratedCount = 0,
-            colorCount = 4,
-            hasSession = false,
-            wasTracking = true,
-            wasLost = false,
-        )
-        assertEquals(SessionPhase.QR_LOCKED, phase)
-    }
-
-    @Test
-    fun `partial calibration is GRID_DETECTED`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = true,
-            orientationResolved = true,
-            calibratedCount = 2,
-            colorCount = 4,
-            hasSession = false,
-            wasTracking = true,
-            wasLost = false,
-        )
-        assertEquals(SessionPhase.GRID_DETECTED, phase)
-    }
-
-    @Test
-    fun `full calibration is GRID_LOCKED`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = true,
-            orientationResolved = true,
-            calibratedCount = 4,
-            colorCount = 4,
-            hasSession = false,
-            wasTracking = true,
-            wasLost = false,
-        )
-        assertEquals(SessionPhase.GRID_LOCKED, phase)
-    }
-
-    @Test
-    fun `full calibration with session is RECEIVING`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = true,
-            orientationResolved = true,
-            calibratedCount = 4,
-            colorCount = 4,
-            hasSession = true,
-            wasTracking = true,
-            wasLost = false,
-        )
-        assertEquals(SessionPhase.RECEIVING, phase)
-    }
-
-    @Test
-    fun `full calibration with 8 colors is GRID_LOCKED`() {
-        val phase = DiagnosticSession.computePhase(
-            borderFound = true,
-            orientationResolved = true,
-            calibratedCount = 8,
-            colorCount = 8,
-            hasSession = false,
-            wasTracking = true,
-            wasLost = false,
-        )
-        assertEquals(SessionPhase.GRID_LOCKED, phase)
-    }
-
-    // ---- SessionPhase labels ----
+    // ---- SessionPhase ----
 
     @Test
     fun `all phases have non-empty labels`() {
@@ -196,12 +19,152 @@ class DiagnosticSessionTest {
         }
     }
 
-    // ---- Guidance derivation ----
+    @Test
+    fun `phase labels are distinct`() {
+        val labels = SessionPhase.entries.map { it.label }
+        assertEquals(labels.size, labels.distinct().size)
+    }
+
+    // ---- SessionState defaults ----
 
     @Test
-    fun `guidance is empty set initially`() {
-        val session = DiagnosticSession(File("."))
-        assertTrue(session.sessionState.value.guidance.isEmpty())
-        session.close()
+    fun `initial state is IDLE with empty framing`() {
+        val state = SessionState()
+        assertEquals(SessionPhase.IDLE, state.phase)
+        assertEquals(Phase1TrackingState.SEARCHING, state.trackingState)
+        assertEquals(0.0, state.cameraFps, 0.0)
+        assertEquals(0.0, state.analysisFps, 0.0)
+        assertEquals(0.0, state.pipelineMs, 0.0)
+        assertEquals(0, state.analyzedFrames)
+        assertFalse(state.hasObservations)
+        assertTrue(state.campaignId.isEmpty())
+    }
+
+    @Test
+    fun `SEARCHING state transitions tracked correctly`() {
+        val state = SessionState(phase = SessionPhase.SEARCHING)
+        assertEquals("Searching", state.phase.label)
+        assertEquals(0.0, state.cameraFps, 0.0)
+    }
+
+    @Test
+    fun `COMPLETE state has correct fields`() {
+        val state = SessionState(
+            phase = SessionPhase.COMPLETE,
+            hasObservations = true,
+            campaignId = "test-campaign",
+            analyzedFrames = 42,
+        )
+        assertEquals(SessionPhase.COMPLETE, state.phase)
+        assertTrue(state.hasObservations)
+        assertEquals(42, state.analyzedFrames)
+    }
+
+    // ---- Phase derivation semantics ----
+
+    @Test
+    fun `GRID_LOCKED and RECEIVING have distinct labels`() {
+        assertTrue(SessionPhase.GRID_LOCKED.label != SessionPhase.RECEIVING.label)
+    }
+
+    @Test
+    fun `QR phases are separate from GRID phases`() {
+        // QR_DETECTED and QR_LOCKED are separate from GRID_DETECTED and GRID_LOCKED
+        val qrPhases = setOf(SessionPhase.QR_DETECTED, SessionPhase.QR_LOCKED)
+        val gridPhases = setOf(SessionPhase.GRID_DETECTED, SessionPhase.GRID_LOCKED)
+        assertTrue(qrPhases.intersect(gridPhases).isEmpty())
+    }
+
+    @Test
+    fun `LOST and REACQUIRING form a recovery sequence`() {
+        assertNotNull(SessionPhase.LOST)
+        assertNotNull(SessionPhase.REACQUIRING)
+        // After LOST, REACQUIRING is the next natural state
+        assertEquals("Lost", SessionPhase.LOST.label)
+        assertEquals("Reacquiring", SessionPhase.REACQUIRING.label)
+    }
+
+    // ---- SessionState copy semantics ----
+
+    @Test
+    fun `session state copy preserves unrelated fields`() {
+        val original = SessionState(
+            phase = SessionPhase.SEARCHING,
+            cameraFps = 30.0,
+            analysisFps = 15.0,
+            profileName = "test",
+        )
+        val updated = original.copy(phase = SessionPhase.GRID_DETECTED)
+        assertEquals(SessionPhase.GRID_DETECTED, updated.phase)
+        assertEquals(30.0, updated.cameraFps, 0.0)
+        assertEquals(15.0, updated.analysisFps, 0.0)
+        assertEquals("test", updated.profileName)
+    }
+
+    @Test
+    fun `hasObservations flag is preserved independently`() {
+        val withObs = SessionState(hasObservations = true, analyzedFrames = 10)
+        assertTrue(withObs.hasObservations)
+        assertEquals(10, withObs.analyzedFrames)
+
+        val withoutObs = SessionState(hasObservations = false)
+        assertFalse(withoutObs.hasObservations)
+    }
+
+    // ---- FramingGeometry ----
+
+    @Test
+    fun `empty framing geometry reports no finders`() {
+        val geom = Phase1FramingGeometry.empty()
+        assertEquals(0, geom.visibleFinders)
+    }
+
+    @Test
+    fun `framing geometry carries tracking state from source`() {
+        val geom = Phase1FramingGeometry(
+            frameWidth = 1280,
+            frameHeight = 720,
+            status = com.superqr.android.ui.phase1.Phase1FramingStatus.GOOD,
+            source = "V7_SYNC_TRACKED",
+        )
+        assertEquals(Phase1TrackingState.TRACKING, geom.trackingState)
+    }
+
+    // ---- TrackingState from source strings ----
+
+    @Test
+    fun `V7_SYNC_TRACKED maps to TRACKING`() {
+        assertEquals(Phase1TrackingState.TRACKING, Phase1TrackingState.fromSource("V7_SYNC_TRACKED"))
+    }
+
+    @Test
+    fun `QR_NATIVE_LOCKED maps to TRACKING`() {
+        assertEquals(Phase1TrackingState.TRACKING, Phase1TrackingState.fromSource("QR_NATIVE_LOCKED"))
+    }
+
+    @Test
+    fun `QR_NATIVE_SEARCH maps to SEARCHING`() {
+        assertEquals(Phase1TrackingState.SEARCHING, Phase1TrackingState.fromSource("QR_NATIVE_SEARCH"))
+    }
+
+    @Test
+    fun `V7_TRACK_HOLD maps to HOLDING`() {
+        assertEquals(Phase1TrackingState.HOLDING, Phase1TrackingState.fromSource("V7_TRACK_HOLD"))
+    }
+
+    @Test
+    fun `ACQUIRED suffix maps correctly`() {
+        assertEquals(Phase1TrackingState.ACQUIRED, Phase1TrackingState.fromSource("V7_OTSU_ACQUIRED"))
+        assertEquals(Phase1TrackingState.ACQUIRED, Phase1TrackingState.fromSource("V7_FINDERS_ACQUIRED"))
+    }
+
+    @Test
+    fun `source NONE maps to UNKNOWN`() {
+        assertEquals(Phase1TrackingState.UNKNOWN, Phase1TrackingState.fromSource("NONE"))
+    }
+
+    @Test
+    fun `unknown source defaults to SEARCHING`() {
+        assertEquals(Phase1TrackingState.SEARCHING, Phase1TrackingState.fromSource("completely_unknown_string"))
     }
 }

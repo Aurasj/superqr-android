@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,7 +18,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -25,9 +25,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,7 +38,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -55,6 +56,7 @@ import com.superqr.android.camera.CameraStatus
 import com.superqr.android.diagnostics.SessionExporter
 import com.superqr.android.session.DiagnosticSession
 import com.superqr.android.session.SessionPhase
+import com.superqr.android.ui.phase1.Phase1FramingGeometry
 import java.io.File
 import java.util.concurrent.ExecutorService
 
@@ -78,7 +80,7 @@ fun MainScreen(
     ) { permission = it }
 
     val cameraManager = remember { CameraManager(context, analysisExecutor) }
-    val session = remember { DiagnosticSession(cacheDir) }
+    val session = remember { DiagnosticSession(context, cacheDir) }
     val sessionState by session.sessionState.collectAsState()
     val cameraStatus by cameraManager.status.collectAsState()
 
@@ -94,7 +96,7 @@ fun MainScreen(
                 cameraStatus == CameraStatus.RUNNING
             ) {
                 cameraManager.stop()
-                session.stop()
+                session.stopSession()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -119,7 +121,6 @@ fun MainScreen(
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // Header
             Text(
                 "SuperQR",
                 color = Color.White,
@@ -142,22 +143,34 @@ fun MainScreen(
                 return@Column
             }
 
-            // Camera preview card (16:9)
-            Card(
+            // Camera preview card (16:9) with overlay
+            val framing = sessionState.framing
+            Box(
                 modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.Black),
             ) {
-                AndroidView(
-                    factory = { cameraManager.previewView },
+                Card(
                     modifier = Modifier.fillMaxSize(),
-                )
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.Black),
+                ) {
+                    AndroidView(
+                        factory = { cameraManager.previewView },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                // Preview geometry overlay: draw detected quad on top
+                if (framing.carrierQuad != null || framing.candidateQuad != null) {
+                    PreviewOverlay(
+                        framing = framing,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
 
             Spacer(Modifier.height(8.dp))
 
             // Status bar
-            StatusBar(phase = sessionState.phase, guidance = sessionState.guidance)
+            StatusBar(phase = sessionState.phase, profileName = sessionState.profileName)
 
             Spacer(Modifier.height(8.dp))
 
@@ -166,7 +179,7 @@ fun MainScreen(
                 cameraFps = sessionState.cameraFps,
                 analysisFps = sessionState.analysisFps,
                 pipelineMs = sessionState.pipelineMs,
-                profileLabel = sessionState.profile.label,
+                profileName = sessionState.profileName,
             )
 
             Spacer(Modifier.height(12.dp))
@@ -175,25 +188,52 @@ fun MainScreen(
             val isRunning = cameraStatus == CameraStatus.RUNNING ||
                 cameraStatus == CameraStatus.STARTING
 
-            if (sessionState.phase == SessionPhase.COMPLETE && sessionState.completedTransfer != null) {
-                // Complete state: show share + scan again
-                val transfer = sessionState.completedTransfer!!
-                ShareCard(
-                    transfer = transfer,
-                    onShare = { SessionExporter.share(context, transfer) },
-                    onScanAnother = {
-                        session.reset()
-                        cameraManager.start(lifecycleOwner)
-                        session.start()
-                    },
-                )
+            if (!isRunning && sessionState.phase == SessionPhase.COMPLETE) {
+                Column(
+                    Modifier.fillMaxWidth().padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        "SESSION COMPLETE",
+                        color = Color(0xFF7EE787),
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color.White.copy(alpha = 0.07f)
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Campaign: ${sessionState.campaignId.take(8)}", color = Color.White, fontWeight = FontWeight.Bold)
+                            Text(
+                                "${sessionState.analyzedFrames} frames analyzed",
+                                color = Color.White.copy(alpha = 0.7f),
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(onClick = { SessionExporter.shareSession(context, session) }) {
+                            Text("SHARE SESSION", fontWeight = FontWeight.Bold)
+                        }
+                        Button(onClick = {
+                            session.startSession()
+                            cameraManager.start(lifecycleOwner)
+                        }) {
+                            Text("New Session")
+                        }
+                    }
+                }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (isRunning) {
                         Button(
                             onClick = {
                                 cameraManager.stop()
-                                session.stop()
+                                session.stopSession()
                             },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFFE53935)
@@ -204,8 +244,8 @@ fun MainScreen(
                     } else {
                         Button(
                             onClick = {
+                                session.startSession()
                                 cameraManager.start(lifecycleOwner)
-                                session.start()
                             },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFF43A047)
@@ -230,6 +270,7 @@ fun MainScreen(
             if (showDiagnostics) {
                 DiagnosticsPanel(
                     sessionState = sessionState,
+                    snapshot = session.snapshot(),
                     modifier = Modifier.weight(1f),
                 )
             } else {
@@ -240,14 +281,71 @@ fun MainScreen(
 }
 
 @Composable
+private fun PreviewOverlay(
+    framing: Phase1FramingGeometry,
+    modifier: Modifier = Modifier,
+) {
+    val quad = framing.carrierQuad ?: framing.candidateQuad
+    if (quad == null || quad.size != 4) return
+
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+
+        // Map analysis-space points to preview view space.
+        // The framing geometry points are in analysis (luma) coordinates.
+        // PreviewView uses FIT_CENTER, so we need to apply the same transform
+        // that Phase1FrameFit would compute.
+        if (framing.frameWidth <= 0 || framing.frameHeight <= 0) return@Canvas
+
+        val scale = minOf(w / framing.frameWidth, h / framing.frameHeight)
+        val renderedW = framing.frameWidth * scale
+        val renderedH = framing.frameHeight * scale
+        val offsetX = (w - renderedW) * 0.5f
+        val offsetY = (h - renderedH) * 0.5f
+
+        val mappedPoints = quad.map { pt ->
+            Offset(
+                offsetX + pt.x * scale,
+                offsetY + pt.y * scale,
+            )
+        }
+
+        // Draw quad outline
+        val path = Path().apply {
+            moveTo(mappedPoints[0].x, mappedPoints[0].y)
+            for (i in 1 until mappedPoints.size) {
+                lineTo(mappedPoints[i].x, mappedPoints[i].y)
+            }
+            close()
+        }
+        drawPath(path, color = Color(0xFF7CB7FF), style = Stroke(width = 2.5f))
+
+        // Draw corner dots
+        for (pt in mappedPoints) {
+            drawCircle(Color.White, radius = 4f, center = pt)
+        }
+
+        // Draw finder centers
+        for (center in framing.finderCenters.take(4)) {
+            val cx = offsetX + center.x * scale
+            val cy = offsetY + center.y * scale
+            drawCircle(Color(0xFFF2CC60), radius = 3f, center = Offset(cx, cy))
+        }
+    }
+}
+
+@Composable
 private fun StatusBar(
     phase: SessionPhase,
-    guidance: Set<com.superqr.android.session.SessionGuidance>,
+    profileName: String,
 ) {
     val phaseColor = when (phase) {
         SessionPhase.SEARCHING -> Color(0xFFF2CC60)
-        SessionPhase.QR_DETECTED, SessionPhase.QR_LOCKED -> Color(0xFF7CB7FF)
-        SessionPhase.GRID_DETECTED, SessionPhase.GRID_LOCKED -> Color(0xFF7CB7FF)
+        SessionPhase.QR_DETECTED -> Color(0xFF7CB7FF)
+        SessionPhase.QR_LOCKED -> Color(0xFF7CB7FF)
+        SessionPhase.GRID_DETECTED -> Color(0xFF7CB7FF)
+        SessionPhase.GRID_LOCKED -> Color(0xFF7EE787)
         SessionPhase.RECEIVING -> Color(0xFF7EE787)
         SessionPhase.LOST, SessionPhase.REACQUIRING -> Color(0xFFFF7B72)
         SessionPhase.COMPLETE -> Color(0xFF7EE787)
@@ -264,11 +362,11 @@ private fun StatusBar(
             fontWeight = FontWeight.Bold,
             fontSize = 16.sp,
         )
-        if (guidance.isNotEmpty()) {
+        if (profileName.isNotEmpty()) {
             Text(
-                guidance.joinToString(" · ") { it.label },
-                color = Color(0xFFF2CC60),
-                fontSize = 12.sp,
+                profileName,
+                color = Color(0xFF7CB7FF),
+                fontSize = 11.sp,
             )
         }
     }
@@ -279,7 +377,7 @@ private fun MetricsRow(
     cameraFps: Double,
     analysisFps: Double,
     pipelineMs: Double,
-    profileLabel: String,
+    profileName: String,
 ) {
     Row(
         Modifier.fillMaxWidth(),
@@ -288,7 +386,7 @@ private fun MetricsRow(
         MetricChip("Camera", "%.1f fps".format(cameraFps))
         MetricChip("Analysis", "%.1f fps".format(analysisFps))
         MetricChip("Pipeline", "%.1f ms".format(pipelineMs))
-        MetricChip("Profile", profileLabel)
+        MetricChip("Profile", profileName.ifEmpty { "—" })
     }
 }
 
@@ -310,51 +408,9 @@ private fun MetricChip(label: String, value: String) {
 }
 
 @Composable
-private fun ShareCard(
-    transfer: com.superqr.android.session.CompletedTransfer,
-    onShare: () -> Unit,
-    onScanAnother: () -> Unit,
-) {
-    Column(
-        Modifier.fillMaxWidth().padding(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(
-            "TRANSFER COMPLETE",
-            color = Color(0xFF7EE787),
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = Color.White.copy(alpha = 0.07f)
-            ),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(transfer.filename, color = Color.White, fontWeight = FontWeight.Bold)
-                Text(
-                    "${"%,d".format(transfer.fileSize)} B · ${transfer.frameCount} frames",
-                    color = Color.White.copy(alpha = 0.7f),
-                    fontSize = 12.sp,
-                )
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = onShare) {
-                Text("SHARE SESSION", fontWeight = FontWeight.Bold)
-            }
-            Button(onClick = onScanAnother) {
-                Text("Scan Another")
-            }
-        }
-    }
-}
-
-@Composable
 private fun DiagnosticsPanel(
     sessionState: com.superqr.android.session.SessionState,
+    snapshot: com.superqr.android.ui.phase1.Phase1RunSnapshot,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -364,38 +420,63 @@ private fun DiagnosticsPanel(
             .padding(4.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        SectionHeader("Profile")
+        SectionHeader("Session")
         Text(
-            "${sessionState.profile.label} · ${sessionState.colorCount} colors · " +
-                "${sessionState.profile.grid}×${sessionState.profile.grid}",
+            "Campaign: ${sessionState.campaignId.take(8)} · " +
+                "Frames: ${sessionState.analyzedFrames}",
             color = Color.White.copy(alpha = 0.7f),
             fontSize = 12.sp,
         )
 
-        SectionHeader("Calibration")
+        SectionHeader("Tracking")
         Text(
-            "${sessionState.calibratedCount}/${sessionState.colorCount} calibrated",
+            "State: ${sessionState.trackingState.label} · " +
+                "Path: ${sessionState.profileName}",
             color = Color.White.copy(alpha = 0.7f),
             fontSize = 12.sp,
         )
 
-        SectionHeader("Transport")
+        SectionHeader("Performance")
         Text(
-            "Erasures: ${sessionState.codedErasures} · " +
-                "CRC pass: ${sessionState.crcPass} · fail: ${sessionState.crcFail}",
+            "Pipeline: %.1f ms · Camera: %.1f fps · Analysis: %.1f fps".format(
+                sessionState.pipelineMs, sessionState.cameraFps, sessionState.analysisFps,
+            ),
             color = Color.White.copy(alpha = 0.7f),
             fontSize = 12.sp,
         )
-        if (sessionState.totalFrames > 0) {
+
+        if (snapshot.observations > 0) {
+            SectionHeader("Observations")
             Text(
-                "Frames: ${sessionState.acceptedFrames}/${sessionState.totalFrames}",
+                "Observed: ${snapshot.observations} · " +
+                    "Valid: ${snapshot.validFrames} · " +
+                    "Unique: ${snapshot.uniqueFrames} · " +
+                    "FEC valid: ${snapshot.innerFecFrames}",
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 12.sp,
+            )
+            Text(
+                "BER: %.4f · Erasure rate: %.4f · Goodput: %.2f KiB/s".format(
+                    snapshot.bitErrorRate,
+                    snapshot.erasureRate,
+                    snapshot.goodputKibS,
+                ),
                 color = Color.White.copy(alpha = 0.7f),
                 fontSize = 12.sp,
             )
         }
 
+        if (!snapshot.failureSummary.isNullOrEmpty()) {
+            SectionHeader("Failures")
+            Text(
+                snapshot.failureSummary,
+                color = Color(0xFFFF7B72),
+                fontSize = 12.sp,
+            )
+        }
+
         if (sessionState.error != null) {
-            SectionHeader("Last Rejection")
+            SectionHeader("Last Error")
             Text(
                 sessionState.error,
                 color = Color(0xFFFF7B72),

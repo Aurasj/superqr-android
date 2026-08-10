@@ -1,248 +1,274 @@
 package com.superqr.android.session
 
+import android.content.Context
 import com.superqr.android.camera.CameraFrame
 import com.superqr.android.camera.V7AnalysisRateAccumulator
-import com.superqr.android.camera.V7MeasurementTracker
-import com.superqr.android.vision.v6.contract.V6Contract
-import com.superqr.android.vision.v6.detection.V6StaticDetector
-import com.superqr.android.vision.v6.model.V6StaticResult
-import com.superqr.android.vision.v6.transport.V6ReceiveUtils
-import com.superqr.android.vision.v7.transport.V7OpticalProfiles
-import com.superqr.android.vision.v7.transport.V7SessionAccumulator
-import com.superqr.android.vision.v7.transport.V7TransferPackage
-import com.superqr.android.vision.v7.transport.V7TransferReceiver
+import com.superqr.android.ui.phase1.Phase1AnalysisPath
+import com.superqr.android.ui.phase1.Phase1AnalysisPolicy
+import com.superqr.android.ui.phase1.Phase1Manifest
+import com.superqr.android.ui.phase1.Phase1ObservationRecorder
+import com.superqr.android.ui.phase1.Phase1RunSnapshot
+import com.superqr.android.ui.phase1.Phase1TrackingState
+import com.superqr.android.vision.VisionEngine
+import com.superqr.android.vision.VisionResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 
-class DiagnosticSession(private val cacheDir: File) {
-
+class DiagnosticSession(
+    private val context: Context,
+    private val cacheDir: File,
+) {
     private val _sessionState = MutableStateFlow(SessionState())
     val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
 
-    private val detector = V6StaticDetector()
-    private val receiver = V7TransferReceiver()
-    private val accumulator = V7SessionAccumulator()
-    private val measurement = V7MeasurementTracker()
+    private val manifest by lazy { Phase1Manifest.load(context) }
+    private val engine by lazy { VisionEngine(manifest) }
+    private val recorder = Phase1ObservationRecorder()
     private val analysisRate = V7AnalysisRateAccumulator(64)
 
     private var wasTracking = false
     private var wasLost = false
     private var generation = 0
+    private var observedFrames = 0
 
-    fun start() {
+    fun startSession() {
         reset()
         generation++
+        recorder.reset()
         _sessionState.value = SessionState(phase = SessionPhase.SEARCHING)
     }
 
-    fun stop() {
+    fun stopSession() {
         val current = _sessionState.value
         _sessionState.value = current.copy(
-            phase = if (current.completedTransfer != null) SessionPhase.COMPLETE
+            phase = if (current.hasObservations) SessionPhase.COMPLETE
                     else SessionPhase.IDLE,
         )
     }
 
     fun reset() {
-        detector.close()
-        receiver.reset()
-        accumulator.reset()
-        measurement.reset()
+        engine.reset()
+        recorder.reset()
         analysisRate.reset()
         wasTracking = false
         wasLost = false
+        observedFrames = 0
         _sessionState.value = SessionState()
     }
 
     fun processFrame(frame: CameraFrame) {
         if (frame.generation != generation) return
 
-        val detected = try {
-            detector.detectGeometry(frame.lumaBytes, frame.width, frame.height)
-                .copy(analyzerArrivalNs = frame.arrivalNs)
+        if (!Phase1AnalysisPolicy.accepts(frame.width, frame.height)) {
+            updateState { it.copy(error = "Resolution rejected: ${frame.width}x${frame.height}") }
+            return
+        }
+
+        val arrivalNs = frame.arrivalNs
+        val result = try {
+            engine.analyze(
+                luma = frame.lumaBytes,
+                width = frame.width,
+                height = frame.height,
+                chromaReader = frame.chromaReader,
+                arrivalNs = arrivalNs,
+            )
         } catch (t: Throwable) {
-            measurement.recordException(t)
             updateState { it.copy(error = "${t::class.java.simpleName}: ${t.message}") }
             return
         }
 
-        val decoded = receiver.analyze(
-            detected, frame.lumaBytes, frame.width, frame.height,
-            frame.chromaReader,
-        )
+        val completedNs = System.nanoTime()
+        analysisRate.recordCompletion(completedNs)
+        val analysisFps = analysisRate.computeFps(completedNs)
 
-        val accepted = decoded.acceptedFrame
-        if (accepted != null) {
-            measurement.recordAccepted(
-                accepted.sessionId, accepted.frameId, accepted.payload.size,
+        observedFrames++
+
+        // Record observations
+        val gridObs = result.gridObservation
+        if (gridObs != null) {
+            recorder.record(
+                profile = gridObs.profile,
+                dwellEpochs = result.envelope?.dwellEpochs ?: 3,
+                completedNs = completedNs,
+                frameIndex = gridObs.frameIndex,
+                observedBits = gridObs.observedBits,
+                bitErrors = gridObs.bitErrors,
+                erasedBits = gridObs.erasedBits,
+                frameValid = gridObs.frameValid,
+                postFecValid = gridObs.postFecValid,
+                pipelineMs = result.pipelineMs,
+                allocationBytes = 0,
+                gcEvents = 0,
+                envelope = result.envelope,
+                sync = gridObs.syncStatus,
+                geometry = gridObs.geometrySource,
+                failureReason = gridObs.failureReason,
+                errorCellIndexes = gridObs.errorCellIndexes,
+                errorCellCount = gridObs.errorCellCount,
+                erasureCellIndexes = gridObs.erasureCellIndexes,
+                erasureCellCount = gridObs.erasureCellCount,
+                extra = mapOf(
+                    "capture_width" to frame.width,
+                    "capture_height" to frame.height,
+                    "sensor_timestamp_ns" to frame.sensorTimestamp,
+                    "analysis_path" to "GRID",
+                    "acquisition_state" to result.schedulerState,
+                    "pipeline_ms" to result.pipelineMs,
+                ),
             )
         }
 
-        val completedNs = System.nanoTime()
-        analysisRate.recordCompletion(completedNs)
-        measurement.recordAnalysis(
-            completedNs = completedNs,
-            pipelineMs = (completedNs - frame.arrivalNs) / 1_000_000.0,
-            detectorMs = detected.processingTimeMs.toDouble(),
-            v7TotalMs = decoded.timing.totalUs / 1000.0,
-            v7ProfileMs = decoded.timing.profileUs / 1000.0,
-            v7SamplingMs = decoded.timing.samplingUs / 1000.0,
-            v7ClassificationMs = decoded.timing.classificationUs / 1000.0,
-            v7TransportMs = decoded.timing.transportUs / 1000.0,
-        )
-        val ms = measurement.snapshot(completedNs)
-
-        var completedTransfer: CompletedTransfer? = null
-        if (accepted != null) {
-            val pkg = try {
-                accumulator.addFrame(accepted)
-            } catch (t: Throwable) {
-                measurement.recordException(t)
-                null
-            }
-            if (pkg != null) {
-                completedTransfer = savePackage(pkg, accepted.sessionId, accepted.totalFrames)
-            }
+        val qrObs = result.qrObservation
+        if (qrObs != null) {
+            recorder.observeSender(
+                profile = qrObs.profile,
+                envelope = result.envelope!!,
+                sync = "QR_LOCKED",
+                geometry = qrObs.geometrySource,
+            )
+            recorder.record(
+                profile = qrObs.profile,
+                dwellEpochs = result.envelope!!.dwellEpochs,
+                completedNs = completedNs,
+                frameIndex = qrObs.frameIndex,
+                observedBits = qrObs.profile.frameBytes * 8,
+                bitErrors = 0,
+                erasedBits = 0,
+                frameValid = true,
+                postFecValid = true,
+                pipelineMs = result.pipelineMs,
+                allocationBytes = 0,
+                gcEvents = 0,
+                envelope = result.envelope,
+                sync = "QR_LOCKED",
+                geometry = qrObs.geometrySource,
+                extra = mapOf(
+                    "capture_width" to frame.width,
+                    "capture_height" to frame.height,
+                    "sensor_timestamp_ns" to frame.sensorTimestamp,
+                    "analysis_path" to "QR",
+                ),
+            )
         }
 
-        val phase = derivePhase(detected, decoded)
-        val guidance = deriveGuidance(detected, frame.width, frame.height)
+        // If neither observation but we got a carrier candidate or QR detection,
+        // record a failure for diagnostics.
+        if (gridObs == null && qrObs == null && observedFrames > 0 && observedFrames % 15 == 0) {
+            // Periodic diagnostic failure recording during search
+            val failureReason = when (result.path) {
+                Phase1AnalysisPath.GRID -> result.carrierAcquisition?.bestSyncStatus ?: "GRID_NO_CANDIDATE"
+                Phase1AnalysisPath.QR -> result.qrResult?.failure ?: "QR_NOT_DECODED"
+            }
+            recorder.recordFailure(
+                reason = failureReason,
+                completedNs = completedNs,
+                pipelineMs = result.pipelineMs,
+                geometry = result.trackingState.name,
+                sync = result.schedulerState,
+                extra = mapOf(
+                    "capture_width" to frame.width,
+                    "capture_height" to frame.height,
+                    "analysis_path" to result.path.name,
+                    "acquisition_state" to result.schedulerState,
+                ),
+            )
+        }
+
+        val phase = derivePhase(result)
 
         updateState {
             it.copy(
                 phase = phase,
-                guidance = guidance,
-                profile = decoded.profile,
+                trackingState = result.trackingState,
+                framing = result.framing,
+                profileName = result.profileName,
                 cameraFps = frame.cameraFps,
-                analysisFps = ms.analysisFps,
-                pipelineMs = ms.pipelineMs,
-                calibratedCount = decoded.calibratedCount,
-                colorCount = decoded.profile.colorCount,
-                acceptedFrames = accumulator.getUniqueFrames(),
-                totalFrames = accumulator.getTotalFrames(),
-                codedErasures = decoded.erasureCount,
-                error = decoded.transportError,
-                completedTransfer = completedTransfer ?: it.completedTransfer,
+                analysisFps = analysisFps,
+                pipelineMs = result.pipelineMs,
+                analyzedFrames = observedFrames,
+                hasObservations = recorder.jsonLinesForTest().isNotEmpty(),
+                campaignId = recorder.campaignId,
+                error = result.qrResult?.failure,
             )
         }
-
-        if (completedTransfer != null) {
-            updateState { it.copy(phase = SessionPhase.COMPLETE) }
-        }
     }
 
-    private fun derivePhase(
-        detected: V6StaticResult,
-        decoded: V7TransferReceiver.DecodeResult,
-    ): SessionPhase {
-        val phase = computePhase(
-            borderFound = detected.borderFound,
-            orientationResolved = detected.orientationResolved,
-            calibratedCount = decoded.calibratedCount,
-            colorCount = decoded.profile.colorCount,
-            hasSession = accumulator.getCurrentSessionId() != -1,
-            wasTracking = wasTracking,
-            wasLost = wasLost,
-        )
+    private fun derivePhase(result: VisionResult): SessionPhase {
+        when (result.path) {
+            Phase1AnalysisPath.GRID -> {
+                if (result.carrierAcquisition == null) {
+                    val next = if (wasTracking || wasLost) SessionPhase.LOST
+                    else SessionPhase.SEARCHING
+                    wasTracking = false
+                    wasLost = true
+                    return next
+                }
 
-        // Update tracking state based on current detection
-        wasTracking = detected.borderFound
-        wasLost = !detected.borderFound
+                if (wasLost && !result.carrierAcquisition.acquired) {
+                    wasTracking = false
+                    return SessionPhase.REACQUIRING
+                }
 
-        return phase
-    }
+                wasTracking = true
+                wasLost = false
 
-    companion object {
-        fun computePhase(
-            borderFound: Boolean,
-            orientationResolved: Boolean,
-            calibratedCount: Int,
-            colorCount: Int,
-            hasSession: Boolean,
-            wasTracking: Boolean,
-            wasLost: Boolean,
-        ): SessionPhase {
-            if (!borderFound) {
-                return if (wasTracking || wasLost) SessionPhase.LOST
-                else SessionPhase.SEARCHING
+                if (!result.carrierAcquisition.acquired) return SessionPhase.SEARCHING
+
+                if (result.envelope == null) return SessionPhase.GRID_DETECTED
+
+                if (result.envelope.state == com.superqr.android.vision.v7_capacity_lab.V7LabRunState.RUNNING) {
+                    return SessionPhase.RECEIVING
+                }
+
+                return SessionPhase.GRID_LOCKED
             }
+            Phase1AnalysisPath.QR -> {
+                val qr = result.qrResult
+                if (qr == null) {
+                    wasTracking = false
+                    wasLost = true
+                    return SessionPhase.SEARCHING
+                }
 
-            if (wasLost && borderFound && !orientationResolved) {
-                return SessionPhase.REACQUIRING
-            }
+                if (qr.valid) {
+                    wasTracking = true
+                    wasLost = false
+                    return SessionPhase.QR_LOCKED
+                }
 
-            if (!orientationResolved) return SessionPhase.QR_DETECTED
+                if (qr.decoded) {
+                    wasTracking = true
+                    wasLost = false
+                    return SessionPhase.QR_DETECTED
+                }
 
-            if (calibratedCount <= 0) return SessionPhase.QR_LOCKED
+                // QR path but no decode: evaluate framing
+                wasTracking = result.framing.trackingState == Phase1TrackingState.TRACKING
+                wasLost = !wasTracking
 
-            if (calibratedCount < colorCount) return SessionPhase.GRID_DETECTED
-
-            if (hasSession) return SessionPhase.RECEIVING
-
-            return SessionPhase.GRID_LOCKED
-        }
-    }
-
-    private fun deriveGuidance(
-        detected: V6StaticResult,
-        frameWidth: Int,
-        frameHeight: Int,
-    ): Set<SessionGuidance> {
-        val guidance = mutableSetOf<SessionGuidance>()
-        if (!detected.borderFound) return guidance
-
-        val frameArea = (frameWidth * frameHeight).toDouble()
-        val contourArea = detected.contourArea
-        if (frameArea > 0) {
-            val ratio = contourArea / frameArea
-            if (ratio < 0.05) guidance.add(SessionGuidance.MOVE_CLOSER)
-            if (ratio > 0.80) guidance.add(SessionGuidance.MOVE_BACK)
-        }
-
-        val quad = detected.detectedQuad
-        if (quad != null && quad.size == 4) {
-            val edges = listOf(
-                edgeLength(quad[0], quad[1]),
-                edgeLength(quad[1], quad[2]),
-                edgeLength(quad[2], quad[3]),
-                edgeLength(quad[3], quad[0]),
-            )
-            val minEdge = edges.min()
-            val maxEdge = edges.max()
-            if (minEdge > 0 && maxEdge / minEdge > 1.6) {
-                guidance.add(SessionGuidance.HOLD_PHONE_PARALLEL)
+                val qrQuad = result.qrResult?.quad
+                return if (qrQuad != null && qrQuad.size == 4) {
+                    SessionPhase.QR_DETECTED
+                } else {
+                    if (wasTracking || wasLost) SessionPhase.LOST
+                    else SessionPhase.SEARCHING
+                }
             }
         }
-
-        return guidance
     }
 
-    private fun edgeLength(a: DoubleArray, b: DoubleArray): Double {
-        val dx = a[0] - b[0]
-        val dy = a[1] - b[1]
-        return kotlin.math.sqrt(dx * dx + dy * dy)
+    fun shareSession(context: Context): File {
+        return recorder.exportAndShare(context)
     }
 
-    private fun savePackage(
-        pkg: V7TransferPackage,
-        sessionId: Int,
-        totalFrames: Int,
-    ): CompletedTransfer? {
-        return try {
-            val safe = V6ReceiveUtils.sanitizeFilename(pkg.filename)
-            val dir = File(cacheDir, "superqr_received").apply { mkdirs() }
-            val out = File(dir, safe)
-            out.writeBytes(pkg.fileData)
-            CompletedTransfer(
-                filename = pkg.filename,
-                file = out,
-                sessionId = sessionId,
-                frameCount = totalFrames,
-                fileSize = pkg.fileSize,
-            )
-        } catch (_: Throwable) { null }
+    fun snapshot(): Phase1RunSnapshot = recorder.snapshot()
+
+    fun exportDebugBundle(context: Context): File? {
+        if (!recorder.jsonLinesForTest().any()) return null
+        return recorder.exportAndShare(context)
     }
 
     private inline fun updateState(transform: (SessionState) -> SessionState) {
@@ -250,6 +276,6 @@ class DiagnosticSession(private val cacheDir: File) {
     }
 
     fun close() {
-        try { detector.close() } catch (_: Throwable) {}
+        engine.close()
     }
 }
