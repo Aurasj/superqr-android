@@ -19,9 +19,15 @@ enum class Phase1AnalysisPath { GRID, QR }
 
 /**
  * Keeps expensive QR and GRID acquisition paths from running serially on every
- * frame. Search begins with QR, alternates while unlocked, and hands a lost
- * GRID lock to a short QR transition probe before allowing another cold GRID
- * contour search.
+ * frame. Search begins with QR, alternates while unlocked, and hands a truly
+ * lost GRID lock to a short QR transition probe before allowing another cold
+ * GRID contour search.
+ *
+ * A carrier-like miss while GRID is already locked is deliberately NOT treated
+ * as a lost lock. V7CarrierAcquirer uses these frames for bounded TRACK_HOLD /
+ * optical-flow recovery during phone motion or scale change. Switching to QR
+ * during that hold starves the tracker of consecutive frames and can force an
+ * unnecessary 150-250 ms cold contour acquisition.
  */
 class Phase1AcquisitionScheduler(
     private val unlockAfterMisses: Int = 2,
@@ -53,6 +59,16 @@ class Phase1AcquisitionScheduler(
 
     fun missed(path: Phase1AnalysisPath, carrierCandidate: Boolean = false) {
         if (lockedPath == path) {
+            // GRID's carrier acquirer intentionally emits carrierLike=true for
+            // TRACK_HOLD and other bounded recovery evidence. Keep feeding GRID
+            // consecutive frames while that evidence exists instead of jumping
+            // to QR and destroying motion/scale continuity.
+            if (path == Phase1AnalysisPath.GRID && carrierCandidate) {
+                misses = 0
+                nextSearchPath = path
+                return
+            }
+
             misses++
             if (misses >= unlockAfterMisses) {
                 lockedPath = null
