@@ -209,9 +209,18 @@ class DiagnosticSession(private val context: Context) {
                 )
             }
 
+            // READY/DONE QR frames are valid lock/synchronization evidence, but the
+            // Phase 1 contract scores payload only while the sender is RUNNING.
+            if (result.path == Phase1AnalysisPath.QR && result.qrObservation == null && result.qrResult?.valid == true) {
+                val profile = result.qrProfile
+                val envelope = result.envelope
+                if (profile != null && envelope != null) {
+                    recorder.observeSender(profile, envelope, "QR_LOCKED", "QR_NATIVE_LOCKED", completedNs)
+                }
+            }
+
             result.qrObservation?.let { observation ->
                 val envelope = requireNotNull(result.envelope) { "QR observation must carry its validated run envelope" }
-                recorder.observeSender(observation.profile, envelope, "QR_LOCKED", observation.geometrySource)
                 recorder.record(
                     profile = observation.profile,
                     dwellEpochs = envelope.dwellEpochs,
@@ -232,7 +241,9 @@ class DiagnosticSession(private val context: Context) {
                 )
             }
 
-            if (result.gridObservation == null && result.qrObservation == null && observedFrames % 15 == 0) {
+            val validNonScoredQr = result.path == Phase1AnalysisPath.QR &&
+                result.qrObservation == null && result.qrResult?.valid == true && result.envelope != null
+            if (result.gridObservation == null && result.qrObservation == null && !validNonScoredQr && observedFrames % 15 == 0) {
                 val failureReason = when (result.path) {
                     Phase1AnalysisPath.GRID -> result.carrierAcquisition?.bestSyncStatus ?: "GRID_NO_CANDIDATE"
                     Phase1AnalysisPath.QR -> result.qrResult?.failure ?: "QR_NOT_DECODED"
@@ -273,7 +284,7 @@ class DiagnosticSession(private val context: Context) {
         val qr = result.qrResult ?: return
         val quad = qr.quad ?: return
         if (qr.valid) return
-        if (qr.diagnostics["zxing_attempted"] != true) return
+        if (qr.diagnostics["zxing_attempted"] != true && qr.diagnostics["external_qr_attempted"] != true) return
 
         capturedQrFrames += CapturedQrFrame(
             sequence = sequence,
@@ -342,7 +353,9 @@ class DiagnosticSession(private val context: Context) {
         if (qr.valid) {
             wasTracking = true
             wasLost = false
-            return SessionPhase.QR_LOCKED
+            return if (result.envelope?.state == com.superqr.android.vision.v7_capacity_lab.V7LabRunState.RUNNING) {
+                SessionPhase.RECEIVING
+            } else SessionPhase.QR_LOCKED
         }
         if (qr.decoded || qr.quad != null) {
             // qr.quad is emitted only by native QR detectors, not by the generic
