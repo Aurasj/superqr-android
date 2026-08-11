@@ -7,6 +7,7 @@ class ShapeGridDecodeException(message: String) : RuntimeException(message)
 
 data class ShapeGridRsResult(
     val data: ByteArray,
+    val correctedCodeword: ByteArray,
     val errorsCorrected: Int,
     val erasuresUsed: Int,
 )
@@ -17,6 +18,9 @@ data class ShapeGridBlockDecode(
     val payload: ByteArray,
     val rsErrors: Int,
     val rsErasures: Int,
+    val shapeSymbolErrors: Int,
+    val colorSymbolErrors: Int,
+    val symbolErasures: Int,
     val failure: String? = null,
 )
 
@@ -57,7 +61,11 @@ object ShapeGridReedSolomon {
         return out
     }
 
-    fun decode(codeword: ByteArray, parityBytes: Int = 48, erasurePositions: IntArray = IntArray(0)): ShapeGridRsResult {
+    fun decode(
+        codeword: ByteArray,
+        parityBytes: Int = 48,
+        erasurePositions: IntArray = IntArray(0),
+    ): ShapeGridRsResult {
         if (parityBytes !in 1 until codeword.size || codeword.size > 255) {
             throw ShapeGridDecodeException("invalid ShapeGrid RS codeword")
         }
@@ -69,8 +77,10 @@ object ShapeGridReedSolomon {
         for (position in erasures) working[position] = 0
         val syndromes = syndromes(working, parityBytes)
         if (syndromes.all { it == 0 }) {
+            val corrected = ByteArray(working.size) { working[it].toByte() }
             return ShapeGridRsResult(
-                data = ByteArray(codeword.size - parityBytes) { working[it].toByte() },
+                data = corrected.copyOfRange(0, corrected.size - parityBytes),
+                correctedCodeword = corrected,
                 errorsCorrected = 0,
                 erasuresUsed = erasures.size,
             )
@@ -88,8 +98,10 @@ object ShapeGridReedSolomon {
         for (index in corrected.indices) {
             if (index !in erasureSet && corrected[index] != original[index]) errors++
         }
+        val correctedBytes = ByteArray(corrected.size) { corrected[it].toByte() }
         return ShapeGridRsResult(
-            data = ByteArray(codeword.size - parityBytes) { corrected[it].toByte() },
+            data = correctedBytes.copyOfRange(0, correctedBytes.size - parityBytes),
+            correctedCodeword = correctedBytes,
             errorsCorrected = errors,
             erasuresUsed = erasures.size,
         )
@@ -268,6 +280,7 @@ object ShapeGridBlockCodec {
         outerEnvelope: V7LabRunEnvelope,
         physicalSymbols: IntArray,
     ): ShapeGridBlockDecode {
+        val observedSymbolErasures = physicalSymbols.count { it < 0 }
         return try {
             require(blockId in 0 until 8)
             require(physicalSymbols.size == profile.blockCells)
@@ -280,6 +293,7 @@ object ShapeGridBlockCodec {
             val unpacked = symbolsToBytes(logical)
             require(unpacked.bytes.size == profile.encodedBytesPerBlock)
             val blockData = ByteArray(profile.rsCodewordsPerBlock * RS_K)
+            val correctedEncoded = ByteArray(profile.encodedBytesPerBlock)
             var totalErrors = 0
             var totalErasures = 0
             repeat(profile.rsCodewordsPerBlock) { shard ->
@@ -292,12 +306,33 @@ object ShapeGridBlockCodec {
                 for (i in 0 until RS_N) if (unpacked.erasures[codeOffset + i]) erasurePositions[cursor++] = i
                 val rs = ShapeGridReedSolomon.decode(codeword, PARITY, erasurePositions)
                 rs.data.copyInto(blockData, shard * RS_K)
+                rs.correctedCodeword.copyInto(correctedEncoded, codeOffset)
                 totalErrors += rs.errorsCorrected
                 totalErasures += rs.erasuresUsed
             }
             validateBlockData(profile, blockId, outerEnvelope, blockData)
+            val correctedSymbols = bytesToSymbols6(correctedEncoded)
+            require(correctedSymbols.size == logical.size)
+            var shapeErrors = 0
+            var colorErrors = 0
+            for (index in logical.indices) {
+                val observed = logical[index]
+                if (observed < 0) continue
+                val expected = correctedSymbols[index]
+                if ((observed ushr 2) != (expected ushr 2)) shapeErrors++
+                if ((observed and 0x03) != (expected and 0x03)) colorErrors++
+            }
             val payload = blockData.copyOfRange(26, 26 + profile.usefulBytesPerBlock)
-            ShapeGridBlockDecode(blockId, true, payload, totalErrors, totalErasures)
+            ShapeGridBlockDecode(
+                blockId = blockId,
+                valid = true,
+                payload = payload,
+                rsErrors = totalErrors,
+                rsErasures = totalErasures,
+                shapeSymbolErrors = shapeErrors,
+                colorSymbolErrors = colorErrors,
+                symbolErasures = observedSymbolErasures,
+            )
         } catch (error: Throwable) {
             ShapeGridBlockDecode(
                 blockId = blockId,
@@ -305,9 +340,31 @@ object ShapeGridBlockCodec {
                 payload = ByteArray(0),
                 rsErrors = 0,
                 rsErasures = 0,
+                shapeSymbolErrors = 0,
+                colorSymbolErrors = 0,
+                symbolErasures = observedSymbolErasures,
                 failure = "${error::class.simpleName}:${error.message}",
             )
         }
+    }
+
+    private fun bytesToSymbols6(data: ByteArray): IntArray {
+        require((data.size * 8) % 6 == 0)
+        val output = IntArray(data.size * 8 / 6)
+        var accumulator = 0L
+        var bitCount = 0
+        var cursor = 0
+        for (byte in data) {
+            accumulator = (accumulator shl 8) or (byte.toLong() and 0xFF)
+            bitCount += 8
+            while (bitCount >= 6) {
+                bitCount -= 6
+                output[cursor++] = ((accumulator ushr bitCount) and 0x3F).toInt()
+                accumulator = if (bitCount == 0) 0 else accumulator and ((1L shl bitCount) - 1)
+            }
+        }
+        require(bitCount == 0 && cursor == output.size)
+        return output
     }
 
     private fun validateBlockData(
