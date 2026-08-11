@@ -20,27 +20,29 @@ enum class Phase1AnalysisPath { GRID, QR }
 /**
  * Keeps expensive QR and GRID acquisition paths from running serially on every
  * frame. Search begins with QR and alternates only while neither path has real
- * geometric evidence. Weak cold geometry receives a small bounded run of
- * consecutive frames so acquisition can stabilize, but it may not monopolize
- * search indefinitely without a valid run envelope.
+ * geometric evidence.
  *
- * A bounded GRID TRACK_HOLD may retain an existing GRID lock while geometry is
- * recovering. Cold carrier-like hypotheses may still keep unlocked GRID search
- * consecutive, but callers can explicitly prevent them from extending a lock.
- * Likewise, a QR quadrangle without a decoded payload is still real QR
- * acquisition evidence during ordinary acquisition, subject to the same cold
- * evidence bound.
+ * QR-like cold geometry is deliberately short-lived because the V7 GRID carrier
+ * can resemble a QR symbol. GRID carrier evidence receives a longer, but still
+ * bounded, acquisition window because protected top/bottom sync may need several
+ * consecutive camera frames to land outside a rolling-shutter transition.
  *
- * A validated DONE envelope is different: it starts a neutral run-boundary
- * search. The just-completed PHY remains selected while DONE is still visible;
- * after the surface changes, misses alternate GRID/QR regardless of weak
- * geometric evidence until a new valid envelope locks the next run. This avoids
- * assuming that the next campaign run must use the opposite PHY.
+ * A previously validated GRID lock also receives a bounded carrier-like
+ * reacquisition grace after TRACK_HOLD expires. This avoids immediately paying a
+ * heavy QR fallback after one mixed-frame sync transition, while still ensuring
+ * a stale GRID lock cannot survive forever if DONE was missed.
+ *
+ * A validated DONE envelope starts a neutral run-boundary search. The
+ * just-completed PHY remains selected while DONE is still visible; after the
+ * surface changes, misses alternate GRID/QR regardless of weak geometric
+ * evidence until a new valid envelope locks the next run.
  */
 class Phase1AcquisitionScheduler(
     private val unlockAfterMisses: Int = 2,
     private val transitionProbeFrames: Int = 3,
     private val coldEvidenceFrames: Int = 3,
+    private val coldGridEvidenceFrames: Int = 12,
+    private val lockedGridEvidenceGraceFrames: Int = 12,
 ) {
     private var lockedPath: Phase1AnalysisPath? = null
     private var nextSearchPath = Phase1AnalysisPath.QR
@@ -99,9 +101,6 @@ class Phase1AcquisitionScheduler(
         }
 
         if (lockedPath == path) {
-            // Locked-path retention is stricter than unlocked acquisition. GRID
-            // callers use this override so only real TRACK_HOLD evidence can
-            // extend a previous GRID lock; cold carrier-like hypotheses cannot.
             val shouldRetainLock = retainLockedPath ?: hasPathEvidence
             if (shouldRetainLock) {
                 misses = 0
@@ -110,7 +109,12 @@ class Phase1AcquisitionScheduler(
             }
 
             misses++
-            if (misses >= unlockAfterMisses) {
+            val unlockLimit = if (path == Phase1AnalysisPath.GRID && hasPathEvidence) {
+                lockedGridEvidenceGraceFrames.coerceAtLeast(unlockAfterMisses)
+            } else {
+                unlockAfterMisses.coerceAtLeast(1)
+            }
+            if (misses >= unlockLimit) {
                 lockedPath = null
                 val opposite = opposite(path)
                 nextSearchPath = opposite
@@ -118,6 +122,8 @@ class Phase1AcquisitionScheduler(
                 transitionProbePath = opposite
                 transitionProbesRemaining = transitionProbeFrames.coerceAtLeast(1)
                 clearColdEvidence()
+            } else {
+                nextSearchPath = path
             }
             return
         }
@@ -157,7 +163,12 @@ class Phase1AcquisitionScheduler(
             coldEvidenceMisses = 1
         }
 
-        if (coldEvidenceMisses >= coldEvidenceFrames.coerceAtLeast(1)) {
+        val coldLimit = when (path) {
+            Phase1AnalysisPath.GRID -> coldGridEvidenceFrames
+            Phase1AnalysisPath.QR -> coldEvidenceFrames
+        }.coerceAtLeast(1)
+
+        if (coldEvidenceMisses >= coldLimit) {
             clearColdEvidence()
             nextSearchPath = opposite(path)
         } else {
