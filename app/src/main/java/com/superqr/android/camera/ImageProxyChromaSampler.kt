@@ -4,6 +4,7 @@ import androidx.camera.core.ImageProxy
 import com.superqr.android.vision.v6.classification.ChromaPixelReader
 import com.superqr.android.vision.v7_capacity_lab.ExternalQrDecodeResult
 import com.superqr.android.vision.v7_capacity_lab.ExternalQrFrameDecoder
+import com.superqr.android.vision.v7_capacity_lab.ExternalQrSymbol
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -18,8 +19,7 @@ class ChromaSampleBuffers {
  * CameraX frame-scoped sampler/capability object.
  *
  * Chroma reads remain allocation-free. The optional QR capability is bound to the
- * same ImageProxy and is invoked only when VisionEngine is on its QR path, before
- * CameraManager closes that image.
+ * same ImageProxy and is invoked only while CameraManager still owns that frame.
  */
 class ImageProxyChromaSampler(
     @Suppress("UNUSED_PARAMETER") buffers: ChromaSampleBuffers,
@@ -37,7 +37,6 @@ class ImageProxyChromaSampler(
         bind(imageProxy)
     }
 
-    /** Rebind this reader to the current ImageProxy without allocating readers or ByteBuffer duplicates. */
     fun bind(imageProxy: ImageProxy): ImageProxyChromaSampler {
         cropLeft = imageProxy.cropRect.left
         cropTop = imageProxy.cropRect.top
@@ -72,6 +71,14 @@ class ImageProxyChromaSampler(
             quad = result.quad?.map { point -> point.copyOf() },
             errorType = result.errorType,
             errorMessage = result.errorMessage,
+            symbols = result.symbols.map { symbol ->
+                ExternalQrSymbol(
+                    payload = symbol.payload.copyOf(),
+                    quad = symbol.quad?.map { point -> point.copyOf() },
+                    errorType = symbol.errorType,
+                    errorMessage = symbol.errorMessage,
+                )
+            },
         )
     }
 
@@ -108,9 +115,6 @@ class ImageProxyChromaSampler(
         val fullY = cropTop.toDouble() + rawY
         if (fullX < 0.0 || fullY < 0.0) return false
 
-        // Chroma plane coordinates are half-resolution. Keeping fractional
-        // positions lets odd luma coordinates blend adjacent chroma samples rather
-        // than snapping to one arbitrary 2x2 block.
         val chromaX = fullX * 0.5
         val chromaY = fullY * 0.5
         val u = uPlane.sampleBilinear(chromaX, chromaY) ?: return false
@@ -135,21 +139,15 @@ class ImageProxyChromaSampler(
 
         fun sampleBilinear(x: Double, y: Double): Int? {
             if (!x.isFinite() || !y.isFinite() || x < 0.0 || y < 0.0) return null
-
             val x0 = floor(x).toInt()
             val y0 = floor(y).toInt()
             val fx = x - x0
             val fy = y - y0
-
             val v00 = get(x0, y0) ?: return null
             val v10 = get(x0 + 1, y0)
             val v01 = get(x0, y0 + 1)
             val v11 = get(x0 + 1, y0 + 1)
-
-            // At the final chroma row/column a neighbor can legitimately be
-            // outside the plane. Fall back to the nearest valid sample there.
             if (v10 == null || v01 == null || v11 == null) return v00
-
             val top = v00 * (1.0 - fx) + v10 * fx
             val bottom = v01 * (1.0 - fx) + v11 * fx
             return (top * (1.0 - fy) + bottom * fy).roundToInt().coerceIn(0, 255)
