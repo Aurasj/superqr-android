@@ -28,8 +28,13 @@ enum class Phase1AnalysisPath { GRID, QR }
  * recovering. Cold carrier-like hypotheses may still keep unlocked GRID search
  * consecutive, but callers can explicitly prevent them from extending a lock.
  * Likewise, a QR quadrangle without a decoded payload is still real QR
- * acquisition evidence; switching to GRID on the next frame starves dense
- * V27/V40 detection and makes the UI flicker between QR and search states.
+ * acquisition evidence during ordinary acquisition.
+ *
+ * A validated DONE envelope is different: it starts a neutral run-boundary
+ * search. The just-completed PHY remains selected while DONE is still visible;
+ * after the surface changes, misses alternate GRID/QR regardless of weak
+ * geometric evidence until a new valid envelope locks the next run. This avoids
+ * assuming that the next campaign run must use the opposite PHY.
  */
 class Phase1AcquisitionScheduler(
     private val unlockAfterMisses: Int = 2,
@@ -40,6 +45,7 @@ class Phase1AcquisitionScheduler(
     private var misses = 0
     private var transitionProbePath: Phase1AnalysisPath? = null
     private var transitionProbesRemaining = 0
+    private var boundarySearch = false
 
     val path: Phase1AnalysisPath
         get() = lockedPath ?: nextSearchPath
@@ -57,21 +63,22 @@ class Phase1AcquisitionScheduler(
         misses = 0
         transitionProbePath = null
         transitionProbesRemaining = 0
+        boundarySearch = false
     }
 
     /**
-     * A validated DONE envelope is a hard campaign boundary. Release the current
-     * PHY lock immediately and give the opposite PHY a bounded probe window so a
-     * GRID -> QR (or QR -> GRID) campaign transition cannot be starved by stale
-     * geometric evidence from the completed run.
+     * Mark a validated campaign boundary without guessing the next run's PHY.
+     * Keep the completed path selected while its DONE surface is still visible.
+     * Once that surface changes and the current path misses, boundary search
+     * alternates paths until a new valid envelope calls [locked].
      */
     fun completed(path: Phase1AnalysisPath) {
         lockedPath = null
-        val opposite = opposite(path)
-        nextSearchPath = opposite
+        nextSearchPath = path
         misses = 0
-        transitionProbePath = opposite
-        transitionProbesRemaining = transitionProbeFrames.coerceAtLeast(1)
+        transitionProbePath = null
+        transitionProbesRemaining = 0
+        boundarySearch = true
     }
 
     fun missed(
@@ -108,6 +115,17 @@ class Phase1AcquisitionScheduler(
             return
         }
 
+        // At a validated run boundary, weak geometry from the old/new surface
+        // must not pin either PHY. Alternate on every miss until a new run
+        // produces a valid envelope and locks its real path.
+        if (boundarySearch) {
+            misses = 0
+            transitionProbePath = null
+            transitionProbesRemaining = 0
+            nextSearchPath = opposite(path)
+            return
+        }
+
         misses = 0
         if (transitionProbePath == path && transitionProbesRemaining > 0) {
             transitionProbesRemaining--
@@ -127,6 +145,7 @@ class Phase1AcquisitionScheduler(
         misses = 0
         transitionProbePath = null
         transitionProbesRemaining = 0
+        boundarySearch = false
     }
 
     private fun opposite(path: Phase1AnalysisPath): Phase1AnalysisPath =
