@@ -116,7 +116,14 @@ class VisionEngine(private val manifest: Phase1Manifest) {
         val h = acquisition.canonicalToImageHomography
 
         if (h == null) {
-            scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = acquisition.carrierLike)
+            scheduler.missed(
+                Phase1AnalysisPath.GRID,
+                carrierCandidate = acquisition.carrierLike,
+                // Cold carrier-like hypotheses are useful while searching but
+                // must not keep a completed/old GRID lock alive indefinitely.
+                // Only the acquirer's bounded TRACK_HOLD may retain that lock.
+                retainLockedPath = acquisition.source == "V7_TRACK_HOLD",
+            )
             return VisionResult(
                 path = Phase1AnalysisPath.GRID,
                 trackingState = Phase1TrackingState.fromSource(acquisition.source),
@@ -139,7 +146,11 @@ class VisionEngine(private val manifest: Phase1Manifest) {
         val profile = envelope?.let { manifest.profile(it.profileId) }
 
         if (envelope != null && profile is Phase1Profile.Grid) {
-            scheduler.locked(Phase1AnalysisPath.GRID)
+            if (envelope.state == V7LabRunState.DONE) {
+                scheduler.completed(Phase1AnalysisPath.GRID)
+            } else {
+                scheduler.locked(Phase1AnalysisPath.GRID)
+            }
 
             if (envelope.state == V7LabRunState.RUNNING) {
                 if (activeGridId != profile.id) {
@@ -247,7 +258,11 @@ class VisionEngine(private val manifest: Phase1Manifest) {
         val profile = envelope?.let { manifest.profile(it.profileId) }
 
         if (envelope != null && profile is Phase1Profile.Qr) {
-            scheduler.locked(Phase1AnalysisPath.QR)
+            if (envelope.state == V7LabRunState.DONE) {
+                scheduler.completed(Phase1AnalysisPath.QR)
+            } else {
+                scheduler.locked(Phase1AnalysisPath.QR)
+            }
             return VisionResult(
                 path = Phase1AnalysisPath.QR,
                 trackingState = Phase1TrackingState.TRACKING,
