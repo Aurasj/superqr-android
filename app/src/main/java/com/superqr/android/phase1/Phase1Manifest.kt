@@ -22,6 +22,8 @@ sealed interface Phase1Profile {
         override val id: Int,
         override val name: String,
         val version: Int,
+        val errorCorrection: String,
+        val eccId: Int,
         val frameBytes: Int,
         override val usefulBytes: Int,
         val targetFps: Double,
@@ -38,6 +40,8 @@ data class Phase1Manifest(
     fun profile(id: Int): Phase1Profile? = profiles.firstOrNull { it.id == id }
 
     companion object {
+        private val ECC_IDS = mapOf("L" to 1, "M" to 2, "Q" to 3, "H" to 4)
+
         fun load(context: Context): Phase1Manifest {
             val text = context.assets.open("v7_phy_selection/phase1_manifest.json")
                 .bufferedReader().use { it.readText() }
@@ -88,19 +92,18 @@ data class Phase1Manifest(
                 profiles += qrProfile(profiles.size, qr.getJSONObject(index))
             }
 
-            val capacityMapText = context.assets.open("v7_phy_selection/qr_capacity_map.json")
-                .bufferedReader().use { it.readText() }
-            val capacityMap = JSONObject(capacityMapText)
-            require(capacityMap.getString("status") == "LAB_ONLY_NOT_A_V7_WIRE_CONTRACT")
-            require(capacityMap.getInt("schema_version") >= 1)
-            require(capacityMap.getInt("base_profile_count") == profiles.size)
-            val extensionProfiles = capacityMap.getJSONArray("profiles")
-            for (index in 0 until extensionProfiles.length()) {
-                val p = extensionProfiles.getJSONObject(index)
-                require(p.getInt("profile_id") == profiles.size)
-                profiles += qrProfile(profiles.size, p)
-            }
+            appendQrExtension(
+                context = context,
+                asset = "v7_phy_selection/qr_capacity_map.json",
+                profiles = profiles,
+            )
+            appendQrExtension(
+                context = context,
+                asset = "v7_phy_selection/qr_ecc_map.json",
+                profiles = profiles,
+            )
 
+            require(profiles.map { it.id }.distinct().size == profiles.size)
             val dwells = json.getJSONArray("dwell_epoch_candidates")
             return Phase1Manifest(
                 profiles = profiles,
@@ -111,15 +114,42 @@ data class Phase1Manifest(
             )
         }
 
-        private fun qrProfile(id: Int, p: JSONObject): Phase1Profile.Qr =
-            Phase1Profile.Qr(
+        private fun appendQrExtension(
+            context: Context,
+            asset: String,
+            profiles: MutableList<Phase1Profile>,
+        ) {
+            val text = context.assets.open(asset).bufferedReader().use { it.readText() }
+            val extension = JSONObject(text)
+            require(extension.getString("status") == "LAB_ONLY_NOT_A_V7_WIRE_CONTRACT")
+            require(extension.getInt("schema_version") >= 1)
+            require(extension.getInt("base_profile_count") == profiles.size)
+            val extensionProfiles = extension.getJSONArray("profiles")
+            for (index in 0 until extensionProfiles.length()) {
+                val p = extensionProfiles.getJSONObject(index)
+                require(p.getInt("profile_id") == profiles.size)
+                profiles += qrProfile(profiles.size, p)
+            }
+        }
+
+        private fun qrProfile(id: Int, p: JSONObject): Phase1Profile.Qr {
+            val errorCorrection = p.getString("error_correction").uppercase()
+            val expectedEccId = requireNotNull(ECC_IDS[errorCorrection]) {
+                "unsupported QR ECC $errorCorrection"
+            }
+            val eccId = if (p.has("ecc_id")) p.getInt("ecc_id") else expectedEccId
+            require(eccId == expectedEccId)
+            return Phase1Profile.Qr(
                 id = id,
                 name = p.getString("name"),
                 version = p.getInt("version"),
+                errorCorrection = errorCorrection,
+                eccId = eccId,
                 frameBytes = p.getInt("frame_bytes"),
                 usefulBytes = p.getInt("payload_bytes"),
                 targetFps = p.getDouble("target_fps"),
             )
+        }
 
         private fun JSONArray.toDoubleArray(): DoubleArray =
             DoubleArray(length()) { index -> getDouble(index) }
