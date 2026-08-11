@@ -3,6 +3,13 @@ package com.superqr.android.camera
 import androidx.camera.core.ImageProxy
 import zxingcpp.BarcodeReader
 
+data class CameraQrSymbol(
+    val payload: ByteArray,
+    val quad: List<DoubleArray>? = null,
+    val errorType: String? = null,
+    val errorMessage: String? = null,
+)
+
 data class CameraQrDecodeResult(
     val payload: ByteArray,
     val elapsedMs: Double,
@@ -10,6 +17,7 @@ data class CameraQrDecodeResult(
     val quad: List<DoubleArray>? = null,
     val errorType: String? = null,
     val errorMessage: String? = null,
+    val symbols: List<CameraQrSymbol> = emptyList(),
 )
 
 /**
@@ -25,11 +33,8 @@ fun interface CameraQrDecoder {
 /**
  * ZXing-C++ adapter over the original CameraX Y plane.
  *
- * The official Android wrapper reads ImageProxy plane 0 directly, preserving the
- * row stride/crop/rotation metadata without an RGB bitmap or another full-frame
- * copy. The returned Position belongs to that same rotation-normalized view, so
- * payload and presentation geometry come from one native detection. SuperQR
- * validation remains outside this camera adapter.
+ * Phase 0 advanced PHY uses at most four spatial QR lanes. One native read returns
+ * all visible symbols; legacy callers keep receiving the first successful symbol.
  */
 class ZxingCppCameraQrReader {
     private val reader = BarcodeReader(
@@ -40,7 +45,7 @@ class ZxingCppCameraQrReader {
             tryInvert = false,
             tryDownscale = false,
             tryDenoise = true,
-            maxNumberOfSymbols = 1,
+            maxNumberOfSymbols = 4,
             returnErrors = true,
             textMode = BarcodeReader.TextMode.PLAIN,
         )
@@ -68,28 +73,32 @@ class ZxingCppCameraQrReader {
         return try {
             val results = reader.read(image)
             val qrResults = results.filter { it.format == BarcodeReader.Format.QR_CODE }
-            val success = qrResults.firstOrNull { result ->
-                val bytes = result.bytes
-                result.error == null && bytes != null && bytes.isNotEmpty()
-            }
-            val geometryResult = success ?: qrResults.firstOrNull()
-            val successBytes = success?.bytes
-            val observedQuad = geometryResult?.position?.let { position ->
-                listOf(
-                    doubleArrayOf(position.topLeft.x.toDouble(), position.topLeft.y.toDouble()),
-                    doubleArrayOf(position.topRight.x.toDouble(), position.topRight.y.toDouble()),
-                    doubleArrayOf(position.bottomRight.x.toDouble(), position.bottomRight.y.toDouble()),
-                    doubleArrayOf(position.bottomLeft.x.toDouble(), position.bottomLeft.y.toDouble()),
+            val symbols = qrResults.map { result ->
+                val quad = result.position?.let { position ->
+                    listOf(
+                        doubleArrayOf(position.topLeft.x.toDouble(), position.topLeft.y.toDouble()),
+                        doubleArrayOf(position.topRight.x.toDouble(), position.topRight.y.toDouble()),
+                        doubleArrayOf(position.bottomRight.x.toDouble(), position.bottomRight.y.toDouble()),
+                        doubleArrayOf(position.bottomLeft.x.toDouble(), position.bottomLeft.y.toDouble()),
+                    )
+                }
+                CameraQrSymbol(
+                    payload = result.bytes?.copyOf() ?: ByteArray(0),
+                    quad = quad,
+                    errorType = result.error?.type?.name,
+                    errorMessage = result.error?.message,
                 )
             }
-            val firstError = qrResults.firstOrNull { it.error != null }?.error
+            val success = symbols.firstOrNull { it.payload.isNotEmpty() && it.errorType == null }
+            val geometry = success ?: symbols.firstOrNull()
             CameraQrDecodeResult(
-                payload = successBytes?.copyOf() ?: ByteArray(0),
+                payload = success?.payload?.copyOf() ?: ByteArray(0),
                 elapsedMs = elapsedMs(startedNs),
                 resultCount = results.size,
-                quad = observedQuad,
-                errorType = firstError?.type?.name,
-                errorMessage = firstError?.message,
+                quad = geometry?.quad?.map { it.copyOf() },
+                errorType = geometry?.errorType,
+                errorMessage = geometry?.errorMessage,
+                symbols = symbols,
             )
         } catch (t: Throwable) {
             CameraQrDecodeResult(
