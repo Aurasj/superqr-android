@@ -24,12 +24,12 @@ enum class Phase1AnalysisPath { GRID, QR }
  * path receives consecutive frames so acquisition can stabilize before we try
  * the opposite PHY.
  *
- * A carrier-like miss while GRID is already locked is deliberately NOT treated
- * as a lost lock. V7CarrierAcquirer uses these frames for bounded TRACK_HOLD /
- * optical-flow recovery during phone motion or scale change. Likewise, a QR
- * quadrangle without a decoded payload is still real QR acquisition evidence;
- * switching to GRID on the next frame starves dense V27/V40 detection and makes
- * the UI flicker between QR and search states.
+ * A bounded GRID TRACK_HOLD may retain an existing GRID lock while geometry is
+ * recovering. Cold carrier-like hypotheses may still keep unlocked GRID search
+ * consecutive, but callers can explicitly prevent them from extending a lock.
+ * Likewise, a QR quadrangle without a decoded payload is still real QR
+ * acquisition evidence; switching to GRID on the next frame starves dense
+ * V27/V40 detection and makes the UI flicker between QR and search states.
  */
 class Phase1AcquisitionScheduler(
     private val unlockAfterMisses: Int = 2,
@@ -59,10 +59,26 @@ class Phase1AcquisitionScheduler(
         transitionProbesRemaining = 0
     }
 
+    /**
+     * A validated DONE envelope is a hard campaign boundary. Release the current
+     * PHY lock immediately and give the opposite PHY a bounded probe window so a
+     * GRID -> QR (or QR -> GRID) campaign transition cannot be starved by stale
+     * geometric evidence from the completed run.
+     */
+    fun completed(path: Phase1AnalysisPath) {
+        lockedPath = null
+        val opposite = opposite(path)
+        nextSearchPath = opposite
+        misses = 0
+        transitionProbePath = opposite
+        transitionProbesRemaining = transitionProbeFrames.coerceAtLeast(1)
+    }
+
     fun missed(
         path: Phase1AnalysisPath,
         carrierCandidate: Boolean = false,
         qrCandidate: Boolean = false,
+        retainLockedPath: Boolean? = null,
     ) {
         val hasPathEvidence = when (path) {
             Phase1AnalysisPath.GRID -> carrierCandidate
@@ -70,10 +86,11 @@ class Phase1AcquisitionScheduler(
         }
 
         if (lockedPath == path) {
-            // Keep feeding consecutive frames while the currently selected PHY
-            // still has real geometric evidence. This is TRACK_HOLD for GRID and
-            // a native QR quadrangle for QR.
-            if (hasPathEvidence) {
+            // Locked-path retention is stricter than unlocked acquisition. GRID
+            // callers use this override so only real TRACK_HOLD evidence can
+            // extend a previous GRID lock; cold carrier-like hypotheses cannot.
+            val shouldRetainLock = retainLockedPath ?: hasPathEvidence
+            if (shouldRetainLock) {
                 misses = 0
                 nextSearchPath = path
                 return
