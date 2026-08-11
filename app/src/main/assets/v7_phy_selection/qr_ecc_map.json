@@ -124,7 +124,7 @@
       "frame_zero": {
         "first_20_hex": "535150312803000000002A0000007F06D701010D",
         "last_20_hex": "DF94B140A05B52D0ABA1575834BFCF7AA3F37672",
-        "sha256": "d5b63f1856e6b7c779e7ff40b306e8c7a8cbee79a2a3b76bdc5c12050e286ea"
+        "sha256": "d5b63f1856e6b7c779e7ff40b306e8c7a8cbee79a2a3b76bdc5c12050e286ea5"
       }
     }
   ],
