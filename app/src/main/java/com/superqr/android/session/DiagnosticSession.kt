@@ -3,6 +3,9 @@ package com.superqr.android.session
 import android.content.Context
 import com.superqr.android.camera.AnalysisRateAccumulator
 import com.superqr.android.camera.CameraFrame
+import com.superqr.android.phase1.AdvancedObservationRecorder
+import com.superqr.android.phase1.AdvancedPhyEngine
+import com.superqr.android.phase1.AdvancedPhyManifest
 import com.superqr.android.phase1.Phase1AnalysisPath
 import com.superqr.android.phase1.Phase1AnalysisPolicy
 import com.superqr.android.phase1.Phase1Manifest
@@ -12,6 +15,7 @@ import com.superqr.android.phase1.Phase1RunSnapshot
 import com.superqr.android.phase1.Phase1TrackingState
 import com.superqr.android.phase1.VisionEngine
 import com.superqr.android.phase1.VisionResult
+import com.superqr.android.vision.v7_capacity_lab.V7LabRunState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -76,7 +80,10 @@ class DiagnosticSession(private val context: Context) {
 
     private val manifest by lazy { Phase1Manifest.load(context) }
     private val engine by lazy { VisionEngine(manifest) }
+    private val advancedManifest by lazy { AdvancedPhyManifest.load(context) }
+    private var advancedEngine: AdvancedPhyEngine? = null
     private val recorder = Phase1ObservationRecorder()
+    private val advancedRecorder = AdvancedObservationRecorder()
     private val analysisRate = AnalysisRateAccumulator(64)
     private val frameGate = SessionFrameGate()
     private val capturedQrFrames = ArrayList<CapturedQrFrame>(MAX_CAPTURED_QR_FRAMES)
@@ -85,6 +92,12 @@ class DiagnosticSession(private val context: Context) {
     private var wasLost = false
     private var observedFrames = 0
     private var sessionActive = false
+
+    private fun advancedEngine(): AdvancedPhyEngine {
+        val existing = advancedEngine
+        if (existing != null) return existing
+        return AdvancedPhyEngine(advancedManifest, manifest.carrierSpec).also { advancedEngine = it }
+    }
 
     fun startSession() {
         resetForNewSession()
@@ -95,16 +108,10 @@ class DiagnosticSession(private val context: Context) {
 
     fun stopSession() {
         if (!sessionActive) return
-
-        // stop() synchronizes with any result commit currently in progress and bumps
-        // the epoch so analyses that started before STOP can no longer commit afterward.
         frameGate.stop()
         sessionActive = false
 
-        // Every explicit Start/Stop cycle must leave a shareable diagnostic artifact,
-        // even when no QR/carrier was ever confirmed. COMPLETE remains terminal until
-        // the operator explicitly starts a new session.
-        if (!recorder.hasLines) {
+        if (!recorder.hasLines && !advancedRecorder.hasLines) {
             recorder.recordFailure(
                 reason = "SESSION_STOP_NO_DETECTION",
                 completedNs = System.nanoTime(),
@@ -123,7 +130,7 @@ class DiagnosticSession(private val context: Context) {
 
         _sessionState.value = _sessionState.value.copy(
             phase = SessionPhase.COMPLETE,
-            hasObservations = recorder.hasLines,
+            hasObservations = recorder.hasLines || advancedRecorder.hasLines,
         )
     }
 
@@ -135,7 +142,10 @@ class DiagnosticSession(private val context: Context) {
 
     private fun resetForNewSession() {
         engine.reset()
+        advancedEngine?.close()
+        advancedEngine = null
         recorder.reset()
+        advancedRecorder.reset()
         analysisRate.reset()
         capturedQrFrames.clear()
         lastQrCaptureSequence = Int.MIN_VALUE / 2
@@ -160,6 +170,72 @@ class DiagnosticSession(private val context: Context) {
             return
         }
 
+        // Advanced SQA1 is attempted first. The camera QR adapter caches its native
+        // read, so falling back to the canonical VisionEngine does not decode twice.
+        val advanced = try {
+            advancedEngine().analyze(
+                frame.lumaBytes,
+                frame.width,
+                frame.height,
+                frame.chromaReader,
+                frame.arrivalNs,
+            )
+        } catch (t: Throwable) {
+            frameGate.commitIfCurrent(frameToken) {
+                updateState {
+                    it.copy(
+                        error = "AdvancedPhy ${t::class.java.simpleName}: ${t.message}",
+                        sourceTransform = frame.sourceTransform,
+                    )
+                }
+            }
+            return
+        }
+
+        if (advanced != null) {
+            val completedNs = System.nanoTime()
+            frameGate.commitIfCurrent(frameToken) {
+                analysisRate.recordCompletion(completedNs)
+                val analysisFps = analysisRate.computeFps(completedNs)
+                observedFrames++
+                advancedRecorder.record(
+                    campaignId = recorder.campaignId,
+                    result = advanced,
+                    completedNs = completedNs,
+                    cameraFps = frame.cameraFps,
+                    captureWidth = frame.width,
+                    captureHeight = frame.height,
+                )
+                val observedProgress = CampaignProgress(
+                    runToken = advanced.envelope.runToken,
+                    state = advanced.envelope.state.name,
+                    frameIndex = advanced.envelope.frameIndex,
+                    frameCount = advanced.envelope.frameCount,
+                )
+                updateState {
+                    it.copy(
+                        phase = if (advanced.envelope.state == V7LabRunState.RUNNING) {
+                            SessionPhase.RECEIVING
+                        } else {
+                            SessionPhase.QR_LOCKED
+                        },
+                        trackingState = Phase1TrackingState.TRACKING,
+                        sourceTransform = frame.sourceTransform,
+                        profileName = advanced.profile.name,
+                        cameraFps = frame.cameraFps,
+                        analysisFps = analysisFps,
+                        pipelineMs = advanced.pipelineMs,
+                        analyzedFrames = observedFrames,
+                        hasObservations = advancedRecorder.hasLines || recorder.hasLines,
+                        campaignId = recorder.campaignId,
+                        error = advanced.failure,
+                        campaignProgress = it.campaignProgress.stabilizedWith(observedProgress),
+                    )
+                }
+            }
+            return
+        }
+
         val result = try {
             engine.analyze(frame.lumaBytes, frame.width, frame.height, frame.chromaReader, frame.arrivalNs)
         } catch (t: Throwable) {
@@ -175,9 +251,6 @@ class DiagnosticSession(private val context: Context) {
         }
 
         val completedNs = System.nanoTime()
-
-        // All mutable session/recorder state is committed under the same gate token.
-        // If STOP happened while vision was analyzing this frame, this block is skipped.
         frameGate.commitIfCurrent(frameToken) {
             analysisRate.recordCompletion(completedNs)
             val analysisFps = analysisRate.computeFps(completedNs)
@@ -210,8 +283,6 @@ class DiagnosticSession(private val context: Context) {
                 )
             }
 
-            // READY/DONE GRID frames are valid synchronization evidence just like
-            // READY/DONE QR frames. They update sender/run state but remain unscored.
             var validNonScoredGrid = false
             if (result.path == Phase1AnalysisPath.GRID && result.gridObservation == null) {
                 val envelope = result.envelope
@@ -229,8 +300,6 @@ class DiagnosticSession(private val context: Context) {
                 }
             }
 
-            // READY/DONE QR frames are valid lock/synchronization evidence, but the
-            // Phase 1 contract scores payload only while the sender is RUNNING.
             if (result.path == Phase1AnalysisPath.QR && result.qrObservation == null && result.qrResult?.valid == true) {
                 val profile = result.qrProfile
                 val envelope = result.envelope
@@ -301,7 +370,7 @@ class DiagnosticSession(private val context: Context) {
                     analysisFps = analysisFps,
                     pipelineMs = result.pipelineMs,
                     analyzedFrames = observedFrames,
-                    hasObservations = recorder.hasLines,
+                    hasObservations = recorder.hasLines || advancedRecorder.hasLines,
                     campaignId = recorder.campaignId,
                     error = result.qrResult?.failure,
                     campaignProgress = progress,
@@ -330,7 +399,6 @@ class DiagnosticSession(private val context: Context) {
             schedulerState = result.schedulerState,
             quad = quad.map { it.copyOf() },
             diagnostics = LinkedHashMap(qr.diagnostics),
-            // Event-selected exact normalized analyzer luma. No normal-frame copy.
             luma = frame.lumaBytes.copyOf(),
         )
         lastQrCaptureSequence = sequence
@@ -372,7 +440,7 @@ class DiagnosticSession(private val context: Context) {
         wasLost = false
         if (!acquisition.acquired) return SessionPhase.SEARCHING
         if (result.envelope == null) return SessionPhase.GRID_DETECTED
-        return if (result.envelope.state == com.superqr.android.vision.v7_capacity_lab.V7LabRunState.RUNNING) {
+        return if (result.envelope.state == V7LabRunState.RUNNING) {
             SessionPhase.RECEIVING
         } else SessionPhase.GRID_LOCKED
     }
@@ -386,19 +454,15 @@ class DiagnosticSession(private val context: Context) {
         if (qr.valid) {
             wasTracking = true
             wasLost = false
-            return if (result.envelope?.state == com.superqr.android.vision.v7_capacity_lab.V7LabRunState.RUNNING) {
+            return if (result.envelope?.state == V7LabRunState.RUNNING) {
                 SessionPhase.RECEIVING
             } else SessionPhase.QR_LOCKED
         }
         if (qr.decoded || qr.quad != null) {
-            // qr.quad is emitted only by native QR detectors, not by the generic
-            // carrier contour path. It is therefore real QR detection even when
-            // payload decode fails on this exposure.
             wasTracking = true
             wasLost = false
             return SessionPhase.QR_DETECTED
         }
-
         wasTracking = false
         wasLost = false
         return SessionPhase.SEARCHING
@@ -407,17 +471,19 @@ class DiagnosticSession(private val context: Context) {
     fun snapshot(): Phase1RunSnapshot = recorder.snapshot()
 
     fun exportSession(): File? {
-        if (!recorder.hasLines && capturedQrFrames.isEmpty()) return null
+        if (!recorder.hasLines && !advancedRecorder.hasLines && capturedQrFrames.isEmpty()) return null
         val file = File(context.cacheDir, "superqr-phase1-${recorder.campaignId.take(8)}.zip")
         val state = _sessionState.value
         val snapshot = recorder.snapshot()
+        val advancedSnapshot = advancedRecorder.snapshot()
         val observationLines = recorder.currentObservationLines()
+        val advancedLines = advancedRecorder.currentLines()
         val captures = capturedQrFrames.toList()
 
         ZipOutputStream(file.outputStream().buffered()).use { zip ->
             val sessionJson = JSONObject()
                 .put("format", "superqr_phase0_diagnostic_bundle")
-                .put("schema_version", 1)
+                .put("schema_version", 2)
                 .put("campaign_id", recorder.campaignId)
                 .put("phase", state.phase.name)
                 .put("profile", state.profileName)
@@ -425,6 +491,8 @@ class DiagnosticSession(private val context: Context) {
                 .put("camera_fps", state.cameraFps)
                 .put("analysis_fps", state.analysisFps)
                 .put("pipeline_ms", state.pipelineMs)
+                .put("advanced_phy", advancedRecorder.hasLines)
+                .put("advanced_receiver_max_fps", 30.0)
                 .put("qr_forensic_frame_count", captures.size)
             zip.writeTextEntry("session.json", sessionJson.toString(2))
 
@@ -450,6 +518,31 @@ class DiagnosticSession(private val context: Context) {
 
             val observations = if (observationLines.isEmpty()) "" else observationLines.joinToString("\n", postfix = "\n")
             zip.writeTextEntry("observations.jsonl", observations)
+
+            if (advancedLines.isNotEmpty()) {
+                val advancedSummary = JSONObject()
+                    .put("profile", advancedSnapshot.profileName)
+                    .put("run_token", advancedSnapshot.runToken ?: JSONObject.NULL)
+                    .put("sender_state", advancedSnapshot.senderState)
+                    .put("lane_count", advancedSnapshot.laneCount)
+                    .put("frame_count", advancedSnapshot.frameCount)
+                    .put("observations", advancedSnapshot.observations)
+                    .put("unique_lane_frames", advancedSnapshot.uniqueLaneFrames)
+                    .put("innovative_bytes", advancedSnapshot.innovativeBytes)
+                    .put("elapsed_seconds", advancedSnapshot.elapsedSeconds)
+                    .put("goodput_kib_s", advancedSnapshot.goodputKibS)
+                    .put("goodput_mbps", advancedSnapshot.goodputKibS * 1024.0 * 8.0 / 1_000_000.0)
+                    .put("bit_error_rate", advancedSnapshot.bitErrorRate)
+                    .put("erasure_rate", advancedSnapshot.erasureRate)
+                    .put("decoded_qr_lanes_last_frame", advancedSnapshot.decodedQrLanesLastFrame)
+                    .put("receiver_max_fps", 30.0)
+                    .put("last_failure", advancedSnapshot.lastFailure ?: JSONObject.NULL)
+                zip.writeTextEntry("advanced_summary.json", advancedSummary.toString(2))
+                zip.writeTextEntry(
+                    "advanced_observations.jsonl",
+                    advancedLines.joinToString("\n", postfix = "\n"),
+                )
+            }
 
             captures.forEachIndexed { index, capture ->
                 val stem = "frames/qr_fail_%03d".format(index + 1)
@@ -526,6 +619,8 @@ class DiagnosticSession(private val context: Context) {
         frameGate.stop()
         sessionActive = false
         capturedQrFrames.clear()
+        advancedEngine?.close()
+        advancedEngine = null
         engine.close()
     }
 
