@@ -27,12 +27,12 @@ data class AdvancedRunSnapshot(
 /** Counts innovation by (lane, frame), never by display epoch alone. */
 class AdvancedObservationRecorder {
     private val lines = ArrayList<String>(8192)
-    private val seen = BooleanArray(4 * 256)
+    private var seen = BooleanArray(0)
     private var profileName = "NONE"
     private var runToken: Int? = null
     private var senderState = "UNKNOWN"
     private var laneCount = 0
-    private var frameCount = 256
+    private var frameCount = 0
     private var observations = 0
     private var uniqueLaneFrames = 0
     private var innovativeBytes = 0L
@@ -71,6 +71,9 @@ class AdvancedObservationRecorder {
             runToken = envelope.runToken
             laneCount = result.profile.laneCount
             frameCount = envelope.frameCount
+            require(laneCount > 0) { "advanced lane count must be positive" }
+            require(frameCount > 0) { "advanced frame count must be positive" }
+            seen = BooleanArray(laneCount * frameCount)
         }
         senderState = envelope.state.name
         decodedQrLanesLastFrame = result.decodedQrLanes
@@ -83,8 +86,10 @@ class AdvancedObservationRecorder {
             observedBits += observation.observedBits
             bitErrors += observation.bitErrors
             erasedBits += observation.erasedBits
-            val key = observation.laneId * 256 + observation.frameIndex
-            val novel = observation.postFecValid && key in seen.indices && !seen[key]
+            val laneValid = observation.laneId in 0 until laneCount
+            val frameValid = observation.frameIndex in 0 until frameCount
+            val key = if (laneValid && frameValid) observation.laneId * frameCount + observation.frameIndex else -1
+            val novel = observation.postFecValid && key >= 0 && !seen[key]
             val useful = if (novel) observation.usefulBytes else 0
             if (novel) {
                 seen[key] = true
@@ -151,9 +156,9 @@ class AdvancedObservationRecorder {
     fun currentLines(): List<String> = lines.toList()
 
     private fun resetRun() {
-        seen.fill(false)
+        seen = BooleanArray(0)
         laneCount = 0
-        frameCount = 256
+        frameCount = 0
         observations = 0
         uniqueLaneFrames = 0
         innovativeBytes = 0L
