@@ -1,0 +1,104 @@
+{
+  "artifact": "v7_phase0_qr_capacity_cadence_map",
+  "schema_version": 1,
+  "status": "LAB_ONLY_NOT_A_V7_WIRE_CONTRACT",
+  "base_profile_count": 7,
+  "campaign": {
+    "profile_order": [
+      "qr_v27_l_safe",
+      "qr_v30_l_map",
+      "qr_v33_l_map",
+      "qr_v36_l_map",
+      "qr_v40_l_ceiling"
+    ],
+    "fps_candidates": [
+      20.0,
+      24.0,
+      30.0,
+      36.0,
+      40.0,
+      48.0,
+      60.0
+    ],
+    "stability_control": {
+      "profile": "qr_v27_l_safe",
+      "target_fps": 24.0
+    },
+    "interleave_control_between_profile_blocks": true,
+    "run_count": 39
+  },
+  "profiles": [
+    {
+      "name": "qr_v30_l_map",
+      "profile_id": 7,
+      "version": 30,
+      "error_correction": "L",
+      "mask_pattern": 4,
+      "frame_bytes": 1732,
+      "header_bytes": 30,
+      "target_fps": 30.0,
+      "display_size_px": 900,
+      "module_count": 137,
+      "quiet_zone_modules": 4,
+      "purpose": "Intermediate QR capacity control",
+      "payload_bytes": 1702,
+      "total_modules": 145,
+      "integer_module_scale_px": 6,
+      "rendered_size_px": 870,
+      "pre_fountain_payload_kib_s": 49.86328125,
+      "frame_zero": {
+        "first_20_hex": "535150311E01000000002A000000C406D7010107",
+        "last_20_hex": "D8A2915CD939D08F3B3C7064BE1419F5A3DDCA84",
+        "sha256": "8a3913ea3b9b7d2cfb1885b718371bdc2e5b35879cc23ed3836ff61a1fafa748"
+      }
+    },
+    {
+      "name": "qr_v33_l_map",
+      "profile_id": 8,
+      "version": 33,
+      "error_correction": "L",
+      "mask_pattern": 4,
+      "frame_bytes": 2068,
+      "header_bytes": 30,
+      "target_fps": 30.0,
+      "display_size_px": 900,
+      "module_count": 149,
+      "quiet_zone_modules": 4,
+      "purpose": "Intermediate-high QR capacity control",
+      "payload_bytes": 2038,
+      "total_modules": 157,
+      "integer_module_scale_px": 5,
+      "rendered_size_px": 785,
+      "pre_fountain_payload_kib_s": 59.70703125,
+      "frame_zero": {
+        "first_20_hex": "535150312101000000002A0000001408D7010108",
+        "last_20_hex": "DBB3A94580C100152DBA1CB8F5E72652B12026DE",
+        "sha256": "71a052f2add226b9a1feab4f2411d8e12d25635a09a0a467c17b536e196f782e"
+      }
+    },
+    {
+      "name": "qr_v36_l_map",
+      "profile_id": 9,
+      "version": 36,
+      "error_correction": "L",
+      "mask_pattern": 4,
+      "frame_bytes": 2431,
+      "header_bytes": 30,
+      "target_fps": 30.0,
+      "display_size_px": 900,
+      "module_count": 161,
+      "quiet_zone_modules": 4,
+      "purpose": "High-density QR capacity control",
+      "payload_bytes": 2401,
+      "total_modules": 169,
+      "integer_module_scale_px": 5,
+      "rendered_size_px": 845,
+      "pre_fountain_payload_kib_s": 70.341796875,
+      "frame_zero": {
+        "first_20_hex": "535150312401000000002A0000007F09D7010109",
+        "last_20_hex": "5A5EE1DE418F88F9685D70C02AB1F1DFE171C227",
+        "sha256": "cb13402e743b0d548e3a648904f6206a51fe94ce4a532d6ae7fefeb7b4ac7c5b"
+      }
+    }
+  ]
+}
