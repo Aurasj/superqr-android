@@ -85,15 +85,20 @@ data class Phase1Manifest(
 
             val qr = json.getJSONArray("qr_controls")
             for (index in 0 until qr.length()) {
-                val p = qr.getJSONObject(index)
-                profiles += Phase1Profile.Qr(
-                    id = profiles.size,
-                    name = p.getString("name"),
-                    version = p.getInt("version"),
-                    frameBytes = p.getInt("frame_bytes"),
-                    usefulBytes = p.getInt("payload_bytes"),
-                    targetFps = p.getDouble("target_fps"),
-                )
+                profiles += qrProfile(profiles.size, qr.getJSONObject(index))
+            }
+
+            val capacityMapText = context.assets.open("v7_phy_selection/qr_capacity_map.json")
+                .bufferedReader().use { it.readText() }
+            val capacityMap = JSONObject(capacityMapText)
+            require(capacityMap.getString("status") == "LAB_ONLY_NOT_A_V7_WIRE_CONTRACT")
+            require(capacityMap.getInt("schema_version") >= 1)
+            require(capacityMap.getInt("base_profile_count") == profiles.size)
+            val extensionProfiles = capacityMap.getJSONArray("profiles")
+            for (index in 0 until extensionProfiles.length()) {
+                val p = extensionProfiles.getJSONObject(index)
+                require(p.getInt("profile_id") == profiles.size)
+                profiles += qrProfile(profiles.size, p)
             }
 
             val dwells = json.getJSONArray("dwell_epoch_candidates")
@@ -105,6 +110,16 @@ data class Phase1Manifest(
                 carrierSpec = carrierSpec,
             )
         }
+
+        private fun qrProfile(id: Int, p: JSONObject): Phase1Profile.Qr =
+            Phase1Profile.Qr(
+                id = id,
+                name = p.getString("name"),
+                version = p.getInt("version"),
+                frameBytes = p.getInt("frame_bytes"),
+                usefulBytes = p.getInt("payload_bytes"),
+                targetFps = p.getDouble("target_fps"),
+            )
 
         private fun JSONArray.toDoubleArray(): DoubleArray =
             DoubleArray(length()) { index -> getDouble(index) }
