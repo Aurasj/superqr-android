@@ -98,20 +98,52 @@ class Phase1AnalysisPolicyTest {
     }
 
     @Test
-    fun completedGridRunImmediatelyProbesQr() {
+    fun completedGridRunKeepsGridUntilTheSurfaceActuallyChanges() {
         val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
         scheduler.locked(Phase1AnalysisPath.GRID)
 
         scheduler.completed(Phase1AnalysisPath.GRID)
 
-        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
-        assertEquals("TRANSITION_QR_PROBE", scheduler.state)
-        scheduler.missed(Phase1AnalysisPath.QR)
-        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
-        scheduler.missed(Phase1AnalysisPath.QR)
-        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
-        scheduler.missed(Phase1AnalysisPath.QR)
         assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+        assertEquals("SEARCH_GRID", scheduler.state)
+    }
+
+    @Test
+    fun boundarySearchAlternatesDespiteWeakCandidateEvidence() {
+        val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
+        scheduler.locked(Phase1AnalysisPath.GRID)
+        scheduler.completed(Phase1AnalysisPath.GRID)
+
+        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.QR, qrCandidate = true)
+        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+    }
+
+    @Test
+    fun samePhyNextRunCanLockImmediatelyAtBoundary() {
+        val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
+        scheduler.locked(Phase1AnalysisPath.QR)
+        scheduler.completed(Phase1AnalysisPath.QR)
+
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        scheduler.locked(Phase1AnalysisPath.QR)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        assertEquals("QR_LOCKED", scheduler.state)
+    }
+
+    @Test
+    fun oppositePhyNextRunCanLockAfterOneBoundaryMiss() {
+        val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
+        scheduler.locked(Phase1AnalysisPath.GRID)
+        scheduler.completed(Phase1AnalysisPath.GRID)
+
+        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        scheduler.locked(Phase1AnalysisPath.QR)
+        assertEquals("QR_LOCKED", scheduler.state)
     }
 
     @Test
