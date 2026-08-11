@@ -13,6 +13,9 @@ import com.superqr.android.phase1.Phase1ObservationRecorder
 import com.superqr.android.phase1.Phase1Profile
 import com.superqr.android.phase1.Phase1RunSnapshot
 import com.superqr.android.phase1.Phase1TrackingState
+import com.superqr.android.phase1.ShapeGridEngine
+import com.superqr.android.phase1.ShapeGridManifest
+import com.superqr.android.phase1.ShapeGridObservationRecorder
 import com.superqr.android.phase1.VisionEngine
 import com.superqr.android.phase1.VisionResult
 import com.superqr.android.vision.v7_capacity_lab.V7LabRunState
@@ -81,9 +84,12 @@ class DiagnosticSession(private val context: Context) {
     private val manifest by lazy { Phase1Manifest.load(context) }
     private val engine by lazy { VisionEngine(manifest) }
     private val advancedManifest by lazy { AdvancedPhyManifest.load(context) }
+    private val shapeGridManifest by lazy { ShapeGridManifest.load(context) }
     private var advancedEngine: AdvancedPhyEngine? = null
+    private var shapeGridEngine: ShapeGridEngine? = null
     private val recorder = Phase1ObservationRecorder()
     private val advancedRecorder = AdvancedObservationRecorder()
+    private val shapeGridRecorder = ShapeGridObservationRecorder()
     private val analysisRate = AnalysisRateAccumulator(64)
     private val frameGate = SessionFrameGate()
     private val capturedQrFrames = ArrayList<CapturedQrFrame>(MAX_CAPTURED_QR_FRAMES)
@@ -99,6 +105,12 @@ class DiagnosticSession(private val context: Context) {
         return AdvancedPhyEngine(advancedManifest, manifest.carrierSpec).also { advancedEngine = it }
     }
 
+    private fun shapeGridEngine(): ShapeGridEngine {
+        val existing = shapeGridEngine
+        if (existing != null) return existing
+        return ShapeGridEngine(shapeGridManifest, manifest.carrierSpec).also { shapeGridEngine = it }
+    }
+
     fun startSession() {
         resetForNewSession()
         sessionActive = true
@@ -111,7 +123,7 @@ class DiagnosticSession(private val context: Context) {
         frameGate.stop()
         sessionActive = false
 
-        if (!recorder.hasLines && !advancedRecorder.hasLines) {
+        if (!recorder.hasLines && !advancedRecorder.hasLines && !shapeGridRecorder.hasLines) {
             recorder.recordFailure(
                 reason = "SESSION_STOP_NO_DETECTION",
                 completedNs = System.nanoTime(),
@@ -130,7 +142,7 @@ class DiagnosticSession(private val context: Context) {
 
         _sessionState.value = _sessionState.value.copy(
             phase = SessionPhase.COMPLETE,
-            hasObservations = recorder.hasLines || advancedRecorder.hasLines,
+            hasObservations = recorder.hasLines || advancedRecorder.hasLines || shapeGridRecorder.hasLines,
         )
     }
 
@@ -144,8 +156,11 @@ class DiagnosticSession(private val context: Context) {
         engine.reset()
         advancedEngine?.close()
         advancedEngine = null
+        shapeGridEngine?.close()
+        shapeGridEngine = null
         recorder.reset()
         advancedRecorder.reset()
+        shapeGridRecorder.reset()
         analysisRate.reset()
         capturedQrFrames.clear()
         lastQrCaptureSequence = Int.MIN_VALUE / 2
@@ -170,7 +185,73 @@ class DiagnosticSession(private val context: Context) {
             return
         }
 
-        // Advanced SQA1 is attempted first. The camera QR adapter caches its native
+        // ShapeGrid is attempted before QR-based advanced profiles. Its outer
+        // carrier sync cheaply identifies profile ids 18..20; a successful
+        // ShapeGrid run therefore never pays the native multi-QR decode cost.
+        val shapeGrid = try {
+            shapeGridEngine().analyze(
+                frame.lumaBytes,
+                frame.width,
+                frame.height,
+                frame.chromaReader,
+            )
+        } catch (t: Throwable) {
+            frameGate.commitIfCurrent(frameToken) {
+                updateState {
+                    it.copy(
+                        error = "ShapeGrid ${t::class.java.simpleName}: ${t.message}",
+                        sourceTransform = frame.sourceTransform,
+                    )
+                }
+            }
+            return
+        }
+
+        if (shapeGrid != null) {
+            val completedNs = System.nanoTime()
+            frameGate.commitIfCurrent(frameToken) {
+                analysisRate.recordCompletion(completedNs)
+                val analysisFps = analysisRate.computeFps(completedNs)
+                observedFrames++
+                shapeGridRecorder.record(
+                    campaignId = recorder.campaignId,
+                    result = shapeGrid,
+                    completedNs = completedNs,
+                    cameraFps = frame.cameraFps,
+                    captureWidth = frame.width,
+                    captureHeight = frame.height,
+                )
+                val observedProgress = CampaignProgress(
+                    runToken = shapeGrid.envelope.runToken,
+                    state = shapeGrid.envelope.state.name,
+                    frameIndex = shapeGrid.envelope.frameIndex,
+                    frameCount = shapeGrid.envelope.frameCount,
+                )
+                updateState {
+                    it.copy(
+                        phase = if (shapeGrid.envelope.state == V7LabRunState.RUNNING) {
+                            SessionPhase.RECEIVING
+                        } else {
+                            SessionPhase.GRID_LOCKED
+                        },
+                        trackingState = Phase1TrackingState.TRACKING,
+                        sourceTransform = frame.sourceTransform,
+                        profileName = shapeGrid.profile.name,
+                        cameraFps = frame.cameraFps,
+                        analysisFps = analysisFps,
+                        pipelineMs = shapeGrid.shapegridTotalMs,
+                        analyzedFrames = observedFrames,
+                        hasObservations = shapeGridRecorder.hasLines || advancedRecorder.hasLines || recorder.hasLines,
+                        campaignId = recorder.campaignId,
+                        error = shapeGrid.failure,
+                        campaignProgress = it.campaignProgress.stabilizedWith(observedProgress),
+                    )
+                }
+            }
+            return
+        }
+
+        // Advanced SQA1 is attempted next. The camera QR adapter caches its native
         // read, so falling back to the canonical VisionEngine does not decode twice.
         val advanced = try {
             advancedEngine().analyze(
@@ -226,7 +307,7 @@ class DiagnosticSession(private val context: Context) {
                         analysisFps = analysisFps,
                         pipelineMs = advanced.pipelineMs,
                         analyzedFrames = observedFrames,
-                        hasObservations = advancedRecorder.hasLines || recorder.hasLines,
+                        hasObservations = advancedRecorder.hasLines || recorder.hasLines || shapeGridRecorder.hasLines,
                         campaignId = recorder.campaignId,
                         error = advanced.failure,
                         campaignProgress = it.campaignProgress.stabilizedWith(observedProgress),
@@ -370,7 +451,7 @@ class DiagnosticSession(private val context: Context) {
                     analysisFps = analysisFps,
                     pipelineMs = result.pipelineMs,
                     analyzedFrames = observedFrames,
-                    hasObservations = recorder.hasLines || advancedRecorder.hasLines,
+                    hasObservations = recorder.hasLines || advancedRecorder.hasLines || shapeGridRecorder.hasLines,
                     campaignId = recorder.campaignId,
                     error = result.qrResult?.failure,
                     campaignProgress = progress,
@@ -471,19 +552,21 @@ class DiagnosticSession(private val context: Context) {
     fun snapshot(): Phase1RunSnapshot = recorder.snapshot()
 
     fun exportSession(): File? {
-        if (!recorder.hasLines && !advancedRecorder.hasLines && capturedQrFrames.isEmpty()) return null
+        if (!recorder.hasLines && !advancedRecorder.hasLines && !shapeGridRecorder.hasLines && capturedQrFrames.isEmpty()) return null
         val file = File(context.cacheDir, "superqr-phase1-${recorder.campaignId.take(8)}.zip")
         val state = _sessionState.value
         val snapshot = recorder.snapshot()
         val advancedSnapshot = advancedRecorder.snapshot()
+        val shapeGridSnapshot = shapeGridRecorder.snapshot()
         val observationLines = recorder.currentObservationLines()
         val advancedLines = advancedRecorder.currentLines()
+        val shapeGridLines = shapeGridRecorder.currentLines()
         val captures = capturedQrFrames.toList()
 
         ZipOutputStream(file.outputStream().buffered()).use { zip ->
             val sessionJson = JSONObject()
                 .put("format", "superqr_phase0_diagnostic_bundle")
-                .put("schema_version", 2)
+                .put("schema_version", 3)
                 .put("campaign_id", recorder.campaignId)
                 .put("phase", state.phase.name)
                 .put("profile", state.profileName)
@@ -492,7 +575,9 @@ class DiagnosticSession(private val context: Context) {
                 .put("analysis_fps", state.analysisFps)
                 .put("pipeline_ms", state.pipelineMs)
                 .put("advanced_phy", advancedRecorder.hasLines)
-                .put("advanced_receiver_max_fps", 30.0)
+                .put("shapegrid_phy", shapeGridRecorder.hasLines)
+                .put("receiver_max_fps", 30.0)
+                .put("shapegrid_design_target_fps", 20.0)
                 .put("qr_forensic_frame_count", captures.size)
             zip.writeTextEntry("session.json", sessionJson.toString(2))
 
@@ -518,6 +603,37 @@ class DiagnosticSession(private val context: Context) {
 
             val observations = if (observationLines.isEmpty()) "" else observationLines.joinToString("\n", postfix = "\n")
             zip.writeTextEntry("observations.jsonl", observations)
+
+            if (shapeGridLines.isNotEmpty()) {
+                val shapeGridSummary = JSONObject()
+                    .put("profile", shapeGridSnapshot.profileName)
+                    .put("run_token", shapeGridSnapshot.runToken ?: JSONObject.NULL)
+                    .put("sender_state", shapeGridSnapshot.senderState)
+                    .put("frame_count", shapeGridSnapshot.frameCount)
+                    .put("observations", shapeGridSnapshot.observations)
+                    .put("valid_block_observations", shapeGridSnapshot.validBlockObservations)
+                    .put("unique_blocks", shapeGridSnapshot.uniqueBlocks)
+                    .put("innovative_bytes", shapeGridSnapshot.innovativeBytes)
+                    .put("elapsed_seconds", shapeGridSnapshot.elapsedSeconds)
+                    .put("goodput_kib_s", shapeGridSnapshot.goodputKibS)
+                    .put("goodput_mbps", shapeGridSnapshot.goodputMbps)
+                    .put("block_yield", shapeGridSnapshot.blockYield)
+                    .put("symbol_erasures", shapeGridSnapshot.symbolErasures)
+                    .put("shape_symbol_errors", shapeGridSnapshot.shapeSymbolErrors)
+                    .put("color_symbol_errors", shapeGridSnapshot.colorSymbolErrors)
+                    .put("rs_errors", shapeGridSnapshot.rsErrors)
+                    .put("rs_erasures", shapeGridSnapshot.rsErasures)
+                    .put("projected_tile_pitch_px", shapeGridSnapshot.lastProjectedTilePitchPx)
+                    .put("shapegrid_total_ms", shapeGridSnapshot.lastPipelineMs)
+                    .put("design_target_fps", 20.0)
+                    .put("receiver_max_fps", 30.0)
+                    .put("last_failure", shapeGridSnapshot.lastFailure ?: JSONObject.NULL)
+                zip.writeTextEntry("shapegrid_summary.json", shapeGridSummary.toString(2))
+                zip.writeTextEntry(
+                    "shapegrid_observations.jsonl",
+                    shapeGridLines.joinToString("\n", postfix = "\n"),
+                )
+            }
 
             if (advancedLines.isNotEmpty()) {
                 val advancedSummary = JSONObject()
@@ -619,6 +735,8 @@ class DiagnosticSession(private val context: Context) {
         frameGate.stop()
         sessionActive = false
         capturedQrFrames.clear()
+        shapeGridEngine?.close()
+        shapeGridEngine = null
         advancedEngine?.close()
         advancedEngine = null
         engine.close()
