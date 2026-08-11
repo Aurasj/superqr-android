@@ -10,6 +10,13 @@ interface ExternalQrFrameDecoder {
     fun decodeQr(): ExternalQrDecodeResult
 }
 
+data class ExternalQrSymbol(
+    val payload: ByteArray,
+    val quad: List<DoubleArray>? = null,
+    val errorType: String? = null,
+    val errorMessage: String? = null,
+)
+
 data class ExternalQrDecodeResult(
     val payload: ByteArray,
     val elapsedMs: Double,
@@ -19,4 +26,6 @@ data class ExternalQrDecodeResult(
     val quad: List<DoubleArray>? = null,
     val errorType: String? = null,
     val errorMessage: String? = null,
+    /** All QR symbols returned by the same native read. Empty preserves the legacy single-symbol contract. */
+    val symbols: List<ExternalQrSymbol> = emptyList(),
 )
