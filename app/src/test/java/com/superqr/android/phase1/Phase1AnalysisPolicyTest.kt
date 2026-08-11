@@ -43,18 +43,30 @@ class Phase1AnalysisPolicyTest {
     }
 
     @Test
-    fun unlockedQrCandidateKeepsConsecutiveQrFramesUntilGeometryDisappears() {
-        val scheduler = Phase1AcquisitionScheduler()
+    fun coldQrGeometryCannotStarveGridSearchIndefinitely() {
+        val scheduler = Phase1AcquisitionScheduler(coldEvidenceFrames = 3)
         assertEquals(Phase1AnalysisPath.QR, scheduler.path)
 
-        repeat(5) {
-            scheduler.missed(Phase1AnalysisPath.QR, qrCandidate = true)
-            assertEquals(Phase1AnalysisPath.QR, scheduler.path)
-            assertEquals("SEARCH_QR", scheduler.state)
-        }
-
-        scheduler.missed(Phase1AnalysisPath.QR, qrCandidate = false)
+        scheduler.missed(Phase1AnalysisPath.QR, qrCandidate = true)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.QR, qrCandidate = true)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.QR, qrCandidate = true)
         assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+    }
+
+    @Test
+    fun coldGridGeometryIsBoundedSymmetrically() {
+        val scheduler = Phase1AcquisitionScheduler(coldEvidenceFrames = 3)
+        scheduler.missed(Phase1AnalysisPath.QR)
+        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+
+        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
+        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
+        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
     }
 
     @Test
