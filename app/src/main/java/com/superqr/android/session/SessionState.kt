@@ -27,6 +27,12 @@ data class CampaignProgress(
     val visible: Boolean get() = runToken >= 0 && state.isNotEmpty()
 }
 
+internal fun CampaignProgress.stabilizedWith(observed: CampaignProgress?): CampaignProgress {
+    if (observed == null || !observed.visible) return this
+    if (!visible || runToken != observed.runToken) return observed
+    return observed.copy(frameIndex = maxOf(frameIndex, observed.frameIndex))
+}
+
 data class SessionState(
     val phase: SessionPhase = SessionPhase.IDLE,
     val trackingState: Phase1TrackingState = Phase1TrackingState.SEARCHING,
