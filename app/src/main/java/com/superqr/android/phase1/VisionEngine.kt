@@ -9,6 +9,7 @@ import com.superqr.android.vision.v7_capacity_lab.V7LabRunEnvelope
 import com.superqr.android.vision.v7_capacity_lab.V7LabRunState
 import com.superqr.android.vision.v7_capacity_lab.V7Phase1GridProfile
 import com.superqr.android.vision.v7_capacity_lab.V7Phase1QrDecoder
+import com.superqr.android.vision.v7_capacity_lab.V7Phase1QrExpectation
 import com.superqr.android.vision.v7_capacity_lab.V7Phase1QrResult
 import com.superqr.android.vision.v7_capacity_lab.V7Phase1Receiver
 
@@ -60,9 +61,16 @@ class VisionEngine(private val manifest: Phase1Manifest) {
     private val qrDecoder = V7Phase1QrDecoder()
     private val scheduler = Phase1AcquisitionScheduler()
 
-    private val qrExpectedBytes: Map<Int, Int> = manifest.profiles
+    private val qrExpectations: List<V7Phase1QrExpectation> = manifest.profiles
         .filterIsInstance<Phase1Profile.Qr>()
-        .associate { it.version to it.frameBytes }
+        .map {
+            V7Phase1QrExpectation(
+                profileId = it.id,
+                version = it.version,
+                eccId = it.eccId,
+                frameBytes = it.frameBytes,
+            )
+        }
 
     private var gridReceiver: V7Phase1Receiver? = null
     private var activeGridId = -1
@@ -251,7 +259,7 @@ class VisionEngine(private val manifest: Phase1Manifest) {
         val qr = if (external != null && (external.payload.isNotEmpty() || external.quad != null)) {
             analyzeExternalQr(external)
         } else {
-            qrDecoder.analyzeAuto(luma, width, height, qrExpectedBytes, external)
+            qrDecoder.analyzeAuto(luma, width, height, qrExpectations, external)
         }
         val completedNs = System.nanoTime()
         val envelope = qr.envelope
@@ -332,41 +340,11 @@ class VisionEngine(private val manifest: Phase1Manifest) {
             diagnostics["external_qr_error_message"] = it
         }
 
-        val payload = external.payload
-        val result = when {
-            payload.isEmpty() -> V7Phase1QrResult(
-                decoded = false,
-                valid = false,
-                frameIndex = null,
-                bytes = 0,
-                failure = "QR_NOT_DECODED",
-                quad = quad,
-            )
-            payload.size < 5 -> V7Phase1QrResult(
-                decoded = true,
-                valid = false,
-                frameIndex = null,
-                bytes = payload.size,
-                failure = "QR_HEADER",
-                quad = quad,
-            )
-            else -> {
-                val version = payload[4].toInt() and 0xFF
-                val expectedBytes = qrExpectedBytes[version]
-                if (expectedBytes == null) {
-                    V7Phase1QrResult(
-                        decoded = true,
-                        valid = false,
-                        frameIndex = null,
-                        bytes = payload.size,
-                        failure = "QR_UNSUPPORTED_VERSION",
-                        quad = quad,
-                    )
-                } else {
-                    V7Phase1QrDecoder.validatePayload(payload, version, expectedBytes, quad)
-                }
-            }
-        }
+        val result = V7Phase1QrDecoder.validateProfilePayload(
+            payload = external.payload,
+            expectations = qrExpectations,
+            quad = quad,
+        )
         return result.copy(diagnostics = diagnostics)
     }
 
