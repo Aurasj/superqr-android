@@ -237,7 +237,7 @@ class VisionEngine(private val manifest: Phase1Manifest) {
         arrivalNs: Long,
     ): VisionResult {
         val external = (chromaReader as? ExternalQrFrameDecoder)?.decodeQr()
-        val qr = if (external != null && external.payload.isNotEmpty()) {
+        val qr = if (external != null && (external.payload.isNotEmpty() || external.quad != null)) {
             analyzeExternalQr(external)
         } else {
             qrDecoder.analyzeAuto(luma, width, height, qrExpectedBytes, external)
@@ -260,7 +260,7 @@ class VisionEngine(private val manifest: Phase1Manifest) {
                 activeGridProfile = null,
                 qrProfile = profile,
                 gridObservation = null,
-                qrObservation = if (qr.valid) {
+                qrObservation = if (qr.valid && envelope.state == V7LabRunState.RUNNING) {
                     QrObservationData(
                         profile = profile,
                         frameIndex = qr.frameIndex,
@@ -302,13 +302,14 @@ class VisionEngine(private val manifest: Phase1Manifest) {
             ?.map { point -> doubleArrayOf(point[0], point[1]) }
 
         val diagnostics = linkedMapOf<String, Any?>(
-            "decode_source" to external.source,
+            "decode_source" to if (external.payload.isNotEmpty()) external.source else "NONE",
             "external_qr_attempted" to true,
             "external_qr_source" to external.source,
             "external_qr_ms" to external.elapsedMs,
             "external_qr_result_count" to external.resultCount,
             "external_qr_payload_bytes" to external.payload.size,
             "external_qr_geometry" to (quad != null),
+            "legacy_qr_fallback_attempted" to false,
             "opencv_geometry_only_attempted" to false,
         )
         external.errorType?.let { diagnostics["external_qr_error"] = it }
@@ -317,8 +318,16 @@ class VisionEngine(private val manifest: Phase1Manifest) {
         }
 
         val payload = external.payload
-        val result = if (payload.size < 5) {
-            V7Phase1QrResult(
+        val result = when {
+            payload.isEmpty() -> V7Phase1QrResult(
+                decoded = false,
+                valid = false,
+                frameIndex = null,
+                bytes = 0,
+                failure = "QR_NOT_DECODED",
+                quad = quad,
+            )
+            payload.size < 5 -> V7Phase1QrResult(
                 decoded = true,
                 valid = false,
                 frameIndex = null,
@@ -326,20 +335,21 @@ class VisionEngine(private val manifest: Phase1Manifest) {
                 failure = "QR_HEADER",
                 quad = quad,
             )
-        } else {
-            val version = payload[4].toInt() and 0xFF
-            val expectedBytes = qrExpectedBytes[version]
-            if (expectedBytes == null) {
-                V7Phase1QrResult(
-                    decoded = true,
-                    valid = false,
-                    frameIndex = null,
-                    bytes = payload.size,
-                    failure = "QR_UNSUPPORTED_VERSION",
-                    quad = quad,
-                )
-            } else {
-                V7Phase1QrDecoder.validatePayload(payload, version, expectedBytes, quad)
+            else -> {
+                val version = payload[4].toInt() and 0xFF
+                val expectedBytes = qrExpectedBytes[version]
+                if (expectedBytes == null) {
+                    V7Phase1QrResult(
+                        decoded = true,
+                        valid = false,
+                        frameIndex = null,
+                        bytes = payload.size,
+                        failure = "QR_UNSUPPORTED_VERSION",
+                        quad = quad,
+                    )
+                } else {
+                    V7Phase1QrDecoder.validatePayload(payload, version, expectedBytes, quad)
+                }
             }
         }
         return result.copy(diagnostics = diagnostics)
