@@ -56,15 +56,18 @@ class Phase1AnalysisPolicyTest {
     }
 
     @Test
-    fun coldGridGeometryIsBoundedSymmetrically() {
-        val scheduler = Phase1AcquisitionScheduler(coldEvidenceFrames = 3)
+    fun coldGridGeometryGetsLongerButBoundedAcquisitionWindow() {
+        val scheduler = Phase1AcquisitionScheduler(
+            coldEvidenceFrames = 3,
+            coldGridEvidenceFrames = 5,
+        )
         scheduler.missed(Phase1AnalysisPath.QR)
         assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
 
-        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
-        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
-        scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
-        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+        repeat(4) {
+            scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
+            assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+        }
         scheduler.missed(Phase1AnalysisPath.GRID, carrierCandidate = true)
         assertEquals(Phase1AnalysisPath.QR, scheduler.path)
     }
@@ -89,16 +92,23 @@ class Phase1AnalysisPolicyTest {
     }
 
     @Test
-    fun coldCarrierLikeEvidenceCannotExtendAnExistingGridLock() {
-        val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
+    fun provenGridLockGetsBoundedCarrierLikeReacquisitionGrace() {
+        val scheduler = Phase1AcquisitionScheduler(
+            unlockAfterMisses = 2,
+            transitionProbeFrames = 3,
+            lockedGridEvidenceGraceFrames = 4,
+        )
         scheduler.locked(Phase1AnalysisPath.GRID)
 
-        scheduler.missed(
-            Phase1AnalysisPath.GRID,
-            carrierCandidate = true,
-            retainLockedPath = false,
-        )
-        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+        repeat(3) {
+            scheduler.missed(
+                Phase1AnalysisPath.GRID,
+                carrierCandidate = true,
+                retainLockedPath = false,
+            )
+            assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+            assertEquals("GRID_LOCKED", scheduler.state)
+        }
 
         scheduler.missed(
             Phase1AnalysisPath.GRID,
