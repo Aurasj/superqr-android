@@ -282,16 +282,15 @@ class DiagnosticSession(private val context: Context) {
 
             updateState {
                 val envelope = result.envelope
-                val progress = if (envelope != null) {
+                val observedProgress = envelope?.let {
                     CampaignProgress(
-                        runToken = envelope.runToken,
-                        state = envelope.state.name,
-                        frameIndex = envelope.frameIndex,
-                        frameCount = envelope.frameCount,
+                        runToken = it.runToken,
+                        state = it.state.name,
+                        frameIndex = it.frameIndex,
+                        frameCount = it.frameCount,
                     )
-                } else {
-                    CampaignProgress()
                 }
+                val progress = it.campaignProgress.stabilizedWith(observedProgress)
                 it.copy(
                     phase = derivePhase(result),
                     trackingState = result.trackingState,
