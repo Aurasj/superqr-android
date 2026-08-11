@@ -15,6 +15,8 @@ data class ExternalQrDecodeResult(
     val elapsedMs: Double,
     val resultCount: Int,
     val source: String,
+    /** QR quadrangle in the same rotation-normalized ImageAnalysis coordinates as luma. */
+    val quad: List<DoubleArray>? = null,
     val errorType: String? = null,
     val errorMessage: String? = null,
 )
