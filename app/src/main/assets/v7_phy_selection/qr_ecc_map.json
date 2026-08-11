@@ -1,0 +1,54 @@
+{
+  "artifact": "v7_phase0_qr_ecc_map",
+  "schema_version": 1,
+  "status": "LAB_ONLY_NOT_A_V7_WIRE_CONTRACT",
+  "base_profile_count": 10,
+  "decision_basis": {
+    "source_campaign_id": "cdc4a54f-0b13-40d7-a66c-3ac12c41add0",
+    "selected_versions": [36, 40],
+    "fps_candidates": [20.0, 24.0, 30.0],
+    "reason": "V36 and V40 form the throughput Pareto set at <=30 FPS; >30 FPS collapsed in the capacity map; 20 FPS was the global winner and must be retained."
+  },
+  "ecc_ids": {"L": 1, "M": 2, "Q": 3, "H": 4},
+  "existing_profiles": [
+    {"name": "qr_v36_l_map", "profile_id": 9, "version": 36, "error_correction": "L", "ecc_id": 1, "frame_bytes": 2431, "payload_bytes": 2401},
+    {"name": "qr_v40_l_ceiling", "profile_id": 6, "version": 40, "error_correction": "L", "ecc_id": 1, "frame_bytes": 2953, "payload_bytes": 2923}
+  ],
+  "profiles": [
+    {"name": "qr_v36_m_ecc", "profile_id": 10, "version": 36, "error_correction": "M", "ecc_id": 2, "mask_pattern": 4, "frame_bytes": 1911, "header_bytes": 30, "target_fps": 20.0, "display_size_px": 900, "module_count": 161, "quiet_zone_modules": 4, "purpose": "Phase 0 ECC map V36-M", "payload_bytes": 1881, "total_modules": 169, "integer_module_scale_px": 5, "rendered_size_px": 845, "frame_zero": {"first_20_hex": "535150312402000000002A0000007707D701010A", "last_20_hex": "D22B2D371DFD6BDD35DC21BA7D6E7D59553D76AB", "sha256": "a01c5114998c81b2f0a498178bd84b82d29fb261db482874e61ba0c330203609"}},
+    {"name": "qr_v36_q_ecc", "profile_id": 11, "version": 36, "error_correction": "Q", "ecc_id": 3, "mask_pattern": 4, "frame_bytes": 1351, "header_bytes": 30, "target_fps": 20.0, "display_size_px": 900, "module_count": 161, "quiet_zone_modules": 4, "purpose": "Phase 0 ECC map V36-Q", "payload_bytes": 1321, "total_modules": 169, "integer_module_scale_px": 5, "rendered_size_px": 845, "frame_zero": {"first_20_hex": "535150312403000000002A0000004705D701010B", "last_20_hex": "3D129EE60C2416A4279C4975355F7C2C153C817B", "sha256": "f2d519cbd80c673cc4a6708dd102e0fa0037831e67c6ddf96e7e6331d5f40a34"}},
+    {"name": "qr_v40_m_ecc", "profile_id": 12, "version": 40, "error_correction": "M", "ecc_id": 2, "mask_pattern": 4, "frame_bytes": 2331, "header_bytes": 30, "target_fps": 20.0, "display_size_px": 900, "module_count": 177, "quiet_zone_modules": 4, "purpose": "Phase 0 ECC map V40-M", "payload_bytes": 2301, "total_modules": 185, "integer_module_scale_px": 4, "rendered_size_px": 740, "frame_zero": {"first_20_hex": "535150312802000000002A0000001B09D701010C", "last_20_hex": "C4DAD59DF2D0AB149F4274FA9340774912677DC4", "sha256": "1d228e70b091298bfd8103d67a5ee4d8908432880c6a3c9af60f1820ec468bd5"}},
+    {"name": "qr_v40_q_ecc", "profile_id": 13, "version": 40, "error_correction": "Q", "ecc_id": 3, "mask_pattern": 4, "frame_bytes": 1663, "header_bytes": 30, "target_fps": 20.0, "display_size_px": 900, "module_count": 177, "quiet_zone_modules": 4, "purpose": "Phase 0 ECC map V40-Q", "payload_bytes": 1633, "total_modules": 185, "integer_module_scale_px": 4, "rendered_size_px": 740, "frame_zero": {"first_20_hex": "535150312803000000002A0000007F06D701010D", "last_20_hex": "DF94B140A05B52D0ABA1575834BFCF7AA3F37672", "sha256": "d5b63f1856e6b7c779e7ff40b306e8c7a8cbee79a2a3b76bdc5c12050e286ea"}}
+  ],
+  "campaign": {
+    "name": "QR ECC focused map",
+    "frame_count": 256,
+    "fps_candidates": [20.0, 24.0, 30.0],
+    "stability_control": {"profile": "qr_v27_l_safe", "target_fps": 24.0},
+    "ordering": "balanced Latin-style order within each version block; stability control at start, midpoint, and end",
+    "run_count": 21,
+    "runs": [
+      {"profile": "qr_v27_l_safe", "target_fps": 24.0, "role": "stability_control_start"},
+      {"profile": "qr_v36_l_map", "target_fps": 20.0, "role": "candidate"},
+      {"profile": "qr_v36_m_ecc", "target_fps": 24.0, "role": "candidate"},
+      {"profile": "qr_v36_q_ecc", "target_fps": 30.0, "role": "candidate"},
+      {"profile": "qr_v36_m_ecc", "target_fps": 20.0, "role": "candidate"},
+      {"profile": "qr_v36_q_ecc", "target_fps": 24.0, "role": "candidate"},
+      {"profile": "qr_v36_l_map", "target_fps": 30.0, "role": "candidate"},
+      {"profile": "qr_v36_q_ecc", "target_fps": 20.0, "role": "candidate"},
+      {"profile": "qr_v36_l_map", "target_fps": 24.0, "role": "candidate"},
+      {"profile": "qr_v36_m_ecc", "target_fps": 30.0, "role": "candidate"},
+      {"profile": "qr_v27_l_safe", "target_fps": 24.0, "role": "stability_control_mid"},
+      {"profile": "qr_v40_q_ecc", "target_fps": 20.0, "role": "candidate"},
+      {"profile": "qr_v40_l_ceiling", "target_fps": 24.0, "role": "candidate"},
+      {"profile": "qr_v40_m_ecc", "target_fps": 30.0, "role": "candidate"},
+      {"profile": "qr_v40_l_ceiling", "target_fps": 20.0, "role": "candidate"},
+      {"profile": "qr_v40_m_ecc", "target_fps": 24.0, "role": "candidate"},
+      {"profile": "qr_v40_q_ecc", "target_fps": 30.0, "role": "candidate"},
+      {"profile": "qr_v40_m_ecc", "target_fps": 20.0, "role": "candidate"},
+      {"profile": "qr_v40_q_ecc", "target_fps": 24.0, "role": "candidate"},
+      {"profile": "qr_v40_l_ceiling", "target_fps": 30.0, "role": "candidate"},
+      {"profile": "qr_v27_l_safe", "target_fps": 24.0, "role": "stability_control_end"}
+    ]
+  }
+}
