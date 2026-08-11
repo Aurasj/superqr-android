@@ -34,7 +34,8 @@ data class ShapeGridResult(
 )
 
 private data class ShapeGridPalette(
-    val colors: Array<IntArray>, // [color bits][Y,U,V]
+    val luma: IntArray, // [color bits] calibrated from the luma plane
+    val chroma: Array<IntArray>, // [color bits][U,V]
     val backgroundY: Int,
 )
 
@@ -49,8 +50,8 @@ class ShapeGridEngine(
 ) : AutoCloseable {
     private val acquirer = V7CarrierAcquirer(carrierSpec)
     private val projected = DoubleArray(2)
-    private val yuv = IntArray(3)
-    private val colorAccumulator = IntArray(3)
+    private val uv = IntArray(2)
+    private val colorAccumulator = IntArray(2)
     private val guardSamples = IntArray(96)
     private val foregroundPositions = Array(16) { shape ->
         IntArray(25) { it }.filter { position ->
@@ -145,14 +146,12 @@ class ShapeGridEngine(
                         } else {
                             val backgroundDistance = abs(y - palette.backgroundY)
                             var foregroundDistance = Int.MAX_VALUE
-                            for (color in palette.colors) {
-                                foregroundDistance = minOf(foregroundDistance, abs(y - color[0]))
+                            for (colorY in palette.luma) {
+                                foregroundDistance = minOf(foregroundDistance, abs(y - colorY))
                             }
                             if (foregroundDistance + LUMA_CLASS_MARGIN < backgroundDistance) {
                                 observedMask = observedMask or 1
                             } else if (backgroundDistance + LUMA_CLASS_MARGIN >= foregroundDistance) {
-                                // Ambiguous points still choose their nearest class for Hamming matching,
-                                // but too many ambiguous subcells turn the whole tile into an erasure.
                                 ambiguous++
                                 if (foregroundDistance < backgroundDistance) observedMask = observedMask or 1
                             }
@@ -204,30 +203,26 @@ class ShapeGridEngine(
         var count = 0
         val wanted = minOf(COLOR_SAMPLES_PER_TILE, positions.size)
         for (sampleIndex in 0 until wanted) {
-            val pick = if (wanted == 1) 0 else sampleIndex * (positions.size - 1) / (wanted - 1)
+            // Pick a stable foreground point away from always choosing the same corner.
+            val pick = if (wanted == 1) positions.size / 2 else sampleIndex * (positions.size - 1) / (wanted - 1)
             val position = positions[pick]
             val sx = position % 5
             val sy = position / 5
             val canonicalX = tileX + (sx + 0.5) * sub
             val canonicalY = tileY + (sy + 0.5) * sub
             if (!map(h, canonicalX, canonicalY, projected)) continue
-            if (!reader.read(projected[0], projected[1], yuv)) continue
-            colorAccumulator[0] += yuv[0]
-            colorAccumulator[1] += yuv[1]
-            colorAccumulator[2] += yuv[2]
+            if (!reader.read(projected[0], projected[1], uv)) continue
+            colorAccumulator[0] += uv[0]
+            colorAccumulator[1] += uv[1]
             count++
         }
         if (count < MIN_COLOR_SAMPLES) return null
-        val observed = intArrayOf(
-            colorAccumulator[0] / count,
-            colorAccumulator[1] / count,
-            colorAccumulator[2] / count,
-        )
+        val observed = intArrayOf(colorAccumulator[0] / count, colorAccumulator[1] / count)
         var best = -1
         var bestDistance = Double.POSITIVE_INFINITY
         var secondDistance = Double.POSITIVE_INFINITY
         for (colorBits in 0 until 4) {
-            val distance = colorDistance(observed, palette.colors[colorBits])
+            val distance = colorDistance(observed, palette.chroma[colorBits])
             if (distance < bestDistance) {
                 secondDistance = bestDistance
                 bestDistance = distance
@@ -249,13 +244,20 @@ class ShapeGridEngine(
         height: Int,
         reader: ChromaPixelReader,
     ): ShapeGridPalette? {
-        val colors = Array(4) { IntArray(3) }
+        val colorY = IntArray(4)
+        val chroma = Array(4) { IntArray(2) }
         for (colorBits in 0 until 4) {
             val pilot = manifest.pilotsByColorBits[colorBits]
+            colorY[colorBits] = sampleLuma(h, pilot.canonicalX, pilot.canonicalY, luma, width, height)
+            if (colorY[colorBits] < 0) return null
             if (!map(h, pilot.canonicalX, pilot.canonicalY, projected)) return null
-            if (!reader.read(projected[0], projected[1], yuv)) return null
-            colors[colorBits] = yuv.copyOf()
+            if (!reader.read(projected[0], projected[1], uv)) return null
+            chroma[colorBits][0] = uv[0]
+            chroma[colorBits][1] = uv[1]
         }
+
+        // Guard subcells are guaranteed non-data gray, so their median luma is a
+        // frame-local background calibration independent of sender RGB response.
         var count = 0
         val bbox = profile.canonicalGridBbox
         val pitch = (bbox[2] - bbox[0]) / profile.gridCols
@@ -274,7 +276,7 @@ class ShapeGridEngine(
         if (count < 12) return null
         guardSamples.sort(0, count)
         val backgroundY = guardSamples[count / 2]
-        return ShapeGridPalette(colors, backgroundY)
+        return ShapeGridPalette(colorY, chroma, backgroundY)
     }
 
     private fun extractBlock(profile: ShapeGridProfile, grid: IntArray, blockId: Int): IntArray {
@@ -324,10 +326,9 @@ class ShapeGridEngine(
     }
 
     private fun colorDistance(a: IntArray, b: IntArray): Double {
-        val dy = (a[0] - b[0]) / 32.0
-        val du = (a[1] - b[1]) / 24.0
-        val dv = (a[2] - b[2]) / 24.0
-        return dy * dy + du * du + dv * dv
+        val du = (a[0] - b[0]) / 24.0
+        val dv = (a[1] - b[1]) / 24.0
+        return du * du + dv * dv
     }
 
     private fun elapsedMs(startedNs: Long): Double = (System.nanoTime() - startedNs) / 1_000_000.0
@@ -340,8 +341,8 @@ class ShapeGridEngine(
         private const val MAX_AMBIGUOUS_SUBCELLS = 5
         private const val MAX_SHAPE_HAMMING = 4
         private const val MIN_SHAPE_MARGIN = 2
-        private const val COLOR_SAMPLES_PER_TILE = 4
-        private const val MIN_COLOR_SAMPLES = 2
+        private const val COLOR_SAMPLES_PER_TILE = 1
+        private const val MIN_COLOR_SAMPLES = 1
         private const val MIN_COLOR_DISTANCE_RATIO = 1.12
         private const val MIN_COLOR_DISTANCE_MARGIN = 0.05
     }
