@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ main, rebuild/v7-phase0-clean ]
+    branches: [ main, rebuild/v7-phase0-clean, rebuild/v7-phase0-chroma4-fast ]
   pull_request:
     branches: [ main ]
 
