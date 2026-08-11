@@ -52,7 +52,6 @@ class ShapeGridEngine(
     private val yuv = IntArray(3)
     private val colorAccumulator = IntArray(3)
     private val guardSamples = IntArray(96)
-    private val tileLuma = IntArray(25)
     private val foregroundPositions = Array(16) { shape ->
         IntArray(25) { it }.filter { position ->
             val bit = 24 - position
@@ -86,16 +85,15 @@ class ShapeGridEngine(
         var recovered = 0
         for (blockId in 0 until 8) {
             val physical = extractBlock(profile, gridSymbols, blockId)
-            val symbolErasures = physical.count { it < 0 }
             val decoded = ShapeGridBlockCodec.decode(profile, blockId, envelope, physical)
             if (decoded.valid) recovered++
             observations += ShapeGridBlockObservation(
                 blockId = blockId,
                 frameIndex = envelope.frameIndex,
                 usefulBytes = if (decoded.valid) decoded.payload.size else 0,
-                symbolErasures = symbolErasures,
-                shapeSymbolErrors = 0,
-                colorSymbolErrors = 0,
+                symbolErasures = decoded.symbolErasures,
+                shapeSymbolErrors = decoded.shapeSymbolErrors,
+                colorSymbolErrors = decoded.colorSymbolErrors,
                 rsErrors = decoded.rsErrors,
                 rsErasures = decoded.rsErasures,
                 postFecValid = decoded.valid,
@@ -136,13 +134,11 @@ class ShapeGridEngine(
                 var unreadable = 0
                 var ambiguous = 0
                 var observedMask = 0
-                var position = 0
                 for (sy in 0 until 5) {
                     val cy = tileY + (sy + 0.5) * sub
                     for (sx in 0 until 5) {
                         val cx = tileX + (sx + 0.5) * sub
                         val y = sampleLuma(h, cx, cy, luma, width, height)
-                        tileLuma[position] = y
                         observedMask = observedMask shl 1
                         if (y < 0) {
                             unreadable++
@@ -161,7 +157,6 @@ class ShapeGridEngine(
                                 if (foregroundDistance < backgroundDistance) observedMask = observedMask or 1
                             }
                         }
-                        position++
                     }
                 }
                 if (unreadable > MAX_UNREADABLE_SUBCELLS || ambiguous > MAX_AMBIGUOUS_SUBCELLS) continue
