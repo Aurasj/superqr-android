@@ -77,6 +77,44 @@ class Phase1AnalysisPolicyTest {
     }
 
     @Test
+    fun coldCarrierLikeEvidenceCannotExtendAnExistingGridLock() {
+        val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
+        scheduler.locked(Phase1AnalysisPath.GRID)
+
+        scheduler.missed(
+            Phase1AnalysisPath.GRID,
+            carrierCandidate = true,
+            retainLockedPath = false,
+        )
+        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+
+        scheduler.missed(
+            Phase1AnalysisPath.GRID,
+            carrierCandidate = true,
+            retainLockedPath = false,
+        )
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        assertEquals("TRANSITION_QR_PROBE", scheduler.state)
+    }
+
+    @Test
+    fun completedGridRunImmediatelyProbesQr() {
+        val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
+        scheduler.locked(Phase1AnalysisPath.GRID)
+
+        scheduler.completed(Phase1AnalysisPath.GRID)
+
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        assertEquals("TRANSITION_QR_PROBE", scheduler.state)
+        scheduler.missed(Phase1AnalysisPath.QR)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.QR)
+        assertEquals(Phase1AnalysisPath.QR, scheduler.path)
+        scheduler.missed(Phase1AnalysisPath.QR)
+        assertEquals(Phase1AnalysisPath.GRID, scheduler.path)
+    }
+
+    @Test
     fun lostGridLockProbesQrBeforeColdGridSearch() {
         val scheduler = Phase1AcquisitionScheduler(unlockAfterMisses = 2, transitionProbeFrames = 3)
         scheduler.locked(Phase1AnalysisPath.GRID)
