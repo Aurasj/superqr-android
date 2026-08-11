@@ -259,6 +259,17 @@ class DiagnosticSession(private val context: Context) {
             }
 
             updateState {
+                val envelope = result.envelope
+                val progress = if (envelope != null) {
+                    CampaignProgress(
+                        runToken = envelope.runToken,
+                        state = envelope.state.name,
+                        frameIndex = envelope.frameIndex,
+                        frameCount = envelope.frameCount,
+                    )
+                } else {
+                    CampaignProgress()
+                }
                 it.copy(
                     phase = derivePhase(result),
                     trackingState = result.trackingState,
@@ -272,6 +283,7 @@ class DiagnosticSession(private val context: Context) {
                     hasObservations = recorder.hasLines,
                     campaignId = recorder.campaignId,
                     error = result.qrResult?.failure,
+                    campaignProgress = progress,
                 )
             }
         }

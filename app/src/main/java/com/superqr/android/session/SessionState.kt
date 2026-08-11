@@ -17,6 +17,16 @@ enum class SessionPhase(val label: String) {
     COMPLETE("Complete"),
 }
 
+data class CampaignProgress(
+    val runToken: Int = -1,
+    val state: String = "",
+    val frameIndex: Int = 0,
+    val frameCount: Int = 0,
+) {
+    val fraction: Float get() = if (frameCount > 0) (frameIndex.toFloat() / frameCount).coerceIn(0f, 1f) else 0f
+    val visible: Boolean get() = runToken >= 0 && state.isNotEmpty()
+}
+
 data class SessionState(
     val phase: SessionPhase = SessionPhase.IDLE,
     val trackingState: Phase1TrackingState = Phase1TrackingState.SEARCHING,
@@ -30,4 +40,5 @@ data class SessionState(
     val hasObservations: Boolean = false,
     val campaignId: String = "",
     val error: String? = null,
+    val campaignProgress: CampaignProgress = CampaignProgress(),
 )

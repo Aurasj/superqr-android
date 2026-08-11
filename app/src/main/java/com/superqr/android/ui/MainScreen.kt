@@ -60,6 +60,7 @@ import com.superqr.android.phase1.Phase1FramePoint
 import com.superqr.android.phase1.Phase1FramingGeometry
 import com.superqr.android.phase1.Phase1FramingMode
 import com.superqr.android.phase1.Phase1RunSnapshot
+import com.superqr.android.session.CampaignProgress
 import com.superqr.android.session.DiagnosticSession
 import com.superqr.android.session.SessionPhase
 import com.superqr.android.session.SessionState
@@ -213,6 +214,11 @@ fun MainScreen(
                 profileName = sessionState.profileName,
                 guidance = stableGuidance,
                 cameraStatus = cameraStatus,
+            )
+            Spacer(Modifier.height(8.dp))
+            CampaignProgressBar(
+                progress = sessionState.campaignProgress,
+                profileName = sessionState.profileName,
             )
             Spacer(Modifier.height(8.dp))
             MetricsRow(
@@ -372,6 +378,51 @@ private fun StatusBlock(
                 color = if (guidance.contains("GOOD")) Color(0xFF7EE787) else Color(0xFFF2CC60),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CampaignProgressBar(
+    progress: CampaignProgress,
+    profileName: String,
+) {
+    if (!progress.visible) return
+
+    val label = when (progress.state) {
+        "RUNNING" -> "$profileName • ${progress.frameIndex} / ${progress.frameCount}"
+        "DONE" -> "$profileName • Done"
+        else -> profileName
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(
+                label,
+                color = Color.White.copy(alpha = 0.8f),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                "%.0f%%".format(progress.fraction * 100),
+                color = Color.White.copy(alpha = 0.55f),
+                fontSize = 11.sp,
+            )
+        }
+        Spacer(Modifier.height(3.dp))
+        val shape = RoundedCornerShape(3.dp)
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .background(Color.White.copy(alpha = 0.12f), shape),
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(progress.fraction)
+                    .height(6.dp)
+                    .background(Color(0xFF7CB7FF), shape),
             )
         }
     }
