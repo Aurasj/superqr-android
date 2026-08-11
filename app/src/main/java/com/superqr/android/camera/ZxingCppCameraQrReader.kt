@@ -7,6 +7,7 @@ data class CameraQrDecodeResult(
     val payload: ByteArray,
     val elapsedMs: Double,
     val resultCount: Int,
+    val quad: List<DoubleArray>? = null,
     val errorType: String? = null,
     val errorMessage: String? = null,
 )
@@ -26,7 +27,9 @@ fun interface CameraQrDecoder {
  *
  * The official Android wrapper reads ImageProxy plane 0 directly, preserving the
  * row stride/crop/rotation metadata without an RGB bitmap or another full-frame
- * copy. SuperQR validation remains outside this camera adapter.
+ * copy. The returned Position belongs to that same rotation-normalized view, so
+ * payload and presentation geometry come from one native detection. SuperQR
+ * validation remains outside this camera adapter.
  */
 class ZxingCppCameraQrReader {
     private val reader = BarcodeReader(
@@ -72,11 +75,20 @@ class ZxingCppCameraQrReader {
                     bytes.isNotEmpty()
             }
             val successBytes = success?.bytes
+            val successQuad = success?.position?.let { position ->
+                listOf(
+                    doubleArrayOf(position.topLeft.x.toDouble(), position.topLeft.y.toDouble()),
+                    doubleArrayOf(position.topRight.x.toDouble(), position.topRight.y.toDouble()),
+                    doubleArrayOf(position.bottomRight.x.toDouble(), position.bottomRight.y.toDouble()),
+                    doubleArrayOf(position.bottomLeft.x.toDouble(), position.bottomLeft.y.toDouble()),
+                )
+            }
             val firstError = results.firstOrNull { it.error != null }?.error
             CameraQrDecodeResult(
                 payload = successBytes?.copyOf() ?: ByteArray(0),
                 elapsedMs = elapsedMs(startedNs),
                 resultCount = results.size,
+                quad = successQuad,
                 errorType = firstError?.type?.name,
                 errorMessage = firstError?.message,
             )
