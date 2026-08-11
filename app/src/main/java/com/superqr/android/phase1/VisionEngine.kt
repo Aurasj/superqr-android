@@ -1,6 +1,7 @@
 package com.superqr.android.phase1
 
 import com.superqr.android.vision.v6.classification.ChromaPixelReader
+import com.superqr.android.vision.v7_capacity_lab.ExternalQrDecodeResult
 import com.superqr.android.vision.v7_capacity_lab.ExternalQrFrameDecoder
 import com.superqr.android.vision.v7_capacity_lab.V7CarrierAcquirer
 import com.superqr.android.vision.v7_capacity_lab.V7CarrierAcquisitionResult
@@ -202,7 +203,7 @@ class VisionEngine(private val manifest: Phase1Manifest) {
                 schedulerState = scheduler.state,
                 profileName = profile.name,
                 pipelineMs = (acquisitionDoneNs - arrivalNs) / 1_000_000.0,
-                activeGridProfile = profile.receiverProfile,
+                activeGridProfile = null,
                 qrProfile = null,
                 gridObservation = null,
                 qrObservation = null,
@@ -236,7 +237,11 @@ class VisionEngine(private val manifest: Phase1Manifest) {
         arrivalNs: Long,
     ): VisionResult {
         val external = (chromaReader as? ExternalQrFrameDecoder)?.decodeQr()
-        val qr = qrDecoder.analyzeAuto(luma, width, height, qrExpectedBytes, external)
+        val qr = if (external != null && external.payload.isNotEmpty()) {
+            analyzeExternalQr(external)
+        } else {
+            qrDecoder.analyzeAuto(luma, width, height, qrExpectedBytes, external)
+        }
         val completedNs = System.nanoTime()
         val envelope = qr.envelope
         val profile = envelope?.let { manifest.profile(it.profileId) }
@@ -285,6 +290,59 @@ class VisionEngine(private val manifest: Phase1Manifest) {
             qrObservation = null,
             envelope = null,
         )
+    }
+
+    private fun analyzeExternalQr(external: ExternalQrDecodeResult): V7Phase1QrResult {
+        val quad = external.quad
+            ?.takeIf { points ->
+                points.size == 4 && points.all { point ->
+                    point.size >= 2 && point[0].isFinite() && point[1].isFinite()
+                }
+            }
+            ?.map { point -> doubleArrayOf(point[0], point[1]) }
+
+        val diagnostics = linkedMapOf<String, Any?>(
+            "decode_source" to external.source,
+            "external_qr_attempted" to true,
+            "external_qr_source" to external.source,
+            "external_qr_ms" to external.elapsedMs,
+            "external_qr_result_count" to external.resultCount,
+            "external_qr_payload_bytes" to external.payload.size,
+            "external_qr_geometry" to (quad != null),
+            "opencv_geometry_only_attempted" to false,
+        )
+        external.errorType?.let { diagnostics["external_qr_error"] = it }
+        external.errorMessage?.takeIf { it.isNotBlank() }?.let {
+            diagnostics["external_qr_error_message"] = it
+        }
+
+        val payload = external.payload
+        val result = if (payload.size < 5) {
+            V7Phase1QrResult(
+                decoded = true,
+                valid = false,
+                frameIndex = null,
+                bytes = payload.size,
+                failure = "QR_HEADER",
+                quad = quad,
+            )
+        } else {
+            val version = payload[4].toInt() and 0xFF
+            val expectedBytes = qrExpectedBytes[version]
+            if (expectedBytes == null) {
+                V7Phase1QrResult(
+                    decoded = true,
+                    valid = false,
+                    frameIndex = null,
+                    bytes = payload.size,
+                    failure = "QR_UNSUPPORTED_VERSION",
+                    quad = quad,
+                )
+            } else {
+                V7Phase1QrDecoder.validatePayload(payload, version, expectedBytes, quad)
+            }
+        }
+        return result.copy(diagnostics = diagnostics)
     }
 
     fun reset() {
