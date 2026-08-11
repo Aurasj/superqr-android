@@ -7,6 +7,7 @@ import com.superqr.android.phase1.Phase1AnalysisPath
 import com.superqr.android.phase1.Phase1AnalysisPolicy
 import com.superqr.android.phase1.Phase1Manifest
 import com.superqr.android.phase1.Phase1ObservationRecorder
+import com.superqr.android.phase1.Phase1Profile
 import com.superqr.android.phase1.Phase1RunSnapshot
 import com.superqr.android.phase1.Phase1TrackingState
 import com.superqr.android.phase1.VisionEngine
@@ -209,6 +210,25 @@ class DiagnosticSession(private val context: Context) {
                 )
             }
 
+            // READY/DONE GRID frames are valid synchronization evidence just like
+            // READY/DONE QR frames. They update sender/run state but remain unscored.
+            var validNonScoredGrid = false
+            if (result.path == Phase1AnalysisPath.GRID && result.gridObservation == null) {
+                val envelope = result.envelope
+                val profile = envelope?.let { manifest.profile(it.profileId) as? Phase1Profile.Grid }
+                if (profile != null && envelope != null) {
+                    val acquisition = result.carrierAcquisition
+                    recorder.observeSender(
+                        profile,
+                        envelope,
+                        acquisition?.sync?.status ?: "GRID_LOCKED",
+                        acquisition?.source ?: "GRID_LOCKED",
+                        completedNs,
+                    )
+                    validNonScoredGrid = true
+                }
+            }
+
             // READY/DONE QR frames are valid lock/synchronization evidence, but the
             // Phase 1 contract scores payload only while the sender is RUNNING.
             if (result.path == Phase1AnalysisPath.QR && result.qrObservation == null && result.qrResult?.valid == true) {
@@ -243,7 +263,9 @@ class DiagnosticSession(private val context: Context) {
 
             val validNonScoredQr = result.path == Phase1AnalysisPath.QR &&
                 result.qrObservation == null && result.qrResult?.valid == true && result.envelope != null
-            if (result.gridObservation == null && result.qrObservation == null && !validNonScoredQr && observedFrames % 15 == 0) {
+            if (result.gridObservation == null && result.qrObservation == null &&
+                !validNonScoredGrid && !validNonScoredQr && observedFrames % 15 == 0
+            ) {
                 val failureReason = when (result.path) {
                     Phase1AnalysisPath.GRID -> result.carrierAcquisition?.bestSyncStatus ?: "GRID_NO_CANDIDATE"
                     Phase1AnalysisPath.QR -> result.qrResult?.failure ?: "QR_NOT_DECODED"
