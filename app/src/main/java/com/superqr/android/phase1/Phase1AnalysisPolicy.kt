@@ -20,15 +20,16 @@ enum class Phase1AnalysisPath { GRID, QR }
 /**
  * Keeps expensive QR and GRID acquisition paths from running serially on every
  * frame. Search begins with QR and alternates only while neither path has real
- * geometric evidence. Once either detector sees a plausible carrier/QR, that
- * path receives consecutive frames so acquisition can stabilize before we try
- * the opposite PHY.
+ * geometric evidence. Weak cold geometry receives a small bounded run of
+ * consecutive frames so acquisition can stabilize, but it may not monopolize
+ * search indefinitely without a valid run envelope.
  *
  * A bounded GRID TRACK_HOLD may retain an existing GRID lock while geometry is
  * recovering. Cold carrier-like hypotheses may still keep unlocked GRID search
  * consecutive, but callers can explicitly prevent them from extending a lock.
  * Likewise, a QR quadrangle without a decoded payload is still real QR
- * acquisition evidence during ordinary acquisition.
+ * acquisition evidence during ordinary acquisition, subject to the same cold
+ * evidence bound.
  *
  * A validated DONE envelope is different: it starts a neutral run-boundary
  * search. The just-completed PHY remains selected while DONE is still visible;
@@ -39,6 +40,7 @@ enum class Phase1AnalysisPath { GRID, QR }
 class Phase1AcquisitionScheduler(
     private val unlockAfterMisses: Int = 2,
     private val transitionProbeFrames: Int = 3,
+    private val coldEvidenceFrames: Int = 3,
 ) {
     private var lockedPath: Phase1AnalysisPath? = null
     private var nextSearchPath = Phase1AnalysisPath.QR
@@ -46,6 +48,8 @@ class Phase1AcquisitionScheduler(
     private var transitionProbePath: Phase1AnalysisPath? = null
     private var transitionProbesRemaining = 0
     private var boundarySearch = false
+    private var coldEvidencePath: Phase1AnalysisPath? = null
+    private var coldEvidenceMisses = 0
 
     val path: Phase1AnalysisPath
         get() = lockedPath ?: nextSearchPath
@@ -64,6 +68,7 @@ class Phase1AcquisitionScheduler(
         transitionProbePath = null
         transitionProbesRemaining = 0
         boundarySearch = false
+        clearColdEvidence()
     }
 
     /**
@@ -79,6 +84,7 @@ class Phase1AcquisitionScheduler(
         transitionProbePath = null
         transitionProbesRemaining = 0
         boundarySearch = true
+        clearColdEvidence()
     }
 
     fun missed(
@@ -111,6 +117,7 @@ class Phase1AcquisitionScheduler(
                 misses = 0
                 transitionProbePath = opposite
                 transitionProbesRemaining = transitionProbeFrames.coerceAtLeast(1)
+                clearColdEvidence()
             }
             return
         }
@@ -122,6 +129,7 @@ class Phase1AcquisitionScheduler(
             misses = 0
             transitionProbePath = null
             transitionProbesRemaining = 0
+            clearColdEvidence()
             nextSearchPath = opposite(path)
             return
         }
@@ -136,7 +144,25 @@ class Phase1AcquisitionScheduler(
             transitionProbePath = null
         }
 
-        nextSearchPath = if (hasPathEvidence) path else opposite(path)
+        if (!hasPathEvidence) {
+            clearColdEvidence()
+            nextSearchPath = opposite(path)
+            return
+        }
+
+        if (coldEvidencePath == path) {
+            coldEvidenceMisses++
+        } else {
+            coldEvidencePath = path
+            coldEvidenceMisses = 1
+        }
+
+        if (coldEvidenceMisses >= coldEvidenceFrames.coerceAtLeast(1)) {
+            clearColdEvidence()
+            nextSearchPath = opposite(path)
+        } else {
+            nextSearchPath = path
+        }
     }
 
     fun reset() {
@@ -146,6 +172,12 @@ class Phase1AcquisitionScheduler(
         transitionProbePath = null
         transitionProbesRemaining = 0
         boundarySearch = false
+        clearColdEvidence()
+    }
+
+    private fun clearColdEvidence() {
+        coldEvidencePath = null
+        coldEvidenceMisses = 0
     }
 
     private fun opposite(path: Phase1AnalysisPath): Phase1AnalysisPath =
