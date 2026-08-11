@@ -69,6 +69,7 @@ class ImageProxyChromaSampler(
             elapsedMs = result.elapsedMs,
             resultCount = result.resultCount,
             source = "ZXING_CPP",
+            quad = result.quad?.map { point -> point.copyOf() },
             errorType = result.errorType,
             errorMessage = result.errorMessage,
         )
