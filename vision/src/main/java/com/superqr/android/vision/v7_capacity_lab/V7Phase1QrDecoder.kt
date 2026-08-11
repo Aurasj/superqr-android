@@ -23,6 +23,14 @@ data class V7Phase1QrResult(
     val diagnostics: Map<String, Any?> = emptyMap(),
 )
 
+/** Exact lab profile expected after the optical run envelope identifies a QR. */
+data class V7Phase1QrExpectation(
+    val profileId: Int,
+    val version: Int,
+    val eccId: Int,
+    val frameBytes: Int,
+)
+
 /**
  * Binary-safe Phase 1 QR control decoder.
  *
@@ -60,6 +68,7 @@ class V7Phase1QrDecoder : AutoCloseable {
         return attachDiagnostics(validatePayload(payload, expectedVersion, expectedBytes, quad))
     }
 
+    /** Backward-compatible single-profile-per-version laboratory path. */
     fun analyzeAuto(
         luma: ByteArray,
         width: Int,
@@ -104,6 +113,34 @@ class V7Phase1QrDecoder : AutoCloseable {
                 )
             )
         return attachDiagnostics(validatePayload(payload, version, expectedBytes, quad))
+    }
+
+    /** Multi-ECC path: run-envelope profile id selects the exact validation tuple. */
+    fun analyzeAuto(
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        expectations: Collection<V7Phase1QrExpectation>,
+        external: ExternalQrDecodeResult? = null,
+    ): V7Phase1QrResult {
+        require(expectations.isNotEmpty()) { "QR expectations must not be empty" }
+        require(expectations.map { it.profileId }.distinct().size == expectations.size) {
+            "QR expectation profile ids must be unique"
+        }
+        val expectedDimensions = expectations
+            .map { qrDimension(it.version) }
+            .distinct()
+            .sorted()
+            .toIntArray()
+
+        val (payload, quad) = if (external != null && external.payload.isNotEmpty()) {
+            decodeExternalPayload(luma, width, height, expectedDimensions, external)
+        } else {
+            val decoded = decode(luma, width, height, expectedDimensions)
+            recordExternalDiagnostics(external)
+            decoded
+        }
+        return attachDiagnostics(validateProfilePayload(payload, expectations, quad))
     }
 
     private fun attachDiagnostics(result: V7Phase1QrResult): V7Phase1QrResult =
@@ -499,18 +536,49 @@ class V7Phase1QrDecoder : AutoCloseable {
             return 17 + 4 * version
         }
 
+        fun validateProfilePayload(
+            payload: ByteArray,
+            expectations: Collection<V7Phase1QrExpectation>,
+            quad: List<DoubleArray>? = null,
+        ): V7Phase1QrResult {
+            if (payload.isEmpty()) {
+                return V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED", quad = quad)
+            }
+            if (payload.size < 26 || payload[0] != 'S'.code.toByte() || payload[1] != 'Q'.code.toByte() ||
+                payload[2] != 'P'.code.toByte() || payload[3] != '1'.code.toByte()
+            ) {
+                return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_MAGIC", quad = quad)
+            }
+            val envelope = V7LabRunEnvelope.decode(payload, 16)
+                ?: return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_RUN_SYNC", quad = quad)
+            val expectation = expectations.firstOrNull { it.profileId == envelope.profileId }
+                ?: return V7Phase1QrResult(
+                    true, false, null, payload.size, envelope, "QR_PROFILE", quad,
+                )
+            return validatePayload(
+                payload = payload,
+                expectedVersion = expectation.version,
+                expectedBytes = expectation.frameBytes,
+                quad = quad,
+                expectedEccId = expectation.eccId,
+            )
+        }
+
         fun validatePayload(
             payload: ByteArray,
             expectedVersion: Int,
             expectedBytes: Int,
             quad: List<DoubleArray>? = null,
+            expectedEccId: Int = 1,
         ): V7Phase1QrResult {
             if (payload.isEmpty()) return V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED", quad = quad)
             if (payload.size != expectedBytes) return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_LENGTH", quad = quad)
             if (payload.size < 30 || payload[0] != 'S'.code.toByte() || payload[1] != 'Q'.code.toByte() ||
                 payload[2] != 'P'.code.toByte() || payload[3] != '1'.code.toByte()
             ) return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_MAGIC", quad = quad)
-            if ((payload[4].toInt() and 0xFF) != expectedVersion || (payload[5].toInt() and 0xFF) != 1) {
+            if ((payload[4].toInt() and 0xFF) != expectedVersion ||
+                (payload[5].toInt() and 0xFF) != expectedEccId
+            ) {
                 return V7Phase1QrResult(true, false, null, payload.size, failure = "QR_PROFILE", quad = quad)
             }
             val frameIndex = readUInt32Le(payload, 6)
