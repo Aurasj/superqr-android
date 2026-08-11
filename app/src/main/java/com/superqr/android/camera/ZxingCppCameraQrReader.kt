@@ -67,15 +67,14 @@ class ZxingCppCameraQrReader {
         val startedNs = System.nanoTime()
         return try {
             val results = reader.read(image)
-            val success = results.firstOrNull { result ->
+            val qrResults = results.filter { it.format == BarcodeReader.Format.QR_CODE }
+            val success = qrResults.firstOrNull { result ->
                 val bytes = result.bytes
-                result.format == BarcodeReader.Format.QR_CODE &&
-                    result.error == null &&
-                    bytes != null &&
-                    bytes.isNotEmpty()
+                result.error == null && bytes != null && bytes.isNotEmpty()
             }
+            val geometryResult = success ?: qrResults.firstOrNull()
             val successBytes = success?.bytes
-            val successQuad = success?.position?.let { position ->
+            val observedQuad = geometryResult?.position?.let { position ->
                 listOf(
                     doubleArrayOf(position.topLeft.x.toDouble(), position.topLeft.y.toDouble()),
                     doubleArrayOf(position.topRight.x.toDouble(), position.topRight.y.toDouble()),
@@ -83,12 +82,12 @@ class ZxingCppCameraQrReader {
                     doubleArrayOf(position.bottomLeft.x.toDouble(), position.bottomLeft.y.toDouble()),
                 )
             }
-            val firstError = results.firstOrNull { it.error != null }?.error
+            val firstError = qrResults.firstOrNull { it.error != null }?.error
             CameraQrDecodeResult(
                 payload = successBytes?.copyOf() ?: ByteArray(0),
                 elapsedMs = elapsedMs(startedNs),
                 resultCount = results.size,
-                quad = successQuad,
+                quad = observedQuad,
                 errorType = firstError?.type?.name,
                 errorMessage = firstError?.message,
             )
