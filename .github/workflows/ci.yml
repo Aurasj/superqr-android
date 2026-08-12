@@ -31,7 +31,24 @@ jobs:
         run: ./gradlew :vision:testDebugUnitTest
 
       - name: App unit tests
-        run: ./gradlew :app:testDebugUnitTest
+        id: app_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :app:testDebugUnitTest --stacktrace 2>&1 | tee app-test.log
+
+      - name: Upload app test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-test-log
+          path: app-test.log
+          if-no-files-found: error
+
+      - name: Fail if app tests failed
+        if: steps.app_tests.outcome == 'failure'
+        run: exit 1
 
       - name: Build benchmark APK
         run: ./gradlew :app:assembleBenchmark
