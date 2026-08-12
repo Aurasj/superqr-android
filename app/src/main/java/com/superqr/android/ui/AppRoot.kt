@@ -23,9 +23,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.concurrent.ExecutorService
 
-private enum class AppSection { RECEIVE, LAB }
+private enum class AppSection(val label: String) {
+    RECEIVE("RECEIVE"),
+    LAB("LAB"),
+    COLOR_LAB("COLOR LAB"),
+}
 
-/** Production transfer is the default app surface; the physical campaign lab is isolated behind LAB. */
+/** Production transfer remains isolated; both physical labs are explicit opt-in surfaces. */
 @Composable
 fun AppRoot(analysisExecutor: ExecutorService) {
     var section by rememberSaveable { mutableStateOf(AppSection.RECEIVE) }
@@ -43,15 +47,15 @@ fun AppRoot(analysisExecutor: ExecutorService) {
                     ),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text(if (candidate == AppSection.RECEIVE) "RECEIVE" else "LAB", fontSize = 12.sp)
+                    Text(candidate.label, fontSize = 11.sp)
                 }
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (section == AppSection.RECEIVE) {
-                TransferScreen(analysisExecutor = analysisExecutor)
-            } else {
-                MainScreen(analysisExecutor = analysisExecutor)
+            when (section) {
+                AppSection.RECEIVE -> TransferScreen(analysisExecutor = analysisExecutor)
+                AppSection.LAB -> MainScreen(analysisExecutor = analysisExecutor)
+                AppSection.COLOR_LAB -> ChromaQrLabScreen(analysisExecutor = analysisExecutor)
             }
         }
     }
