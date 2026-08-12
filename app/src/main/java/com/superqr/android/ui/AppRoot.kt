@@ -27,16 +27,17 @@ private enum class AppSection(val label: String) {
     RECEIVE("RECEIVE"),
     LAB("LAB"),
     COLOR_LAB("COLOR LAB"),
+    GRID8_LAB("GRID8 LAB"),
 }
 
-/** Production transfer remains isolated; both physical labs are explicit opt-in surfaces. */
+/** Production transfer remains isolated; every physical lab is an explicit opt-in surface. */
 @Composable
 fun AppRoot(analysisExecutor: ExecutorService) {
     var section by rememberSaveable { mutableStateOf(AppSection.RECEIVE) }
     Column(Modifier.fillMaxSize().background(Color(0xFF090B10))) {
         Row(
             Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             AppSection.entries.forEach { candidate ->
                 val active = candidate == section
@@ -47,7 +48,7 @@ fun AppRoot(analysisExecutor: ExecutorService) {
                     ),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text(candidate.label, fontSize = 11.sp)
+                    Text(candidate.label, fontSize = 10.sp)
                 }
             }
         }
@@ -56,6 +57,7 @@ fun AppRoot(analysisExecutor: ExecutorService) {
                 AppSection.RECEIVE -> TransferScreen(analysisExecutor = analysisExecutor)
                 AppSection.LAB -> MainScreen(analysisExecutor = analysisExecutor)
                 AppSection.COLOR_LAB -> ChromaQrLabScreen(analysisExecutor = analysisExecutor)
+                AppSection.GRID8_LAB -> ColorGrid8LabScreen(analysisExecutor = analysisExecutor)
             }
         }
     }
