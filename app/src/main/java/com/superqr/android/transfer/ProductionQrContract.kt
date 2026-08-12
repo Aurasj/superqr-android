@@ -10,7 +10,7 @@ data class ProductionQrProfile(
     val payloadBytes: Int get() = frameBytes - 20
 }
 
-/** Production QR modes selected from the Phase 0 V40 physical sweep. */
+/** Production QR modes selectable on the V40 sender. */
 object ProductionQrContract {
     const val TRANSPORT_VERSION = 7
     const val QR_VERSION = 40
@@ -21,6 +21,8 @@ object ProductionQrContract {
         ProductionQrProfile(1, "V40-M • 15 FPS", "M", 15.0, 2331),
         ProductionQrProfile(2, "V40-L • 20 FPS", "L", 20.0, 2953),
         ProductionQrProfile(3, "V40-M • 20 FPS", "M", 20.0, 2331),
+        ProductionQrProfile(4, "V40-L • 30 FPS", "L", 30.0, 2953),
+        ProductionQrProfile(5, "V40-M • 30 FPS", "M", 30.0, 2331),
     )
 
     private val byId = profiles.associateBy { it.id }
