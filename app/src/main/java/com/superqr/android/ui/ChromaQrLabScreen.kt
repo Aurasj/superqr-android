@@ -11,11 +11,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -167,18 +165,22 @@ fun ChromaQrLabScreen(
         Spacer(Modifier.height(8.dp))
 
         if (!permission) {
-            Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) { Text("GRANT CAMERA") }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) { Text("GRANT CAMERA") }
+            }
             return@Column
         }
 
+        // The preview is never inside a scroll container. It receives a bounded share
+        // of the remaining height so the action bar can never be pushed off-screen.
         Card(
-            Modifier.fillMaxWidth().aspectRatio(4f / 3f),
+            Modifier.fillMaxWidth().weight(0.58f),
             shape = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(containerColor = Color.Black),
         ) {
             AndroidView(factory = { manager.previewView }, modifier = Modifier.fillMaxSize())
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
             LabMetric("Camera", "%.1f fps".format(cameraFps))
@@ -186,46 +188,72 @@ fun ChromaQrLabScreen(
             LabMetric("Sender", if (activeSenderFps > 0) "$activeSenderFps fps" else "—")
             LabMetric("QR", "$uniqueFrames/256")
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
 
-        Card(
-            Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.06f)),
+        // Only the diagnostics/results pane scrolls. Camera preview and actions stay fixed.
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .weight(0.42f)
+                .verticalScroll(rememberScrollState()),
         ) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("COLOR CHANNEL", color = Color(0xFFF2CC60), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                Text(
-                    "Avg BER: ${"%.3f".format(averageBer * 100)}%   •   Avg erasures: ${"%.2f".format(averageErasure * 100)}%",
-                    color = Color.White,
-                    fontSize = 13.sp,
-                )
-                lastResult?.let { result ->
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.06f)),
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("COLOR CHANNEL", color = Color(0xFFF2CC60), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     Text(
-                        "Last: ${result.goodBits}/${result.moduleCount * result.moduleCount} good color bits • U0 ${"%.1f".format(result.neutralU)} • threshold ${"%.1f".format(result.threshold)}",
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 11.sp,
+                        "Avg BER: ${"%.3f".format(averageBer * 100)}%   •   Avg erasures: ${"%.2f".format(averageErasure * 100)}%",
+                        color = Color.White,
+                        fontSize = 13.sp,
                     )
+                    lastResult?.let { result ->
+                        Text(
+                            "Last: ${result.goodBits}/${result.moduleCount * result.moduleCount} good color bits • U0 ${"%.1f".format(result.neutralU)} • threshold ${"%.1f".format(result.threshold)}",
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 11.sp,
+                        )
+                        Text(
+                            "Raw combined ceiling: ${"%.1f".format(result.rawCombinedKibS)} KiB/s • color-quality ceiling: ${"%.1f".format(averageQuality)} KiB/s",
+                            color = Color(0xFF7EE787),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "Measured estimate is reported after each 256-frame run and includes QR coverage.",
+                            color = Color.White.copy(alpha = 0.45f),
+                            fontSize = 10.sp,
+                        )
+                    }
                     Text(
-                        "Raw combined ceiling: ${"%.1f".format(result.rawCombinedKibS)} KiB/s • color-quality ceiling: ${"%.1f".format(averageQuality)} KiB/s",
-                        color = Color(0xFF7EE787),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        "Measured estimate is reported after each 256-frame run and includes QR coverage.",
+                        "Capture: ${resolution.ifEmpty { "pending" }} • $observations decoded color observations",
                         color = Color.White.copy(alpha = 0.45f),
                         fontSize = 10.sp,
                     )
                 }
-                Text(
-                    "Capture: ${resolution.ifEmpty { "pending" }} • $observations decoded color observations",
-                    color = Color.White.copy(alpha = 0.45f),
-                    fontSize = 10.sp,
-                )
             }
+
+            if (completed.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Card(
+                    Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.04f)),
+                ) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("COMPLETED RUNS", color = Color.White.copy(alpha = 0.55f), fontSize = 10.sp)
+                        completed.takeLast(4).forEach {
+                            Text(it, color = Color.White.copy(alpha = 0.75f), fontSize = 10.sp)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
         }
 
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(6.dp))
+
+        // Sticky action bar: always visible regardless of preview/results height.
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
@@ -255,24 +283,6 @@ fun ChromaQrLabScreen(
                 },
                 modifier = Modifier.weight(1f),
             ) { Text("SHARE RESULTS") }
-        }
-
-        if (completed.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Card(
-                Modifier.fillMaxWidth().heightIn(max = 88.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.04f)),
-            ) {
-                Column(
-                    Modifier.padding(10.dp).verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    Text("COMPLETED RUNS", color = Color.White.copy(alpha = 0.55f), fontSize = 10.sp)
-                    completed.takeLast(4).forEach {
-                        Text(it, color = Color.White.copy(alpha = 0.75f), fontSize = 10.sp)
-                    }
-                }
-            }
         }
     }
 }
