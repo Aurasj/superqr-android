@@ -45,7 +45,7 @@ class ZxingCppCameraQrReader {
             tryInvert = false,
             tryDownscale = false,
             tryDenoise = true,
-            maxNumberOfSymbols = 4,
+            maxNumberOfSymbols = 1,
             returnErrors = true,
             textMode = BarcodeReader.TextMode.PLAIN,
         )

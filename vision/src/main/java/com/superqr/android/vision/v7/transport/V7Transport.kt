@@ -148,6 +148,41 @@ object V7Transport {
         )
     }
 
+    /**
+     * Parse a production transfer frame delivered as a raw QR payload.
+     *
+     * QR-based transfer frames do not use the optical-carrier profile table: the
+     * frame size is whatever the QR decoder produced, and profile id bytes 0-3
+     * are QR variant identifiers, not V7OpticalProfiles ids. Header layout,
+     * CRC32, and payload slicing are identical to the carrier path.
+     */
+    fun parseQrFrame(bytes: ByteArray): V7TransportFrame {
+        if (bytes.size < HEADER_SIZE + CRC_SIZE) throw V7TransportError("truncated QR frame")
+        if (bytes[0] != FRAME_MAGIC[0] || bytes[1] != FRAME_MAGIC[1]) throw V7TransportError("invalid V7 frame magic")
+        if ((bytes[2].toInt() and 0xFF) != VERSION) throw V7TransportError("invalid V7 version")
+
+        val expectedCrc = ByteBuffer.wrap(bytes, bytes.size - 4, 4).int.toLong() and 0xFFFFFFFFL
+        val crc = CRC32().apply { update(bytes, 0, bytes.size - 4) }.value and 0xFFFFFFFFL
+        if (crc != expectedCrc) throw V7TransportError("frame CRC32 mismatch")
+
+        val buf = ByteBuffer.wrap(bytes)
+        buf.position(4)
+        val sessionId = buf.short.toInt() and 0xFFFF
+        val frameId = buf.int.toLong().toInt()
+        val totalFrames = buf.int.toLong().toInt()
+        val payloadLen = buf.short.toInt() and 0xFFFF
+        if (sessionId == 0) throw V7TransportError("session_id 0 is invalid")
+        if (totalFrames < 1 || frameId < 0 || frameId >= totalFrames) throw V7TransportError("invalid frame numbering")
+
+        return V7TransportFrame(
+            sessionId,
+            frameId,
+            totalFrames,
+            bytes.copyOfRange(HEADER_SIZE, HEADER_SIZE + payloadLen),
+            bytes[3].toInt() and 0xFF,
+        )
+    }
+
     fun parsePackage(bytes: ByteArray): V7TransferPackage {
         if (bytes.size < PACKAGE_HEADER_SIZE) throw V7TransportError("truncated V7 package")
         for (i in PACKAGE_MAGIC.indices) if (bytes[i] != PACKAGE_MAGIC[i]) throw V7TransportError("invalid V7 package magic")

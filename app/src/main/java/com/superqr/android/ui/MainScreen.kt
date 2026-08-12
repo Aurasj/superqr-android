@@ -1,7 +1,10 @@
 package com.superqr.android.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.transform.OutputTransform
@@ -61,6 +64,8 @@ import com.superqr.android.phase1.Phase1FramePoint
 import com.superqr.android.phase1.Phase1FramingGeometry
 import com.superqr.android.phase1.Phase1FramingMode
 import com.superqr.android.phase1.Phase1RunSnapshot
+import com.superqr.android.receive.ReceiveState
+import com.superqr.android.session.AppMode
 import com.superqr.android.session.CampaignProgress
 import com.superqr.android.session.DiagnosticSession
 import com.superqr.android.session.ReceiverMode
@@ -129,7 +134,25 @@ fun MainScreen(
         ) {
             Text("SuperQR", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Text("V7 receiver", color = Color.White.copy(alpha = 0.55f), fontSize = 13.sp)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
+
+            // App mode toggle
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                AppMode.entries.forEach { mode ->
+                    val active = sessionState.appMode == mode
+                    Button(
+                        onClick = { session.setAppMode(mode) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (active) Color(0xFF1976D2) else Color.White.copy(alpha = 0.08f)
+                        ),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp).padding(horizontal = 4.dp),
+                    ) {
+                        Text(mode.label, fontSize = 12.sp, color = if (active) Color.White else Color.White.copy(alpha = 0.6f))
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
 
             if (!permission) {
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -211,13 +234,31 @@ fun MainScreen(
                 cameraStatus = cameraStatus,
             )
             Spacer(Modifier.height(8.dp))
-            CampaignProgressBar(
-                progress = sessionState.campaignProgress,
-                profileName = sessionState.profileName,
-                uniqueFrames = sessionState.receiverUniqueFrames,
-                expectedFrames = sessionState.receiverExpectedFrames,
-                missedGaps = sessionState.missedGaps,
-            )
+            if (sessionState.appMode == AppMode.RECEIVE) {
+                val receiveState by session.receiveSession.state.collectAsState()
+                ReceiveProgressBar(
+                    uniqueFrames = receiveState.uniqueFrames,
+                    totalFrames = receiveState.totalFrames,
+                    filename = receiveState.filename,
+                    isComplete = receiveState.isComplete,
+                )
+                if (receiveState.isComplete) {
+                    Spacer(Modifier.height(8.dp))
+                    ReceiveCompleteBlock(
+                        receiveState = receiveState,
+                        onReset = { session.receiveSession.reset() },
+                        context = context,
+                    )
+                }
+            } else {
+                CampaignProgressBar(
+                    progress = sessionState.campaignProgress,
+                    profileName = sessionState.profileName,
+                    uniqueFrames = sessionState.receiverUniqueFrames,
+                    expectedFrames = sessionState.receiverExpectedFrames,
+                    missedGaps = sessionState.missedGaps,
+                )
+            }
             Spacer(Modifier.height(8.dp))
             MetricsRow(
                 sessionState.cameraFps,
@@ -537,4 +578,69 @@ private fun DiagnosticText(text: String) {
 @Composable
 private fun SectionHeader(title: String) {
     Text(title.uppercase(), color = Color(0xFF7CB7FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+}
+
+@Composable
+private fun ReceiveProgressBar(
+    uniqueFrames: Int,
+    totalFrames: Int,
+    filename: String,
+    isComplete: Boolean,
+) {
+    if (totalFrames <= 0) return
+    val fraction = if (isComplete) 1f else (uniqueFrames.toFloat() / totalFrames).coerceIn(0f, 1f)
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(
+                if (isComplete) "Received ✓" else "Receiving $uniqueFrames / $totalFrames",
+                color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp, fontWeight = FontWeight.Medium,
+            )
+            Text("%.0f%%".format(fraction * 100), color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp)
+        }
+        Spacer(Modifier.height(3.dp))
+        Box(Modifier.fillMaxWidth().height(6.dp).background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(3.dp))) {
+            Box(Modifier.fillMaxWidth(fraction).height(6.dp).background(Color(0xFF4CAF50), RoundedCornerShape(3.dp)))
+        }
+        if (filename.isNotEmpty()) {
+            Text(filename, color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable
+private fun ReceiveCompleteBlock(
+    receiveState: ReceiveState,
+    onReset: () -> Unit,
+    context: android.content.Context,
+) {
+    Column(Modifier.fillMaxWidth().padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("FILE RECEIVED", color = Color(0xFF4CAF50), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text("${receiveState.filename} • ${receiveState.fileSize} B", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+        Text(receiveState.mimeType, color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            receiveState.receivedFile?.let { file ->
+                Button(onClick = {
+                    val uri = try {
+                        androidx.core.content.FileProvider.getUriForFile(
+                            context, "${context.packageName}.fileprovider", file)
+                    } catch (_: Exception) { null }
+                    if (uri != null) {
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, receiveState.mimeType)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        try { context.startActivity(intent) } catch (_: Exception) {
+                            Toast.makeText(context, "No app to open ${receiveState.mimeType}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2))) {
+                    Text("OPEN", fontWeight = FontWeight.Bold)
+                }
+            }
+            OutlinedButton(onClick = onReset) {
+                Text("RECEIVE AGAIN")
+            }
+        }
+    }
 }

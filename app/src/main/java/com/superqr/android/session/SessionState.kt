@@ -23,6 +23,11 @@ enum class ReceiverMode(val label: String) {
     AUTO("Auto"),
 }
 
+enum class AppMode(val label: String) {
+    RECEIVE("Receive"),
+    TEST("Test"),
+}
+
 data class CampaignProgress(
     val runToken: Int = -1,
     val state: String = "",
@@ -50,6 +55,7 @@ data class SessionState(
     val hasObservations: Boolean = false,
     val campaignId: String = "",
     val error: String? = null,
+    val appMode: AppMode = AppMode.TEST,
     val receiverMode: ReceiverMode = ReceiverMode.AUTO,
     val campaignProgress: CampaignProgress = CampaignProgress(),
     val receiverUniqueFrames: Int = 0,
