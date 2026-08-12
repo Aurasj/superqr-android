@@ -26,6 +26,8 @@ data class TransferAccumulatorSnapshot(
     val receivedPayloadBytes: Long,
     val metadata: IncomingPackageMetadata?,
     val complete: Boolean,
+    val profileId: Int,
+    val profileLabel: String,
 )
 
 data class TransferCompletion(
@@ -35,7 +37,7 @@ data class TransferCompletion(
 )
 
 /**
- * Disk-backed out-of-order accumulator for production V40-L QR frames.
+ * Disk-backed out-of-order accumulator for production V40 QR frames.
  *
  * Only a BooleanArray + payload lengths live in RAM. File/photo/audio/video bytes
  * are written directly into a sparse temporary package file, so large transfers
@@ -44,11 +46,12 @@ data class TransferCompletion(
 class QrTransferAccumulator(private val cacheDir: File) {
     companion object {
         private val PACKAGE_MAGIC = byteArrayOf('S'.code.toByte(), 'Q'.code.toByte(), 'P'.code.toByte(), '7'.code.toByte())
-        private const val MAX_TOTAL_FRAMES = 2_000_000 // ~5.8 GiB at V40-L payload size.
+        private const val MAX_TOTAL_FRAMES = 2_000_000
     }
 
     private var sessionId = -1
     private var totalFrames = 0
+    private var activeProfile: ProductionQrProfile? = null
     private var seen = BooleanArray(0)
     private var payloadLengths = IntArray(0)
     private var uniqueFrames = 0
@@ -60,21 +63,18 @@ class QrTransferAccumulator(private val cacheDir: File) {
 
     @Synchronized
     fun accept(raw: ByteArray): TransferAccumulatorSnapshot {
-        if (!ProductionQrContract.looksLikeProductionFrame(raw)) {
-            throw V7TransportError("not a production V40-L frame")
-        }
+        val profile = ProductionQrContract.profileForFrame(raw)
+            ?: throw V7TransportError("not a supported production V40 frame")
         val frame = V7Transport.parseQrFrame(raw)
-        if (frame.profileId != ProductionQrContract.PROFILE_ID) {
-            throw V7TransportError("unsupported production QR profile")
-        }
-        if (frame.totalFrames !in 1..MAX_TOTAL_FRAMES) {
-            throw V7TransportError("unsupported total frame count")
-        }
-        if (frame.payload.size > ProductionQrContract.PAYLOAD_BYTES) {
-            throw V7TransportError("payload exceeds V40-L capacity")
-        }
+        if (frame.profileId != profile.id) throw V7TransportError("production QR profile mismatch")
+        if (frame.totalFrames !in 1..MAX_TOTAL_FRAMES) throw V7TransportError("unsupported total frame count")
+        if (frame.payload.size > profile.payloadBytes) throw V7TransportError("payload exceeds ${profile.label} capacity")
 
-        if (sessionId != frame.sessionId) startSession(frame.sessionId, frame.totalFrames)
+        if (sessionId != frame.sessionId) {
+            startSession(frame.sessionId, frame.totalFrames, profile)
+        } else if (activeProfile?.id != profile.id) {
+            throw V7TransportError("QR profile changed inside session")
+        }
         if (frame.totalFrames != totalFrames) throw V7TransportError("frame count changed inside session")
 
         if (seen[frame.frameId]) {
@@ -82,11 +82,11 @@ class QrTransferAccumulator(private val cacheDir: File) {
             return snapshot(accepted = false)
         }
 
-        val parsedMetadata = if (frame.frameId == 0) parseMetadata(frame.payload, frame.totalFrames) else null
+        val parsedMetadata = if (frame.frameId == 0) parseMetadata(frame.payload, frame.totalFrames, profile.payloadBytes) else null
         if (parsedMetadata != null) metadata = parsedMetadata
 
         val file = raf ?: throw IllegalStateException("temporary package file is closed")
-        file.seek(frame.frameId.toLong() * ProductionQrContract.PAYLOAD_BYTES)
+        file.seek(frame.frameId.toLong() * profile.payloadBytes)
         file.write(frame.payload)
         seen[frame.frameId] = true
         payloadLengths[frame.frameId] = frame.payload.size
@@ -132,6 +132,7 @@ class QrTransferAccumulator(private val cacheDir: File) {
         closeAndDelete()
         sessionId = -1
         totalFrames = 0
+        activeProfile = null
         seen = BooleanArray(0)
         payloadLengths = IntArray(0)
         uniqueFrames = 0
@@ -148,10 +149,11 @@ class QrTransferAccumulator(private val cacheDir: File) {
         tempFile = null
     }
 
-    private fun startSession(newSessionId: Int, newTotalFrames: Int) {
+    private fun startSession(newSessionId: Int, newTotalFrames: Int, profile: ProductionQrProfile) {
         reset()
         sessionId = newSessionId
         totalFrames = newTotalFrames
+        activeProfile = profile
         seen = BooleanArray(newTotalFrames)
         payloadLengths = IntArray(newTotalFrames)
         val dir = File(cacheDir, "superqr-transfer").apply { mkdirs() }
@@ -159,7 +161,7 @@ class QrTransferAccumulator(private val cacheDir: File) {
         raf = RandomAccessFile(tempFile, "rw")
     }
 
-    private fun parseMetadata(payload: ByteArray, declaredFrames: Int): IncomingPackageMetadata {
+    private fun parseMetadata(payload: ByteArray, declaredFrames: Int, payloadBytes: Int): IncomingPackageMetadata {
         if (payload.size < V7Transport.PACKAGE_HEADER_SIZE) throw V7TransportError("truncated SQP7 metadata")
         for (i in PACKAGE_MAGIC.indices) if (payload[i] != PACKAGE_MAGIC[i]) throw V7TransportError("invalid SQP7 package magic")
         val buf = ByteBuffer.wrap(payload)
@@ -172,10 +174,10 @@ class QrTransferAccumulator(private val cacheDir: File) {
         if (mimeLen !in 0..V7Transport.MAX_MIME_BYTES) throw V7TransportError("invalid MIME length")
         if (fileSize < 0) throw V7TransportError("negative file size")
         val dataOffset = V7Transport.PACKAGE_HEADER_SIZE.toLong() + filenameLen + mimeLen
-        if (dataOffset > payload.size) throw V7TransportError("metadata does not fit first V40-L frame")
+        if (dataOffset > payload.size) throw V7TransportError("metadata does not fit first V40 frame")
         if (fileSize > Long.MAX_VALUE - dataOffset) throw V7TransportError("declared file is too large")
         val packageBytes = dataOffset + fileSize
-        val expectedFrames = ((packageBytes + ProductionQrContract.PAYLOAD_BYTES - 1) / ProductionQrContract.PAYLOAD_BYTES).coerceAtLeast(1)
+        val expectedFrames = ((packageBytes + payloadBytes - 1) / payloadBytes).coerceAtLeast(1)
         if (expectedFrames != declaredFrames.toLong()) throw V7TransportError("package size does not match frame count")
         val filename = String(payload, V7Transport.PACKAGE_HEADER_SIZE, filenameLen, Charsets.UTF_8)
         val mime = String(payload, V7Transport.PACKAGE_HEADER_SIZE + filenameLen, mimeLen, Charsets.UTF_8)
@@ -191,22 +193,28 @@ class QrTransferAccumulator(private val cacheDir: File) {
 
     private fun validateCompletePackage() {
         val meta = metadata ?: throw V7TransportError("missing first frame / package metadata")
+        val profile = activeProfile ?: throw V7TransportError("missing production QR profile")
         val lastLength = payloadLengths.last()
         if (lastLength <= 0) throw V7TransportError("missing final payload length")
-        val actualPackageBytes = (totalFrames - 1).toLong() * ProductionQrContract.PAYLOAD_BYTES + lastLength
+        val actualPackageBytes = (totalFrames - 1).toLong() * profile.payloadBytes + lastLength
         if (actualPackageBytes != meta.packageBytes) throw V7TransportError("assembled package length mismatch")
     }
 
-    private fun snapshot(accepted: Boolean) = TransferAccumulatorSnapshot(
-        accepted = accepted,
-        sessionId = sessionId,
-        uniqueFrames = uniqueFrames,
-        totalFrames = totalFrames,
-        duplicateFrames = duplicates,
-        receivedPayloadBytes = receivedPayloadBytes,
-        metadata = metadata,
-        complete = totalFrames > 0 && uniqueFrames == totalFrames,
-    )
+    private fun snapshot(accepted: Boolean): TransferAccumulatorSnapshot {
+        val profile = activeProfile
+        return TransferAccumulatorSnapshot(
+            accepted = accepted,
+            sessionId = sessionId,
+            uniqueFrames = uniqueFrames,
+            totalFrames = totalFrames,
+            duplicateFrames = duplicates,
+            receivedPayloadBytes = receivedPayloadBytes,
+            metadata = metadata,
+            complete = totalFrames > 0 && uniqueFrames == totalFrames,
+            profileId = profile?.id ?: -1,
+            profileLabel = profile?.label.orEmpty(),
+        )
+    }
 
     private fun closeAndDelete() {
         try { raf?.close() } catch (_: Throwable) {}
