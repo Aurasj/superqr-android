@@ -101,6 +101,7 @@ fun ColorGrid8LabScreen(
     val continuity = remember { ColorGrid8FrameContinuity() }
     var frameDeliveryRatio by remember { mutableDoubleStateOf(1.0) }
     var sentTransitions by remember { mutableLongStateOf(0L) }
+    var dataPhaseStarted by remember { mutableStateOf(false) }
 
     fun resetStats() {
         uniqueFrames = 0
@@ -119,6 +120,7 @@ fun ColorGrid8LabScreen(
         continuity.reset()
         frameDeliveryRatio = 1.0
         sentTransitions = 0L
+        dataPhaseStarted = false
     }
 
     fun recordLatency(value: Double) {
@@ -139,7 +141,18 @@ fun ColorGrid8LabScreen(
     DisposableEffect(manager) {
         manager.onSample = { sample ->
             scope.launch {
-                val analysis = sample.result.analysis
+                val processResult = sample.result
+                // Ignore the balanced sender warm-up until the first real data frame
+                // decodes. After data begins, latency includes failed frames too.
+                if (!dataPhaseStarted) {
+                    if (processResult == null) return@launch
+                    dataPhaseStarted = true
+                }
+                lastPackMs = sample.packMs
+                recordLatency(sample.totalWithPackMs)
+                if (processResult == null) return@launch
+
+                val analysis = processResult.analysis
                 val frameIndex = analysis.header.frameIndex and 0xFFFF
                 continuity.observe(frameIndex)
                 frameDeliveryRatio = continuity.deliveryRatio
@@ -153,8 +166,6 @@ fun ColorGrid8LabScreen(
                 sumBer += analysis.bitErrorRate
                 sumErasure += analysis.erasureRate
                 sumFecLoad += analysis.fecLoad
-                lastPackMs = sample.packMs
-                recordLatency(sample.totalWithPackMs)
                 lastResult = analysis
             }
         }
