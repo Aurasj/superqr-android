@@ -104,7 +104,7 @@ fun TransferScreen(
         Text("SuperQR", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Text("Receive any file offline", color = Color.White.copy(alpha = 0.58f), fontSize = 13.sp)
         Text(
-            "V40 Auto • camera ${ProductionQrContract.CAMERA_TARGET_FPS} FPS • sender L/M at 15/20 FPS",
+            "V40 Auto • camera ${ProductionQrContract.CAMERA_TARGET_FPS} FPS • sender L/M at 15/20/30 FPS",
             color = Color(0xFF7CB7FF), fontSize = 11.sp,
         )
         Spacer(Modifier.height(10.dp))
