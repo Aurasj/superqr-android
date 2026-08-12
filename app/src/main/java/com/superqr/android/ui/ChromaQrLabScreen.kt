@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -153,11 +154,7 @@ fun ChromaQrLabScreen(
     val averageQuality = if (observations > 0) sumQualityKib / observations else 0.0
 
     Column(
-        modifier
-            .fillMaxSize()
-            .background(Color(0xFF090B10))
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier.fillMaxSize().background(Color(0xFF090B10)).padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text("ChromaQR Lab", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Bold)
@@ -228,19 +225,6 @@ fun ChromaQrLabScreen(
             }
         }
 
-        if (completed.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Card(
-                Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.04f)),
-            ) {
-                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("COMPLETED RUNS", color = Color.White.copy(alpha = 0.55f), fontSize = 10.sp)
-                    completed.takeLast(4).forEach { Text(it, color = Color.White.copy(alpha = 0.75f), fontSize = 10.sp) }
-                }
-            }
-        }
-
         Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
@@ -272,7 +256,24 @@ fun ChromaQrLabScreen(
                 modifier = Modifier.weight(1f),
             ) { Text("SHARE RESULTS") }
         }
-        Spacer(Modifier.height(24.dp))
+
+        if (completed.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Card(
+                Modifier.fillMaxWidth().heightIn(max = 88.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.04f)),
+            ) {
+                Column(
+                    Modifier.padding(10.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text("COMPLETED RUNS", color = Color.White.copy(alpha = 0.55f), fontSize = 10.sp)
+                    completed.takeLast(4).forEach {
+                        Text(it, color = Color.White.copy(alpha = 0.75f), fontSize = 10.sp)
+                    }
+                }
+            }
+        }
     }
 }
 
