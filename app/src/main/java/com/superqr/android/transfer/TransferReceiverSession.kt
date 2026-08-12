@@ -14,6 +14,7 @@ enum class TransferReceiveStatus { WAITING, RECEIVING, VERIFYING, COMPLETE, ERRO
 data class TransferReceiveState(
     val status: TransferReceiveStatus = TransferReceiveStatus.WAITING,
     val sessionId: Int = -1,
+    val profileLabel: String = "",
     val filename: String = "",
     val mimeType: String = "",
     val fileSize: Long = 0,
@@ -56,6 +57,7 @@ class TransferReceiverSession(context: Context) {
             _state.value = TransferReceiveState(
                 status = if (snap.complete) TransferReceiveStatus.VERIFYING else TransferReceiveStatus.RECEIVING,
                 sessionId = snap.sessionId,
+                profileLabel = snap.profileLabel,
                 filename = meta?.filename.orEmpty(),
                 mimeType = meta?.mimeType.orEmpty(),
                 fileSize = meta?.fileSize ?: 0,
