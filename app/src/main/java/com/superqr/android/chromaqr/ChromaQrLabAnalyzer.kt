@@ -45,7 +45,9 @@ class ChromaQrLabAnalyzer {
         const val TOTAL_BITS = QR_MODULES * QR_MODULES
         const val BASE_USEFUL_BYTES = 2933
         private const val FRAME_BYTES = 2953
-        private const val SEED_SALT = 0xC04A7A11.toInt()
+        // Signed Int representations of 0xC04A7A11 and 0x9E3779B1.
+        private const val SEED_SALT: Int = -1068860911
+        private const val GOLDEN_STEP: Int = -1640531535
         private val MARKER = byteArrayOf('C'.code.toByte(), 'Q'.code.toByte(), '4'.code.toByte(), 'B'.code.toByte())
 
         data class Header(val frameIndex: Int, val seed: Int, val senderFps: Int)
@@ -70,7 +72,7 @@ class ChromaQrLabAnalyzer {
         }
 
         internal fun expectedBits(seed: Int, frameIndex: Int): ByteArray {
-            var state = seed xor (frameIndex * 0x9E3779B1.toInt()) xor SEED_SALT
+            var state = seed xor (frameIndex * GOLDEN_STEP) xor SEED_SALT
             if (state == 0) state = 1
             val out = ByteArray(TOTAL_BITS)
             for (index in out.indices) {
@@ -195,7 +197,7 @@ class ChromaQrLabAnalyzer {
     }
 
     private fun fillExpected(seed: Int, frameIndex: Int) {
-        var state = seed xor (frameIndex * 0x9E3779B1.toInt()) xor SEED_SALT
+        var state = seed xor (frameIndex * GOLDEN_STEP) xor SEED_SALT
         if (state == 0) state = 1
         for (index in expected.indices) {
             var x = state
