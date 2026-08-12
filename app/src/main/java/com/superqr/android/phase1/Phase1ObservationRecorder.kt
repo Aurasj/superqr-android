@@ -300,6 +300,24 @@ class Phase1ObservationRecorder {
         pipelineWindowCount = minOf(pipelineWindowCount + 1, pipelineWindow.size)
     }
 
+    @Synchronized
+    fun missedGaps(maxFrame: Int = 255): String {
+        val ranges = mutableListOf<String>()
+        var start = -1
+        for (i in 0..maxFrame) {
+            if (!seenFrames[i]) {
+                if (start < 0) start = i
+            } else {
+                if (start >= 0) {
+                    ranges += if (start == i - 1) "$start" else "$start–${i - 1}"
+                    start = -1
+                }
+            }
+        }
+        if (start >= 0) ranges += if (start == maxFrame) "$start" else "$start–$maxFrame"
+        return ranges.joinToString(", ").ifEmpty { "none" }
+    }
+
     private fun resetRunCounters() {
         seenFrames.fill(false)
         runStartedNs = 0L

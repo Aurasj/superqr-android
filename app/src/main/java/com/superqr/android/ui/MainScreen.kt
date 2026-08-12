@@ -140,13 +140,7 @@ fun MainScreen(
 
             val framing = sessionState.framing
             val targetTransform = cameraManager.previewView.outputTransform
-            val showConfirmedOverlay = when (sessionState.phase) {
-                SessionPhase.QR_DETECTED, SessionPhase.QR_LOCKED ->
-                    framing.mode == Phase1FramingMode.QR && framing.candidateQuad?.size == 4
-                SessionPhase.GRID_DETECTED, SessionPhase.GRID_LOCKED, SessionPhase.RECEIVING ->
-                    framing.mode == Phase1FramingMode.GRID && framing.carrierQuad?.size == 4
-                else -> false
-            }
+            val showConfirmedOverlay = false
 
             val isRunning = cameraStatus == CameraStatus.RUNNING || cameraStatus == CameraStatus.STARTING
             val confirmedDetection = sessionState.phase in setOf(
@@ -219,6 +213,9 @@ fun MainScreen(
             CampaignProgressBar(
                 progress = sessionState.campaignProgress,
                 profileName = sessionState.profileName,
+                uniqueFrames = sessionState.receiverUniqueFrames,
+                expectedFrames = sessionState.receiverExpectedFrames,
+                missedGaps = sessionState.missedGaps,
             )
             Spacer(Modifier.height(8.dp))
             MetricsRow(
@@ -387,12 +384,19 @@ private fun StatusBlock(
 private fun CampaignProgressBar(
     progress: CampaignProgress,
     profileName: String,
+    uniqueFrames: Int,
+    expectedFrames: Int,
+    missedGaps: String,
 ) {
     if (!progress.visible) return
 
+    val fraction = if (expectedFrames > 0) {
+        if (progress.complete) 1f else (uniqueFrames.toFloat() / expectedFrames).coerceIn(0f, 1f)
+    } else 0f
+
     val label = when (progress.state) {
-        "RUNNING" -> "$profileName • ${progress.frameIndex} / ${progress.frameCount}"
-        "DONE" -> "$profileName • Done"
+        "RUNNING" -> "$profileName • $uniqueFrames / $expectedFrames"
+        "DONE" -> "$profileName • $uniqueFrames / $expectedFrames ✓"
         else -> profileName
     }
 
@@ -405,7 +409,7 @@ private fun CampaignProgressBar(
                 fontWeight = FontWeight.Medium,
             )
             Text(
-                "%.0f%%".format(progress.fraction * 100),
+                "%.0f%%".format(fraction * 100),
                 color = Color.White.copy(alpha = 0.55f),
                 fontSize = 11.sp,
             )
@@ -420,9 +424,16 @@ private fun CampaignProgressBar(
         ) {
             Box(
                 Modifier
-                    .fillMaxWidth(progress.fraction)
+                    .fillMaxWidth(fraction)
                     .height(6.dp)
                     .background(Color(0xFF7CB7FF), shape),
+            )
+        }
+        if (missedGaps.isNotEmpty() && missedGaps != "none") {
+            Text(
+                "Missed: $missedGaps",
+                color = Color(0xFFFF8A80).copy(alpha = 0.7f),
+                fontSize = 10.sp,
             )
         }
     }
@@ -431,9 +442,9 @@ private fun CampaignProgressBar(
 @Composable
 private fun MetricsRow(cameraFps: Double, analysisFps: Double, pipelineMs: Double, profileName: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-        MetricChip("Camera", "%.1f fps".format(cameraFps))
-        MetricChip("Analysis", "%.1f fps".format(analysisFps))
         MetricChip("Pipeline", "%.1f ms".format(pipelineMs))
+        MetricChip("Receiver", "%.1f fps".format(analysisFps))
+        MetricChip("Camera", "%.1f fps".format(cameraFps))
         MetricChip("Profile", profileName.ifEmpty { "—" })
     }
 }

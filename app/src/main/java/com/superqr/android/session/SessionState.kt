@@ -20,17 +20,15 @@ enum class SessionPhase(val label: String) {
 data class CampaignProgress(
     val runToken: Int = -1,
     val state: String = "",
-    val frameIndex: Int = 0,
-    val frameCount: Int = 0,
 ) {
-    val fraction: Float get() = if (frameCount > 0) (frameIndex.toFloat() / frameCount).coerceIn(0f, 1f) else 0f
     val visible: Boolean get() = runToken >= 0 && state.isNotEmpty()
+    val complete: Boolean get() = state == "DONE"
 }
 
 internal fun CampaignProgress.stabilizedWith(observed: CampaignProgress?): CampaignProgress {
     if (observed == null || !observed.visible) return this
     if (!visible || runToken != observed.runToken) return observed
-    return observed.copy(frameIndex = maxOf(frameIndex, observed.frameIndex))
+    return observed
 }
 
 data class SessionState(
@@ -47,4 +45,7 @@ data class SessionState(
     val campaignId: String = "",
     val error: String? = null,
     val campaignProgress: CampaignProgress = CampaignProgress(),
+    val receiverUniqueFrames: Int = 0,
+    val receiverExpectedFrames: Int = 256,
+    val missedGaps: String = "",
 )

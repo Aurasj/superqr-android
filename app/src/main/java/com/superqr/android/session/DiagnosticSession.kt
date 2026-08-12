@@ -98,6 +98,11 @@ class DiagnosticSession(private val context: Context) {
     private var wasLost = false
     private var observedFrames = 0
     private var sessionActive = false
+    private var receiverUniqueFrames = 0
+    private var receiverExpectedFrames = 256
+    private var lastRunToken = -1
+    private var gapThrottle = 0
+    private var didGapSnapshotOnDone = false
 
     private fun advancedEngine(): AdvancedPhyEngine {
         val existing = advancedEngine
@@ -167,6 +172,9 @@ class DiagnosticSession(private val context: Context) {
         wasTracking = false
         wasLost = false
         observedFrames = 0
+        receiverUniqueFrames = 0
+        receiverExpectedFrames = 256
+        lastRunToken = -1
         _sessionState.value = SessionState(campaignId = recorder.campaignId)
     }
 
@@ -224,8 +232,6 @@ class DiagnosticSession(private val context: Context) {
                 val observedProgress = CampaignProgress(
                     runToken = shapeGrid.envelope.runToken,
                     state = shapeGrid.envelope.state.name,
-                    frameIndex = shapeGrid.envelope.frameIndex,
-                    frameCount = shapeGrid.envelope.frameCount,
                 )
                 updateState {
                     it.copy(
@@ -290,8 +296,6 @@ class DiagnosticSession(private val context: Context) {
                 val observedProgress = CampaignProgress(
                     runToken = advanced.envelope.runToken,
                     state = advanced.envelope.state.name,
-                    frameIndex = advanced.envelope.frameIndex,
-                    frameCount = advanced.envelope.frameCount,
                 )
                 updateState {
                     it.copy(
@@ -436,12 +440,29 @@ class DiagnosticSession(private val context: Context) {
                     CampaignProgress(
                         runToken = it.runToken,
                         state = it.state.name,
-                        frameIndex = it.frameIndex,
-                        frameCount = it.frameCount,
                     )
                 }
                 val progress = it.campaignProgress.stabilizedWith(observedProgress)
-                it.copy(
+                val rt = envelope?.runToken ?: -1
+                if (rt != lastRunToken && rt >= 0) {
+                    lastRunToken = rt
+                    receiverUniqueFrames = 0
+                    gapThrottle = 0
+                    didGapSnapshotOnDone = false
+                }
+                if (result.qrObservation != null || result.gridObservation != null) {
+                    receiverUniqueFrames++
+                    gapThrottle++
+                }
+                receiverExpectedFrames = envelope?.frameCount ?: receiverExpectedFrames
+                if (gapThrottle >= 16 || (progress.complete && !didGapSnapshotOnDone)) {
+                    gapThrottle = 0
+                    didGapSnapshotOnDone = progress.complete
+                    _sessionState.value = _sessionState.value.copy(
+                        missedGaps = recorder.missedGaps(),
+                    )
+                }
+                val next = it.copy(
                     phase = derivePhase(result),
                     trackingState = result.trackingState,
                     framing = result.framing,
@@ -455,8 +476,12 @@ class DiagnosticSession(private val context: Context) {
                     campaignId = recorder.campaignId,
                     error = result.qrResult?.failure,
                     campaignProgress = progress,
+                    receiverUniqueFrames = receiverUniqueFrames,
+                    receiverExpectedFrames = receiverExpectedFrames,
                 )
+                next
             }
+
         }
     }
 
@@ -549,7 +574,12 @@ class DiagnosticSession(private val context: Context) {
         return SessionPhase.SEARCHING
     }
 
-    fun snapshot(): Phase1RunSnapshot = recorder.snapshot()
+    fun snapshot(): Phase1RunSnapshot {
+        val s = recorder.snapshot()
+        val gaps = recorder.missedGaps()
+        _sessionState.value = _sessionState.value.copy(missedGaps = gaps)
+        return s
+    }
 
     fun exportSession(): File? {
         if (!recorder.hasLines && !advancedRecorder.hasLines && !shapeGridRecorder.hasLines && capturedQrFrames.isEmpty()) return null

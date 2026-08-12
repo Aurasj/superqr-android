@@ -1,6 +1,7 @@
 package com.superqr.android.session
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -10,8 +11,6 @@ class CampaignProgressTest {
         val previous = CampaignProgress(
             runToken = 0x1234,
             state = "RUNNING",
-            frameIndex = 87,
-            frameCount = 256,
         )
 
         val stabilized = previous.stabilizedWith(null)
@@ -21,23 +20,20 @@ class CampaignProgressTest {
     }
 
     @Test
-    fun sameRunCannotMoveProgressBackward() {
+    fun sameRunTokenPreservesProgress() {
         val previous = CampaignProgress(
             runToken = 0x1234,
             state = "RUNNING",
-            frameIndex = 87,
-            frameCount = 256,
         )
-        val olderObservation = CampaignProgress(
+        val sameToken = CampaignProgress(
             runToken = 0x1234,
-            state = "RUNNING",
-            frameIndex = 84,
-            frameCount = 256,
+            state = "DONE",
         )
 
-        val stabilized = previous.stabilizedWith(olderObservation)
+        val stabilized = previous.stabilizedWith(sameToken)
 
-        assertEquals(87, stabilized.frameIndex)
+        assertEquals("DONE", stabilized.state)
+        assertTrue(stabilized.visible)
     }
 
     @Test
@@ -45,18 +41,20 @@ class CampaignProgressTest {
         val previous = CampaignProgress(
             runToken = 0x1234,
             state = "DONE",
-            frameIndex = 255,
-            frameCount = 256,
         )
         val nextRun = CampaignProgress(
             runToken = 0x5678,
             state = "READY",
-            frameIndex = 0,
-            frameCount = 256,
         )
 
         val stabilized = previous.stabilizedWith(nextRun)
 
         assertEquals(nextRun, stabilized)
+    }
+
+    @Test
+    fun completeFlagWorks() {
+        assertTrue(CampaignProgress(1, "DONE").complete)
+        assertFalse(CampaignProgress(1, "RUNNING").complete)
     }
 }

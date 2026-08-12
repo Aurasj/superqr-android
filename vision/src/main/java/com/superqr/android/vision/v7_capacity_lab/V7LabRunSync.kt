@@ -21,7 +21,7 @@ data class V7LabRunEnvelope(
 ) {
     fun encode(): ByteArray {
         require(profileId in 0..255 && runToken in 0..65535 && frameIndex in 0..255)
-        require(frameCount in 1..256 && dwellEpochs in 2..3)
+        require(frameCount in 1..256 && dwellEpochs in 2..6)
         val packet = ByteArray(PACKET_BYTES)
         packet[0] = MAGIC.toByte(); packet[1] = VERSION.toByte(); packet[2] = state.wireValue.toByte()
         packet[3] = profileId.toByte(); packet[4] = runToken.toByte(); packet[5] = (runToken ushr 8).toByte()
@@ -42,7 +42,7 @@ data class V7LabRunEnvelope(
             if (crc8(packet, 9, offset) != u8(packet[offset + 9])) return null
             val state = V7LabRunState.fromWire(u8(packet[offset + 2])) ?: return null
             val dwell = u8(packet[offset + 8])
-            if (dwell !in 2..3) return null
+            if (dwell !in 2..6) return null
             return V7LabRunEnvelope(
                 state = state,
                 profileId = u8(packet[offset + 3]),
