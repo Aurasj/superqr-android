@@ -22,12 +22,14 @@ class QrTransferAccumulatorTest {
     }
 
     @Test
-    fun recognizesAllFourProductionProfiles() {
+    fun recognizesAllSixProductionProfiles() {
         val expected = mapOf(
             0 to Triple("L", 15.0, 2953),
             1 to Triple("M", 15.0, 2331),
             2 to Triple("L", 20.0, 2953),
             3 to Triple("M", 20.0, 2331),
+            4 to Triple("L", 30.0, 2953),
+            5 to Triple("M", 30.0, 2331),
         )
         expected.forEach { (id, values) ->
             val profile = requireNotNull(ProductionQrContract.profileForId(id))
