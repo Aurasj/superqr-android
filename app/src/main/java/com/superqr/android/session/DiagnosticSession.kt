@@ -87,19 +87,6 @@ class DiagnosticSession(private val context: Context) {
 
     private val manifest by lazy { Phase1Manifest.load(context) }
     private val engine by lazy { VisionEngine(manifest) }
-    val receiveSession: com.superqr.android.receive.ReceiveSession by lazy {
-        com.superqr.android.receive.ReceiveSession(context.cacheDir)
-    }
-    var transferMode: Boolean = false
-
-    fun setAppMode(mode: AppMode) {
-        transferMode = mode == AppMode.RECEIVE
-        receiveSession.reset()
-        if (mode == AppMode.RECEIVE) {
-            setReceiverMode(ReceiverMode.QR_ONLY)
-        }
-        _sessionState.value = _sessionState.value.copy(appMode = mode)
-    }
     private val advancedManifest by lazy { AdvancedPhyManifest.load(context) }
     private val shapeGridManifest by lazy { ShapeGridManifest.load(context) }
     private var advancedEngine: AdvancedPhyEngine? = null
@@ -184,7 +171,6 @@ class DiagnosticSession(private val context: Context) {
 
     private fun resetForNewSession() {
         engine.reset()
-        receiveSession.reset()
         advancedEngine?.close()
         advancedEngine = null
         shapeGridEngine?.close()
@@ -272,14 +258,6 @@ class DiagnosticSession(private val context: Context) {
 
         // Canonical VisionEngine (QR + grid).
         if (!runVision) return
-
-        // Transfer mode: feed raw QR bytes directly into receive session.
-        if (transferMode) {
-            val external = (frame.chromaReader as? com.superqr.android.vision.v7_capacity_lab.ExternalQrFrameDecoder)?.decodeQr()
-            if (external != null && external.payload.isNotEmpty()) {
-                receiveSession.processQrBytes(external.payload)
-            }
-        }
 
         val result = try {
             if (receiverMode == ReceiverMode.QR_ONLY)
