@@ -7,7 +7,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.transform.OutputTransform
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +16,6 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -145,7 +143,6 @@ fun MainScreen(
             val framing = sessionState.framing
             val targetTransform = cameraManager.previewView.outputTransform
             val showConfirmedOverlay = false
-
             val isRunning = cameraStatus == CameraStatus.RUNNING || cameraStatus == CameraStatus.STARTING
             val confirmedDetection = sessionState.phase in setOf(
                 SessionPhase.QR_DETECTED,
@@ -454,17 +451,12 @@ private fun CampaignProgressBar(
             )
         }
         if (missedGaps.isNotEmpty() && missedGaps != "none") {
-            Box(Modifier.fillMaxWidth().heightIn(max = 28.dp)) {
-                Row(Modifier.horizontalScroll(rememberScrollState())) {
-                    Text(
-                        "Missed: $missedGaps",
-                        color = Color(0xFFFF8A80).copy(alpha = 0.7f),
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-            }
+            Text(
+                "Missed: $missedGaps",
+                color = Color(0xFFFF8A80).copy(alpha = 0.7f),
+                fontSize = 10.sp,
+                maxLines = 1,
+            )
         }
     }
 }
@@ -501,10 +493,10 @@ private fun DiagnosticsPanel(
     ) {
         SectionHeader("Session")
         DiagnosticText("Campaign: ${state.campaignId.take(8)} · Frames: ${state.analyzedFrames}")
+        SectionHeader("Routing")
+        DiagnosticText("Mode: ${state.receiverMode.label} · Profile: ${state.profileName}")
         SectionHeader("Camera")
         DiagnosticText("${cameraStatus.name} · ${resolutionLabel.ifEmpty { "resolution pending" }}")
-        SectionHeader("Tracking")
-        DiagnosticText("State: ${state.trackingState.label} · Profile: ${state.profileName}")
         SectionHeader("Performance")
         DiagnosticText(
             "Pipeline: %.1f ms · Camera: %.1f fps · Analysis: %.1f fps".format(
@@ -512,16 +504,19 @@ private fun DiagnosticsPanel(
             )
         )
         if (snapshot.observations > 0) {
-            SectionHeader("Observations")
+            SectionHeader("Frames")
             DiagnosticText(
-                "Observed: ${snapshot.observations} · Valid: ${snapshot.validFrames} · " +
-                    "Unique: ${snapshot.uniqueFrames} · FEC valid: ${snapshot.innerFecFrames}"
+                "Valid: ${snapshot.validFrames} · Unique: ${snapshot.uniqueFrames} / ${snapshot.expectedFrames} · " +
+                    "Rx: ${state.receiverUniqueFrames} / ${state.receiverExpectedFrames}"
             )
             DiagnosticText(
-                "BER: %.4f · Erasures: %.4f · Goodput: %.2f KiB/s".format(
-                    snapshot.bitErrorRate, snapshot.erasureRate, snapshot.goodputKibS,
+                "FEC valid: ${snapshot.innerFecFrames} · Goodput: %.2f KiB/s · Pipeline P95: %.1f ms".format(
+                    snapshot.goodputKibS, snapshot.p95PipelineMs,
                 )
             )
+            state.missedGaps.takeIf { it.isNotEmpty() && it != "none" }?.let { gaps ->
+                DiagnosticText("$gaps missed")
+            }
         }
         if (snapshot.failureSummary.isNotEmpty()) {
             SectionHeader("Failures")

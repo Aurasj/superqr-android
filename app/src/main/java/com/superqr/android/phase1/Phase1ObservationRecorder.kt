@@ -304,21 +304,25 @@ class Phase1ObservationRecorder {
 
     @Synchronized
     fun missedGaps(): String {
-        val maxInclusive = expectedFrames - 1
-        val ranges = mutableListOf<String>()
-        var start = -1
-        for (i in 0..maxInclusive) {
-            if (!seenFrames[i]) {
-                if (start < 0) start = i
-            } else {
-                if (start >= 0) {
-                    ranges += if (start == i - 1) "$start" else "$start–${i - 1}"
-                    start = -1
-                }
-            }
+        var missed = 0
+        for (i in 0 until expectedFrames) {
+            if (!seenFrames[i]) missed++
         }
-        if (start >= 0) ranges += if (start == maxInclusive) "$start" else "$start–$maxInclusive"
-        return ranges.joinToString(", ").ifEmpty { "none" }
+        return "$missed / $expectedFrames"
+    }
+
+    @Synchronized
+    fun missedFrameIndexes(): List<Int> = (0 until expectedFrames).filter { !seenFrames[it] }
+
+    @Synchronized
+    fun pipelineStats(): Map<String, Double> {
+        val sorted = pipelineWindow.copyOf(pipelineWindowCount).apply { sort() }
+        if (sorted.isEmpty()) return emptyMap()
+        val avg = sorted.average()
+        val p50 = sorted[sorted.size / 2]
+        val p95 = sorted[(sorted.size * 0.95).toInt().coerceAtMost(sorted.lastIndex)]
+        val p99 = sorted[(sorted.size * 0.99).toInt().coerceAtMost(sorted.lastIndex)]
+        return mapOf("avg" to avg, "p50" to p50, "p95" to p95, "p99" to p99, "min" to sorted.first(), "max" to sorted.last(), "n" to sorted.size.toDouble())
     }
 
     private fun resetRunCounters() {

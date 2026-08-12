@@ -77,6 +77,54 @@ class VisionEngine(private val manifest: Phase1Manifest) {
     private var warmupFrames = 0
     private var warmupStartedNs = 0L
 
+    /** Fast QR-only path — no warmup, no scheduler, no GRID fallback, no OpenCV. */
+    fun analyzeQrDirect(
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        chromaReader: ChromaPixelReader?,
+        arrivalNs: Long,
+    ): VisionResult {
+        val external = (chromaReader as? ExternalQrFrameDecoder)?.decodeQr()
+        val qr = if (external != null && (external.payload.isNotEmpty() || external.quad != null)) {
+            analyzeExternalQr(external)
+        } else {
+            V7Phase1QrResult(false, false, null, 0, failure = "QR_NOT_DECODED")
+        }
+        val completedNs = System.nanoTime()
+        val envelope = qr.envelope
+        val profile = envelope?.let { manifest.profile(it.profileId) }
+        if (envelope != null && profile is Phase1Profile.Qr) {
+            return VisionResult(
+                path = Phase1AnalysisPath.QR,
+                trackingState = Phase1TrackingState.TRACKING,
+                framing = Phase1FramingEvaluator.evaluateQr(width, height, qr),
+                carrierAcquisition = null, qrResult = qr,
+                schedulerState = scheduler.state,
+                profileName = profile.name,
+                pipelineMs = (completedNs - arrivalNs) / 1_000_000.0,
+                activeGridProfile = null, qrProfile = profile, gridObservation = null,
+                qrObservation = if (qr.valid && envelope.state == V7LabRunState.RUNNING) {
+                    QrObservationData(profile = profile, frameIndex = qr.frameIndex,
+                        valid = true, failure = null, geometrySource = "QR_NATIVE_LOCKED")
+                } else null,
+                envelope = envelope,
+            )
+        }
+        val qrCandidate = qr.quad != null
+        return VisionResult(
+            path = Phase1AnalysisPath.QR,
+            trackingState = if (qrCandidate) Phase1TrackingState.TRACKING else Phase1TrackingState.SEARCHING,
+            framing = Phase1FramingEvaluator.evaluateQr(width, height, qr),
+            carrierAcquisition = null, qrResult = qr,
+            schedulerState = scheduler.state,
+            profileName = "AUTO",
+            pipelineMs = (completedNs - arrivalNs) / 1_000_000.0,
+            activeGridProfile = null, qrProfile = null, gridObservation = null,
+            qrObservation = null, envelope = null,
+        )
+    }
+
     fun analyze(
         luma: ByteArray,
         width: Int,

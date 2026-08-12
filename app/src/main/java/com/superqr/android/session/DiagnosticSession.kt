@@ -28,6 +28,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
+import java.util.ArrayList
+import java.util.LinkedHashMap
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -100,7 +102,7 @@ class DiagnosticSession(private val context: Context) {
     private var wasLost = false
     private var observedFrames = 0
     private var sessionActive = false
-    private var gapRefreshCounter = 0
+    private var gapThrottle = 0
 
     // Stateful decoder routing — only one expensive PHY decoder runs per frame.
     private var receiverMode = ReceiverMode.AUTO
@@ -258,7 +260,10 @@ class DiagnosticSession(private val context: Context) {
         if (!runVision) return
 
         val result = try {
-            engine.analyze(frame.lumaBytes, frame.width, frame.height, frame.chromaReader, frame.arrivalNs)
+            if (receiverMode == ReceiverMode.QR_ONLY)
+                engine.analyzeQrDirect(frame.lumaBytes, frame.width, frame.height, frame.chromaReader, frame.arrivalNs)
+            else
+                engine.analyze(frame.lumaBytes, frame.width, frame.height, frame.chromaReader, frame.arrivalNs)
         } catch (t: Throwable) {
             frameGate.commitIfCurrent(frameToken) {
                 updateState {
@@ -379,17 +384,17 @@ class DiagnosticSession(private val context: Context) {
                     )
                 }
                 val progress = it.campaignProgress.stabilizedWith(observedProgress)
-                gapRefreshCounter++
-                val gaps = if (gapRefreshCounter >= 64 || progress.complete) {
-                    gapRefreshCounter = 0
+                gapThrottle++
+                val gaps = if (gapThrottle >= 16 || progress.complete) {
+                    gapThrottle = 0
                     recorder.missedGaps()
                 } else null
-                var next = it.copy(
+                it.copy(
                     phase = derivePhase(result),
                     trackingState = result.trackingState,
                     framing = result.framing,
                     sourceTransform = frame.sourceTransform,
-                    profileName = result.profileName,
+                    profileName = result.profileName.takeIf { it != "AUTO" } ?: it.profileName,
                     cameraFps = frame.cameraFps,
                     analysisFps = analysisFps,
                     pipelineMs = result.pipelineMs,
@@ -400,11 +405,7 @@ class DiagnosticSession(private val context: Context) {
                     campaignProgress = progress,
                     receiverUniqueFrames = recorder.currentUniqueFrames,
                     receiverExpectedFrames = recorder.currentExpectedFrames,
-                )
-                if (gaps != null) {
-                    next = next.copy(missedGaps = gaps)
-                }
-                next
+                ).let { next -> if (gaps != null) next.copy(missedGaps = gaps) else next }
             }
 
             lockIfReceiving("qr", result.envelope?.state == V7LabRunState.RUNNING && (result.qrObservation != null || result.gridObservation != null))
@@ -619,6 +620,81 @@ class DiagnosticSession(private val context: Context) {
                 .put("last_failure", snapshot.lastFailure ?: JSONObject.NULL)
                 .put("failure_summary", snapshot.failureSummary)
             zip.writeTextEntry("summary.json", summaryJson.toString(2))
+
+            // Per-run aggregation from observations
+            val runMap = LinkedHashMap<Int, JSONObject>()
+            val runSeen = LinkedHashMap<Int, BooleanArray>()
+            val runPipes = LinkedHashMap<Int, ArrayList<Double>>()
+            val runProfiles = LinkedHashMap<Int, String>()
+            val runFailures = LinkedHashMap<Int, LinkedHashMap<String, Int>>()
+            for (line in observationLines) {
+                if (line.isBlank()) continue
+                val obs = JSONObject(line)
+                val rt = obs.optInt("run_token", -1)
+                if (rt < 0) continue
+                runProfiles.putIfAbsent(rt, obs.optString("profile", "?"))
+                runSeen.putIfAbsent(rt, BooleanArray(256))
+                runPipes.putIfAbsent(rt, ArrayList())
+                runFailures.putIfAbsent(rt, LinkedHashMap())
+                val pm = obs.optDouble("pipeline_ms", 0.0)
+                if (pm > 0) runPipes[rt]!!.add(pm)
+                val fr = obs.optString("failure_reason", null)
+                if (fr != null) runFailures[rt]!!.merge(fr, 1, Int::plus)
+                if (obs.optBoolean("qr_valid", false)) {
+                    val fi = obs.optInt("frame_index", -1)
+                    if (fi in 0..255) runSeen[rt]!![fi] = true
+                }
+            }
+            val runsJson = JSONArray()
+            for ((rt, seen) in runSeen) {
+                val unique = seen.count { it }
+                val missed = (0 until 256).filter { !seen[it] }
+                val pipes = runPipes[rt]!!.sorted()
+                val entry = JSONObject()
+                entry.put("run_token", rt)
+                entry.put("profile", runProfiles[rt] ?: "?")
+                entry.put("unique", unique)
+                entry.put("missed", 256 - unique)
+                entry.put("coverage_pct", unique / 256.0 * 100.0)
+                entry.put("missed_indexes", JSONArray(missed))
+                if (pipes.isNotEmpty()) {
+                    entry.put("pipeline_avg", pipes.average())
+                    entry.put("pipeline_p50", pipes[pipes.size / 2])
+                    entry.put("pipeline_p95", pipes[(pipes.size * 0.95).toInt().coerceAtMost(pipes.lastIndex)])
+                    entry.put("pipeline_n", pipes.size)
+                }
+                val fails = runFailures[rt]!!
+                if (fails.isNotEmpty()) {
+                    val fj = JSONObject()
+                    fails.forEach { (k, v) -> fj.put(k, v) }
+                    entry.put("failures", fj)
+                }
+                runsJson.put(entry)
+            }
+            zip.writeTextEntry("runs.json", runsJson.toString(2))
+
+            val debugJson = JSONObject()
+            val missedIdx = recorder.missedFrameIndexes()
+            debugJson.put("missed_frame_indexes", JSONArray(missedIdx))
+            debugJson.put("missed_count", missedIdx.size)
+            debugJson.put("first_missed", if (missedIdx.isNotEmpty()) missedIdx.first() else JSONObject.NULL)
+            debugJson.put("last_missed", if (missedIdx.isNotEmpty()) missedIdx.last() else JSONObject.NULL)
+            debugJson.put("expected_frames", snapshot.expectedFrames)
+            debugJson.put("unique_frames", snapshot.uniqueFrames)
+            debugJson.put("coverage_pct", if (snapshot.expectedFrames > 0)
+                snapshot.uniqueFrames.toDouble() / snapshot.expectedFrames * 100.0 else 0.0)
+            val pStats = recorder.pipelineStats()
+            if (pStats.isNotEmpty()) {
+                val timingJson = JSONObject()
+                pStats.forEach { (k, v) -> timingJson.put(k, v) }
+                debugJson.put("pipeline_ms", timingJson)
+            }
+            debugJson.put("receiver_mode", state.receiverMode.name)
+            debugJson.put("session_phase", state.phase.name)
+            debugJson.put("camera_fps", state.cameraFps)
+            debugJson.put("analysis_fps", state.analysisFps)
+            debugJson.put("failure_summary", snapshot.failureSummary)
+            zip.writeTextEntry("debug_analysis.json", debugJson.toString(2))
 
             val observations = if (observationLines.isEmpty()) "" else observationLines.joinToString("\n", postfix = "\n")
             zip.writeTextEntry("observations.jsonl", observations)
