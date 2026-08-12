@@ -187,7 +187,7 @@ fun ColorGrid8LabScreen(
         channelFecLoad = avgFecLoad,
         frameDeliveryRatio = frameDeliveryRatio,
     )
-    val estimatedGoodput = runEstimate.estimatedPostFecKibS
+    val estimatedGoodput = if (observations > 0) runEstimate.estimatedPostFecKibS else 0.0
     // Do not declare victory from a handful of easy frames. Require at least
     // two sender-seconds of logical continuity in addition to the latency target.
     val enoughRun = observations >= 60 && sentTransitions >= (profile.fps * 2L)
@@ -222,7 +222,7 @@ fun ColorGrid8LabScreen(
 
         if (!permission) {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                Button(onClick = { launcher.launch(Manifest.permission.RequestPermission()) }) { Text("GRANT CAMERA") }
+                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) { Text("GRANT CAMERA") }
             }
             return@Column
         }
