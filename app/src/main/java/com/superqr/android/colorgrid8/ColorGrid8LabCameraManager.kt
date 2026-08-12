@@ -34,8 +34,9 @@ class ColorGrid8LabCameraManager(
 ) {
     enum class Status { IDLE, STARTING, RUNNING, STOPPING, ERROR }
 
+    /** One analyzed camera frame; result is null when the ColorGrid8 frame did not decode. */
     data class Sample(
-        val result: ColorGrid8ProcessResult,
+        val result: ColorGrid8ProcessResult?,
         val cameraFps: Double,
         val packMs: Double,
         val totalWithPackMs: Double,
@@ -195,10 +196,12 @@ class ColorGrid8LabCameraManager(
             val result = processor.process(currentProfile, packed)
             val totalMs = (System.nanoTime() - started) / 1_000_000.0
             _pipelineMs.value = totalMs
-            if (result != null && generation.get() == configuredGeneration) {
+            if (result != null) {
                 _geometryMs.value = result.geometryMs
                 _warpMs.value = result.warpAndMeanMs
                 _acquisitionMode.value = result.acquisitionMode
+            }
+            if (generation.get() == configuredGeneration) {
                 onSample?.invoke(Sample(result, fps, packMs, totalMs))
             }
         } catch (_: Throwable) {
