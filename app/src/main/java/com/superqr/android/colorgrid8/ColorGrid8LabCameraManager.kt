@@ -17,7 +17,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.doOnLayout
 import androidx.lifecycle.LifecycleOwner
 import com.superqr.android.camera.AnalysisRateAccumulator
-import com.superqr.android.camera.LumaPlanePacker
 import com.superqr.android.vision.v7_capacity_lab.colorgrid8.ColorGrid8FrameProcessor
 import com.superqr.android.vision.v7_capacity_lab.colorgrid8.ColorGrid8ProcessResult
 import com.superqr.android.vision.v7_capacity_lab.colorgrid8.ColorGrid8Profile
@@ -215,14 +214,14 @@ class ColorGrid8LabCameraManager(
         val rawWidth = crop.width()
         val rawHeight = crop.height()
         val rotation = image.imageInfo.rotationDegrees
-        val normalizedWidth = LumaPlanePacker.normalizedWidth(rawWidth, rawHeight, rotation)
-        val normalizedHeight = LumaPlanePacker.normalizedHeight(rawWidth, rawHeight, rotation)
+        val normalizedWidth = ColorGrid8PlanePacker.normalizedWidth(rawWidth, rawHeight, rotation)
+        val normalizedHeight = ColorGrid8PlanePacker.normalizedHeight(rawWidth, rawHeight, rotation)
         val yPlane = image.planes[0]
         ensureYBuffers(
             destination = normalizedWidth * normalizedHeight,
-            row = rawWidth * yPlane.pixelStride,
+            row = (rawWidth - 1) * yPlane.pixelStride + 1,
         )
-        if (!LumaPlanePacker.pack(
+        if (!ColorGrid8PlanePacker.pack(
                 source = yPlane.buffer,
                 cropLeft = crop.left,
                 cropTop = crop.top,
@@ -235,20 +234,25 @@ class ColorGrid8LabCameraManager(
                 destination = yDestination,
             )) return null
 
-        val chromaRawWidth = (rawWidth + 1) / 2
-        val chromaRawHeight = (rawHeight + 1) / 2
-        val chromaWidth = LumaPlanePacker.normalizedWidth(chromaRawWidth, chromaRawHeight, rotation)
-        val chromaHeight = LumaPlanePacker.normalizedHeight(chromaRawWidth, chromaRawHeight, rotation)
+        // YUV_420_888 chroma is half-resolution in both dimensions. Match the
+        // platform/CTS crop convention: chroma crop origin and extent are the
+        // luma crop divided by two. Camera outputs used here are even-sized.
+        val chromaRawWidth = rawWidth / 2
+        val chromaRawHeight = rawHeight / 2
+        if (chromaRawWidth <= 0 || chromaRawHeight <= 0) return null
+        val chromaWidth = ColorGrid8PlanePacker.normalizedWidth(chromaRawWidth, chromaRawHeight, rotation)
+        val chromaHeight = ColorGrid8PlanePacker.normalizedHeight(chromaRawWidth, chromaRawHeight, rotation)
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
+        if (uPlane.rowStride != vPlane.rowStride || uPlane.pixelStride != vPlane.pixelStride) return null
         ensureChromaBuffers(
             destination = chromaWidth * chromaHeight,
-            uRow = chromaRawWidth * uPlane.pixelStride,
-            vRow = chromaRawWidth * vPlane.pixelStride,
+            uRow = (chromaRawWidth - 1) * uPlane.pixelStride + 1,
+            vRow = (chromaRawWidth - 1) * vPlane.pixelStride + 1,
         )
         val chromaCropLeft = crop.left / 2
         val chromaCropTop = crop.top / 2
-        if (!LumaPlanePacker.pack(
+        if (!ColorGrid8PlanePacker.pack(
                 source = uPlane.buffer,
                 cropLeft = chromaCropLeft,
                 cropTop = chromaCropTop,
@@ -260,7 +264,7 @@ class ColorGrid8LabCameraManager(
                 rowBuffer = uRowScratch,
                 destination = uDestination,
             )) return null
-        if (!LumaPlanePacker.pack(
+        if (!ColorGrid8PlanePacker.pack(
                 source = vPlane.buffer,
                 cropLeft = chromaCropLeft,
                 cropTop = chromaCropTop,
