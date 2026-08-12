@@ -16,7 +16,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -151,7 +153,11 @@ fun ChromaQrLabScreen(
     val averageQuality = if (observations > 0) sumQualityKib / observations else 0.0
 
     Column(
-        modifier.fillMaxSize().background(Color(0xFF090B10)).padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier
+            .fillMaxSize()
+            .background(Color(0xFF090B10))
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text("ChromaQR Lab", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Bold)
@@ -266,6 +272,7 @@ fun ChromaQrLabScreen(
                 modifier = Modifier.weight(1f),
             ) { Text("SHARE RESULTS") }
         }
+        Spacer(Modifier.height(24.dp))
     }
 }
 
