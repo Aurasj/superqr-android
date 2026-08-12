@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -105,7 +104,7 @@ fun TransferScreen(
         Text("SuperQR", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Text("Receive any file offline", color = Color.White.copy(alpha = 0.58f), fontSize = 13.sp)
         Text(
-            "V40-L • ${ProductionQrContract.TARGET_SENDER_FPS.toInt()} FPS • photos • audio • video • files",
+            "V40 Auto • camera ${ProductionQrContract.CAMERA_TARGET_FPS} FPS • sender L/M at 15/20 FPS",
             color = Color(0xFF7CB7FF), fontSize = 11.sp,
         )
         Spacer(Modifier.height(10.dp))
@@ -147,6 +146,13 @@ fun TransferScreen(
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
+                if (state.profileLabel.isNotBlank()) {
+                    Text(
+                        "Detected ${state.profileLabel}",
+                        color = Color(0xFF7CB7FF),
+                        fontSize = 11.sp,
+                    )
+                }
                 if (state.totalFrames > 0) {
                     Spacer(Modifier.height(8.dp))
                     val progress = state.progress.coerceIn(0f, 1f)
