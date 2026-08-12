@@ -12,10 +12,37 @@ import org.junit.Test
 
 class QrTransferAccumulatorTest {
     @Test
-    fun acceptsOutOfOrderFramesAndReconstructsArbitraryFileBytes() {
+    fun acceptsOutOfOrderV40LFramesAndReconstructsArbitraryFileBytes() {
+        roundTripProfile(requireNotNull(ProductionQrContract.profileForId(0)))
+    }
+
+    @Test
+    fun acceptsOutOfOrderV40MFramesAndReconstructsArbitraryFileBytes() {
+        roundTripProfile(requireNotNull(ProductionQrContract.profileForId(1)))
+    }
+
+    @Test
+    fun recognizesAllFourProductionProfiles() {
+        val expected = mapOf(
+            0 to Triple("L", 15.0, 2953),
+            1 to Triple("M", 15.0, 2331),
+            2 to Triple("L", 20.0, 2953),
+            3 to Triple("M", 20.0, 2331),
+        )
+        expected.forEach { (id, values) ->
+            val profile = requireNotNull(ProductionQrContract.profileForId(id))
+            assertEquals(values.first, profile.ecc)
+            assertEquals(values.second, profile.senderFps, 0.0)
+            assertEquals(values.third, profile.frameBytes)
+            val raw = buildFrame(profile, 555, 0, 1, byteArrayOf(1, 2, 3))
+            assertEquals(profile, ProductionQrContract.profileForFrame(raw))
+        }
+    }
+
+    private fun roundTripProfile(profile: ProductionQrProfile) {
         val data = ByteArray(11_000) { ((it * 73 + 19) and 0xFF).toByte() }
         val packageBytes = buildPackage("clip.mp4", "video/mp4", data)
-        val frames = buildFrames(32123, packageBytes)
+        val frames = buildFrames(profile, 32123, packageBytes)
         val dir = Files.createTempDirectory("superqr-transfer-test").toFile()
         val accumulator = QrTransferAccumulator(dir)
 
@@ -23,6 +50,8 @@ class QrTransferAccumulatorTest {
         for (frame in frames.indices.reversed()) last = accumulator.accept(frames[frame])
         assertTrue(last!!.complete)
         assertEquals(frames.size, last!!.uniqueFrames)
+        assertEquals(profile.id, last!!.profileId)
+        assertEquals(profile.label, last!!.profileLabel)
 
         val duplicate = accumulator.accept(frames[0])
         assertFalse(duplicate.accepted)
@@ -58,28 +87,34 @@ class QrTransferAccumulatorTest {
         }.array()
     }
 
-    private fun buildFrames(sessionId: Int, packageBytes: ByteArray): List<ByteArray> {
-        val total = (packageBytes.size + ProductionQrContract.PAYLOAD_BYTES - 1) / ProductionQrContract.PAYLOAD_BYTES
+    private fun buildFrames(profile: ProductionQrProfile, sessionId: Int, packageBytes: ByteArray): List<ByteArray> {
+        val total = (packageBytes.size + profile.payloadBytes - 1) / profile.payloadBytes
         return (0 until total).map { index ->
-            val start = index * ProductionQrContract.PAYLOAD_BYTES
-            val end = minOf(packageBytes.size, start + ProductionQrContract.PAYLOAD_BYTES)
-            buildFrame(sessionId, index, total, packageBytes.copyOfRange(start, end))
+            val start = index * profile.payloadBytes
+            val end = minOf(packageBytes.size, start + profile.payloadBytes)
+            buildFrame(profile, sessionId, index, total, packageBytes.copyOfRange(start, end))
         }
     }
 
-    private fun buildFrame(sessionId: Int, frameId: Int, totalFrames: Int, payload: ByteArray): ByteArray {
-        val out = ByteArray(ProductionQrContract.FRAME_BYTES)
+    private fun buildFrame(
+        profile: ProductionQrProfile,
+        sessionId: Int,
+        frameId: Int,
+        totalFrames: Int,
+        payload: ByteArray,
+    ): ByteArray {
+        val out = ByteArray(profile.frameBytes)
         val buf = ByteBuffer.wrap(out)
         buf.put('S'.code.toByte())
         buf.put('Q'.code.toByte())
         buf.put(ProductionQrContract.TRANSPORT_VERSION.toByte())
-        buf.put(ProductionQrContract.PROFILE_ID.toByte())
+        buf.put(profile.id.toByte())
         buf.putShort(sessionId.toShort())
         buf.putInt(frameId)
         buf.putInt(totalFrames)
         buf.putShort(payload.size.toShort())
         buf.put(payload)
-        buf.position(ProductionQrContract.FRAME_BYTES - 4)
+        buf.position(profile.frameBytes - 4)
         val crc = CRC32().apply { update(out, 0, out.size - 4) }.value
         buf.putInt(crc.toInt())
         return out
