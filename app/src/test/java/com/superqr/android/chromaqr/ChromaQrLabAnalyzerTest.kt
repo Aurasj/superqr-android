@@ -16,6 +16,9 @@ class ChromaQrLabAnalyzerTest {
         val seed = 42
         val payload = buildPayload(frameIndex, seed, 20)
         val expected = ChromaQrLabAnalyzer.expectedBits(seed, frameIndex)
+        val firstWord = expected.take(32).fold(0L) { acc, bit -> (acc shl 1) or bit.toLong() }
+        assertEquals(0xD187247EL, firstWord)
+
         val reader = ChromaPixelReader { x, y, destination ->
             val col = x.toInt().coerceIn(0, ChromaQrLabAnalyzer.QR_MODULES - 1)
             val row = y.toInt().coerceIn(0, ChromaQrLabAnalyzer.QR_MODULES - 1)
