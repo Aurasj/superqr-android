@@ -261,7 +261,7 @@ class ColorGrid8FrameProcessor(
             val contour = contours[index]
             val area = Geometry.contourArea(contour)
             if (area !in minArea..maxArea) continue
-            val rect = Imgproc.boundingRect(contour)
+            val rect = Geometry.boundingRect(contour)
             if (rect.width <= 0 || rect.height <= 0) continue
             val ratio = rect.width.toDouble() / rect.height.toDouble()
             if (ratio !in 0.45..2.20) continue
@@ -349,7 +349,7 @@ class ColorGrid8FrameProcessor(
             Point((outerWidth - 1).toDouble(), (outerHeight - 1).toDouble()),
             Point(0.0, (outerHeight - 1).toDouble()),
         )
-        val transform = Imgproc.getPerspectiveTransform(src, dst)
+        val transform = Geometry.getPerspectiveTransform(src, dst)
         return try {
             Imgproc.warpPerspective(source, warped, transform, Size(outerWidth.toDouble(), outerHeight.toDouble()))
             val crop = Rect(
