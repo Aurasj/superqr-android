@@ -31,6 +31,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -48,7 +49,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.superqr.android.colorgrid8.ColorGrid8FrameContinuity
 import com.superqr.android.colorgrid8.ColorGrid8LabCameraManager
+import com.superqr.android.colorgrid8.ColorGrid8RunEstimator
 import com.superqr.android.vision.v7_capacity_lab.colorgrid8.ColorGrid8AnalysisResult
 import com.superqr.android.vision.v7_capacity_lab.colorgrid8.ColorGrid8Profile
 import com.superqr.android.vision.v7_capacity_lab.colorgrid8.ColorGrid8Spec
@@ -88,7 +91,6 @@ fun ColorGrid8LabScreen(
     var sumBer by remember { mutableDoubleStateOf(0.0) }
     var sumErasure by remember { mutableDoubleStateOf(0.0) }
     var sumFecLoad by remember { mutableDoubleStateOf(0.0) }
-    var sumPostFec by remember { mutableDoubleStateOf(0.0) }
     var p50Ms by remember { mutableDoubleStateOf(0.0) }
     var p95Ms by remember { mutableDoubleStateOf(0.0) }
     var lastPackMs by remember { mutableDoubleStateOf(0.0) }
@@ -96,6 +98,9 @@ fun ColorGrid8LabScreen(
     var seen by remember { mutableStateOf(BooleanArray(65536)) }
     val latencyWindow = remember { DoubleArray(120) }
     var latencyCount by remember { mutableIntStateOf(0) }
+    val continuity = remember { ColorGrid8FrameContinuity() }
+    var frameDeliveryRatio by remember { mutableDoubleStateOf(1.0) }
+    var sentTransitions by remember { mutableLongStateOf(0L) }
 
     fun resetStats() {
         uniqueFrames = 0
@@ -104,7 +109,6 @@ fun ColorGrid8LabScreen(
         sumBer = 0.0
         sumErasure = 0.0
         sumFecLoad = 0.0
-        sumPostFec = 0.0
         p50Ms = 0.0
         p95Ms = 0.0
         lastPackMs = 0.0
@@ -112,6 +116,9 @@ fun ColorGrid8LabScreen(
         seen = BooleanArray(65536)
         latencyWindow.fill(0.0)
         latencyCount = 0
+        continuity.reset()
+        frameDeliveryRatio = 1.0
+        sentTransitions = 0L
     }
 
     fun recordLatency(value: Double) {
@@ -134,6 +141,9 @@ fun ColorGrid8LabScreen(
             scope.launch {
                 val analysis = sample.result.analysis
                 val frameIndex = analysis.header.frameIndex and 0xFFFF
+                continuity.observe(frameIndex)
+                frameDeliveryRatio = continuity.deliveryRatio
+                sentTransitions = continuity.sentTransitions
                 if (!seen[frameIndex]) {
                     seen[frameIndex] = true
                     uniqueFrames++
@@ -143,7 +153,6 @@ fun ColorGrid8LabScreen(
                 sumBer += analysis.bitErrorRate
                 sumErasure += analysis.erasureRate
                 sumFecLoad += analysis.fecLoad
-                sumPostFec += analysis.estimatedPostFecKibS
                 lastPackMs = sample.packMs
                 recordLatency(sample.totalWithPackMs)
                 lastResult = analysis
@@ -173,8 +182,16 @@ fun ColorGrid8LabScreen(
     val avgBer = if (observations > 0) sumBer / observations else 0.0
     val avgErasure = if (observations > 0) sumErasure / observations else 0.0
     val avgFecLoad = if (observations > 0) sumFecLoad / observations else 0.0
-    val avgPostFec = if (observations > 0) sumPostFec / observations else 0.0
-    val targetPass = observations >= 10 && avgPostFec >= 200.0 && p95Ms in 0.01..24.999
+    val runEstimate = ColorGrid8RunEstimator.estimate(
+        postFecBudgetKibS = profile.postFecKibS(),
+        channelFecLoad = avgFecLoad,
+        frameDeliveryRatio = frameDeliveryRatio,
+    )
+    val estimatedGoodput = runEstimate.estimatedPostFecKibS
+    // Do not declare victory from a handful of easy frames. Require at least
+    // two sender-seconds of logical continuity in addition to the latency target.
+    val enoughRun = observations >= 60 && sentTransitions >= (profile.fps * 2L)
+    val targetPass = enoughRun && estimatedGoodput >= 200.0 && p95Ms in 0.01..24.999
 
     Column(
         modifier.fillMaxSize().background(Color(0xFF090B10)).padding(horizontal = 16.dp, vertical = 8.dp),
@@ -205,7 +222,7 @@ fun ColorGrid8LabScreen(
 
         if (!permission) {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) { Text("GRANT CAMERA") }
+                Button(onClick = { launcher.launch(Manifest.permission.RequestPermission()) }) { Text("GRANT CAMERA") }
             }
             return@Column
         }
@@ -223,7 +240,7 @@ fun ColorGrid8LabScreen(
             Grid8Metric("Camera", "%.1f fps".format(cameraFps))
             Grid8Metric("p50", if (p50Ms > 0) "%.1f ms".format(p50Ms) else "—")
             Grid8Metric("p95", if (p95Ms > 0) "%.1f ms".format(p95Ms) else "—")
-            Grid8Metric("Unique", uniqueFrames.toString())
+            Grid8Metric("Delivery", if (sentTransitions > 0) "%.1f%%".format(frameDeliveryRatio * 100) else "—")
         }
         Spacer(Modifier.height(5.dp))
 
@@ -247,8 +264,13 @@ fun ColorGrid8LabScreen(
                         fontSize = 12.sp,
                     )
                     Text(
-                        "FEC load ${"%.2f".format(avgFecLoad * 100)}% / 20% • estimated post-FEC ${"%.1f".format(avgPostFec)} KiB/s",
-                        color = if (avgPostFec >= 200.0) Color(0xFF7EE787) else Color.White.copy(alpha = 0.78f),
+                        "Cell FEC ${"%.2f".format(avgFecLoad * 100)}% • frame loss ${"%.2f".format(runEstimate.frameLossRate * 100)}% • total ${"%.2f".format(runEstimate.totalFecLoad * 100)}% / 20%",
+                        color = Color.White.copy(alpha = 0.78f),
+                        fontSize = 11.sp,
+                    )
+                    Text(
+                        "Estimated recoverable goodput ${"%.1f".format(estimatedGoodput)} KiB/s • unique $uniqueFrames",
+                        color = if (estimatedGoodput >= 200.0) Color(0xFF7EE787) else Color.White.copy(alpha = 0.78f),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -264,7 +286,7 @@ fun ColorGrid8LabScreen(
                             fontSize = 10.sp,
                         )
                         Text(
-                            "Acquisition: $acquisitionMode • capture ${resolution.ifEmpty { "pending" }} • $observations observations",
+                            "Acquisition: $acquisitionMode • capture ${resolution.ifEmpty { "pending" }} • $observations decoded observations",
                             color = Color.White.copy(alpha = 0.45f),
                             fontSize = 10.sp,
                         )
@@ -295,9 +317,11 @@ fun ColorGrid8LabScreen(
                     val text = buildString {
                         appendLine("SuperQR ColorGrid8 PHY Lab")
                         appendLine("profile=${profile.cols}x${profile.rows}@${profile.fps}")
-                        appendLine("observations=$observations uniqueFrames=$uniqueFrames")
+                        appendLine("observations=$observations uniqueFrames=$uniqueFrames sentTransitions=$sentTransitions")
+                        appendLine("frameDelivery=${"%.3f".format(frameDeliveryRatio * 100)}% frameLoss=${"%.3f".format(runEstimate.frameLossRate * 100)}%")
                         appendLine("SER=${"%.4f".format(avgSer * 100)}% BER=${"%.4f".format(avgBer * 100)}% erasures=${"%.3f".format(avgErasure * 100)}%")
-                        appendLine("FEC load=${"%.3f".format(avgFecLoad * 100)}% estimated post-FEC=${"%.2f".format(avgPostFec)} KiB/s")
+                        appendLine("cellFecLoad=${"%.3f".format(avgFecLoad * 100)}% totalFecLoad=${"%.3f".format(runEstimate.totalFecLoad * 100)}%")
+                        appendLine("estimated recoverable goodput=${"%.2f".format(estimatedGoodput)} KiB/s")
                         appendLine("pipeline p50=${"%.2f".format(p50Ms)} ms p95=${"%.2f".format(p95Ms)} ms")
                         appendLine("capture=$resolution acquisition=$acquisitionMode")
                     }
