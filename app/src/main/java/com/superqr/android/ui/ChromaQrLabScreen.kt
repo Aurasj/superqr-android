@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -81,16 +80,21 @@ fun ChromaQrLabScreen(
     var seen by remember { mutableStateOf(BooleanArray(256)) }
     val completed = remember { mutableStateListOf<String>() }
 
-    fun finishCurrentRun() {
-        if (activeSenderFps <= 0 || observations <= 0) return
+    fun summaryForCurrent(prefix: String = ""): String? {
+        if (activeSenderFps <= 0 || observations <= 0) return null
         val avgBer = sumBer / observations
         val avgErasure = sumErasure / observations
         val avgQuality = sumQualityKib / observations
-        completed.add(
-            "${activeSenderFps} FPS: $uniqueFrames/256 QR unique, " +
-                "BER ${"%.3f".format(avgBer * 100)}%, erasures ${"%.2f".format(avgErasure * 100)}%, " +
-                "quality-adjusted ${"%.1f".format(avgQuality)} KiB/s"
-        )
+        val coverage = uniqueFrames / 256.0
+        val estimatedCombined = avgQuality * coverage
+        return prefix +
+            "${activeSenderFps} FPS: $uniqueFrames/256 (${"%.1f".format(coverage * 100)}%) QR, " +
+            "BER ${"%.3f".format(avgBer * 100)}%, erasures ${"%.2f".format(avgErasure * 100)}%, " +
+            "est combined ${"%.1f".format(estimatedCombined)} KiB/s"
+    }
+
+    fun finishCurrentRun() {
+        summaryForCurrent()?.let(completed::add)
     }
 
     fun resetRun(fps: Int) {
@@ -199,10 +203,15 @@ fun ChromaQrLabScreen(
                         fontSize = 11.sp,
                     )
                     Text(
-                        "Raw combined ceiling: ${"%.1f".format(result.rawCombinedKibS)} KiB/s • quality-adjusted color: ${"%.1f".format(averageQuality)} KiB/s",
+                        "Raw combined ceiling: ${"%.1f".format(result.rawCombinedKibS)} KiB/s • color-quality ceiling: ${"%.1f".format(averageQuality)} KiB/s",
                         color = Color(0xFF7EE787),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        "Measured estimate is reported after each 256-frame run and includes QR coverage.",
+                        color = Color.White.copy(alpha = 0.45f),
+                        fontSize = 10.sp,
                     )
                 }
                 Text(
@@ -239,14 +248,10 @@ fun ChromaQrLabScreen(
             }
             OutlinedButton(
                 onClick = {
-                    val current = if (activeSenderFps > 0 && observations > 0) {
-                        "${activeSenderFps} FPS: $uniqueFrames/256, BER ${"%.3f".format(averageBer * 100)}%, " +
-                            "erasures ${"%.2f".format(averageErasure * 100)}%, quality ${"%.1f".format(averageQuality)} KiB/s"
-                    } else "No active run"
                     val text = buildString {
                         appendLine("SuperQR ChromaQR V40-L lab")
                         completed.forEach { appendLine(it) }
-                        appendLine(current)
+                        summaryForCurrent("CURRENT: ")?.let { appendLine(it) }
                     }
                     context.startActivity(
                         Intent.createChooser(
