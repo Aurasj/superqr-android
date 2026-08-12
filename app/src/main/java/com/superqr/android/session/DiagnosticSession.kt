@@ -6,6 +6,7 @@ import com.superqr.android.camera.CameraFrame
 import com.superqr.android.phase1.AdvancedObservationRecorder
 import com.superqr.android.phase1.AdvancedPhyEngine
 import com.superqr.android.phase1.AdvancedPhyManifest
+import com.superqr.android.phase1.AdvancedPhyResult
 import com.superqr.android.phase1.Phase1AnalysisPath
 import com.superqr.android.phase1.Phase1AnalysisPolicy
 import com.superqr.android.phase1.Phase1Manifest
@@ -15,6 +16,7 @@ import com.superqr.android.phase1.Phase1RunSnapshot
 import com.superqr.android.phase1.Phase1TrackingState
 import com.superqr.android.phase1.ShapeGridEngine
 import com.superqr.android.phase1.ShapeGridManifest
+import com.superqr.android.phase1.ShapeGridResult
 import com.superqr.android.phase1.ShapeGridObservationRecorder
 import com.superqr.android.phase1.VisionEngine
 import com.superqr.android.phase1.VisionResult
@@ -98,11 +100,19 @@ class DiagnosticSession(private val context: Context) {
     private var wasLost = false
     private var observedFrames = 0
     private var sessionActive = false
-    private var receiverUniqueFrames = 0
-    private var receiverExpectedFrames = 256
-    private var lastRunToken = -1
-    private var gapThrottle = 0
-    private var didGapSnapshotOnDone = false
+    private var gapRefreshCounter = 0
+
+    // Stateful decoder routing — only one expensive PHY decoder runs per frame.
+    private var receiverMode = ReceiverMode.AUTO
+    private var lockedPath: String? = null // "qr", "shapegrid", "advanced", or null
+    private var lockMisses = 0
+
+    fun setReceiverMode(mode: ReceiverMode) {
+        receiverMode = mode
+        lockedPath = null
+        lockMisses = 0
+        _sessionState.value = _sessionState.value.copy(receiverMode = mode)
+    }
 
     private fun advancedEngine(): AdvancedPhyEngine {
         val existing = advancedEngine
@@ -172,9 +182,6 @@ class DiagnosticSession(private val context: Context) {
         wasTracking = false
         wasLost = false
         observedFrames = 0
-        receiverUniqueFrames = 0
-        receiverExpectedFrames = 256
-        lastRunToken = -1
         _sessionState.value = SessionState(campaignId = recorder.campaignId)
     }
 
@@ -193,133 +200,62 @@ class DiagnosticSession(private val context: Context) {
             return
         }
 
-        // ShapeGrid is attempted before QR-based advanced profiles. Its outer
-        // carrier sync cheaply identifies profile ids 18..20; a successful
-        // ShapeGrid run therefore never pays the native multi-QR decode cost.
-        val shapeGrid = try {
-            shapeGridEngine().analyze(
-                frame.lumaBytes,
-                frame.width,
-                frame.height,
-                frame.chromaReader,
-            )
-        } catch (t: Throwable) {
-            frameGate.commitIfCurrent(frameToken) {
-                updateState {
-                    it.copy(
-                        error = "ShapeGrid ${t::class.java.simpleName}: ${t.message}",
-                        sourceTransform = frame.sourceTransform,
-                    )
+        val runShapeGrid = receiverMode == ReceiverMode.SHAPEGRID_ONLY ||
+            (receiverMode == ReceiverMode.AUTO && lockedPath != "qr" && lockedPath != "advanced")
+        val runAdvanced = receiverMode != ReceiverMode.SHAPEGRID_ONLY && receiverMode != ReceiverMode.QR_ONLY &&
+            (receiverMode == ReceiverMode.AUTO && lockedPath != "qr")
+        val runVision = receiverMode != ReceiverMode.SHAPEGRID_ONLY
+
+        // ShapeGrid — only when not locked to QR/Advanced and mode permits.
+        if (runShapeGrid) {
+            val shapeGrid = try {
+                shapeGridEngine().analyze(
+                    frame.lumaBytes, frame.width, frame.height, frame.chromaReader,
+                )
+            } catch (t: Throwable) {
+                frameGate.commitIfCurrent(frameToken) {
+                    updateState { it.copy(error = "ShapeGrid ${t::class.java.simpleName}: ${t.message}") }
                 }
+                return
             }
-            return
+            if (shapeGrid != null) {
+                handleShapeGrid(frame, shapeGrid, frameToken)
+                lockIfReceiving("shapegrid", shapeGrid.envelope.state == V7LabRunState.RUNNING)
+                return
+            }
+            if (lockedPath == "shapegrid") {
+                lockMisses++
+                if (lockMisses >= MAX_LOCK_MISSES) { lockedPath = null; lockMisses = 0 }
+                return
+            }
         }
 
-        if (shapeGrid != null) {
-            val completedNs = System.nanoTime()
-            frameGate.commitIfCurrent(frameToken) {
-                analysisRate.recordCompletion(completedNs)
-                val analysisFps = analysisRate.computeFps(completedNs)
-                observedFrames++
-                shapeGridRecorder.record(
-                    campaignId = recorder.campaignId,
-                    result = shapeGrid,
-                    completedNs = completedNs,
-                    cameraFps = frame.cameraFps,
-                    captureWidth = frame.width,
-                    captureHeight = frame.height,
+        // Advanced — only when mode permits and not locked to QR.
+        if (runAdvanced) {
+            val advanced = try {
+                advancedEngine().analyze(
+                    frame.lumaBytes, frame.width, frame.height, frame.chromaReader, frame.arrivalNs,
                 )
-                val observedProgress = CampaignProgress(
-                    runToken = shapeGrid.envelope.runToken,
-                    state = shapeGrid.envelope.state.name,
-                )
-                updateState {
-                    it.copy(
-                        phase = if (shapeGrid.envelope.state == V7LabRunState.RUNNING) {
-                            SessionPhase.RECEIVING
-                        } else {
-                            SessionPhase.GRID_LOCKED
-                        },
-                        trackingState = Phase1TrackingState.TRACKING,
-                        sourceTransform = frame.sourceTransform,
-                        profileName = shapeGrid.profile.name,
-                        cameraFps = frame.cameraFps,
-                        analysisFps = analysisFps,
-                        pipelineMs = shapeGrid.shapegridTotalMs,
-                        analyzedFrames = observedFrames,
-                        hasObservations = shapeGridRecorder.hasLines || advancedRecorder.hasLines || recorder.hasLines,
-                        campaignId = recorder.campaignId,
-                        error = shapeGrid.failure,
-                        campaignProgress = it.campaignProgress.stabilizedWith(observedProgress),
-                    )
+            } catch (t: Throwable) {
+                frameGate.commitIfCurrent(frameToken) {
+                    updateState { it.copy(error = "AdvancedPhy ${t::class.java.simpleName}: ${t.message}") }
                 }
+                return
             }
-            return
+            if (advanced != null) {
+                handleAdvanced(frame, advanced, frameToken)
+                lockIfReceiving("advanced", advanced.envelope.state == V7LabRunState.RUNNING)
+                return
+            }
+            if (lockedPath == "advanced") {
+                lockMisses++
+                if (lockMisses >= MAX_LOCK_MISSES) { lockedPath = null; lockMisses = 0 }
+                return
+            }
         }
 
-        // Advanced SQA1 is attempted next. The camera QR adapter caches its native
-        // read, so falling back to the canonical VisionEngine does not decode twice.
-        val advanced = try {
-            advancedEngine().analyze(
-                frame.lumaBytes,
-                frame.width,
-                frame.height,
-                frame.chromaReader,
-                frame.arrivalNs,
-            )
-        } catch (t: Throwable) {
-            frameGate.commitIfCurrent(frameToken) {
-                updateState {
-                    it.copy(
-                        error = "AdvancedPhy ${t::class.java.simpleName}: ${t.message}",
-                        sourceTransform = frame.sourceTransform,
-                    )
-                }
-            }
-            return
-        }
-
-        if (advanced != null) {
-            val completedNs = System.nanoTime()
-            frameGate.commitIfCurrent(frameToken) {
-                analysisRate.recordCompletion(completedNs)
-                val analysisFps = analysisRate.computeFps(completedNs)
-                observedFrames++
-                advancedRecorder.record(
-                    campaignId = recorder.campaignId,
-                    result = advanced,
-                    completedNs = completedNs,
-                    cameraFps = frame.cameraFps,
-                    captureWidth = frame.width,
-                    captureHeight = frame.height,
-                )
-                val observedProgress = CampaignProgress(
-                    runToken = advanced.envelope.runToken,
-                    state = advanced.envelope.state.name,
-                )
-                updateState {
-                    it.copy(
-                        phase = if (advanced.envelope.state == V7LabRunState.RUNNING) {
-                            SessionPhase.RECEIVING
-                        } else {
-                            SessionPhase.QR_LOCKED
-                        },
-                        trackingState = Phase1TrackingState.TRACKING,
-                        sourceTransform = frame.sourceTransform,
-                        profileName = advanced.profile.name,
-                        cameraFps = frame.cameraFps,
-                        analysisFps = analysisFps,
-                        pipelineMs = advanced.pipelineMs,
-                        analyzedFrames = observedFrames,
-                        hasObservations = advancedRecorder.hasLines || recorder.hasLines || shapeGridRecorder.hasLines,
-                        campaignId = recorder.campaignId,
-                        error = advanced.failure,
-                        campaignProgress = it.campaignProgress.stabilizedWith(observedProgress),
-                    )
-                }
-            }
-            return
-        }
+        // Canonical VisionEngine (QR + grid).
+        if (!runVision) return
 
         val result = try {
             engine.analyze(frame.lumaBytes, frame.width, frame.height, frame.chromaReader, frame.arrivalNs)
@@ -443,26 +379,12 @@ class DiagnosticSession(private val context: Context) {
                     )
                 }
                 val progress = it.campaignProgress.stabilizedWith(observedProgress)
-                val rt = envelope?.runToken ?: -1
-                if (rt != lastRunToken && rt >= 0) {
-                    lastRunToken = rt
-                    receiverUniqueFrames = 0
-                    gapThrottle = 0
-                    didGapSnapshotOnDone = false
-                }
-                if (result.qrObservation != null || result.gridObservation != null) {
-                    receiverUniqueFrames++
-                    gapThrottle++
-                }
-                receiverExpectedFrames = envelope?.frameCount ?: receiverExpectedFrames
-                if (gapThrottle >= 16 || (progress.complete && !didGapSnapshotOnDone)) {
-                    gapThrottle = 0
-                    didGapSnapshotOnDone = progress.complete
-                    _sessionState.value = _sessionState.value.copy(
-                        missedGaps = recorder.missedGaps(),
-                    )
-                }
-                val next = it.copy(
+                gapRefreshCounter++
+                val gaps = if (gapRefreshCounter >= 64 || progress.complete) {
+                    gapRefreshCounter = 0
+                    recorder.missedGaps()
+                } else null
+                var next = it.copy(
                     phase = derivePhase(result),
                     trackingState = result.trackingState,
                     framing = result.framing,
@@ -476,12 +398,78 @@ class DiagnosticSession(private val context: Context) {
                     campaignId = recorder.campaignId,
                     error = result.qrResult?.failure,
                     campaignProgress = progress,
-                    receiverUniqueFrames = receiverUniqueFrames,
-                    receiverExpectedFrames = receiverExpectedFrames,
+                    receiverUniqueFrames = recorder.currentUniqueFrames,
+                    receiverExpectedFrames = recorder.currentExpectedFrames,
                 )
+                if (gaps != null) {
+                    next = next.copy(missedGaps = gaps)
+                }
                 next
             }
 
+            lockIfReceiving("qr", result.envelope?.state == V7LabRunState.RUNNING && (result.qrObservation != null || result.gridObservation != null))
+        }
+    }
+
+    private fun lockIfReceiving(path: String, receiving: Boolean) {
+        if (receiving) {
+            lockedPath = path
+            lockMisses = 0
+        } else {
+            lockMisses++
+            if (lockMisses >= MAX_LOCK_MISSES) { lockedPath = null; lockMisses = 0 }
+        }
+    }
+
+    private fun handleShapeGrid(frame: CameraFrame, shapeGrid: ShapeGridResult, frameToken: Long) {
+        val completedNs = System.nanoTime()
+        frameGate.commitIfCurrent(frameToken) {
+            analysisRate.recordCompletion(completedNs)
+            val analysisFps = analysisRate.computeFps(completedNs)
+            observedFrames++
+            shapeGridRecorder.record(
+                campaignId = recorder.campaignId, result = shapeGrid,
+                completedNs = completedNs, cameraFps = frame.cameraFps,
+                captureWidth = frame.width, captureHeight = frame.height,
+            )
+            val observedProgress = CampaignProgress(shapeGrid.envelope.runToken, shapeGrid.envelope.state.name)
+            updateState {
+                it.copy(
+                    phase = if (shapeGrid.envelope.state == V7LabRunState.RUNNING) SessionPhase.RECEIVING else SessionPhase.GRID_LOCKED,
+                    trackingState = Phase1TrackingState.TRACKING, sourceTransform = frame.sourceTransform,
+                    profileName = shapeGrid.profile.name, cameraFps = frame.cameraFps, analysisFps = analysisFps,
+                    pipelineMs = shapeGrid.shapegridTotalMs, analyzedFrames = observedFrames,
+                    hasObservations = shapeGridRecorder.hasLines || advancedRecorder.hasLines || recorder.hasLines,
+                    campaignId = recorder.campaignId, error = shapeGrid.failure,
+                    campaignProgress = it.campaignProgress.stabilizedWith(observedProgress),
+                )
+            }
+        }
+    }
+
+    private fun handleAdvanced(frame: CameraFrame, advanced: AdvancedPhyResult, frameToken: Long) {
+        val completedNs = System.nanoTime()
+        frameGate.commitIfCurrent(frameToken) {
+            analysisRate.recordCompletion(completedNs)
+            val analysisFps = analysisRate.computeFps(completedNs)
+            observedFrames++
+            advancedRecorder.record(
+                campaignId = recorder.campaignId, result = advanced,
+                completedNs = completedNs, cameraFps = frame.cameraFps,
+                captureWidth = frame.width, captureHeight = frame.height,
+            )
+            val observedProgress = CampaignProgress(advanced.envelope.runToken, advanced.envelope.state.name)
+            updateState {
+                it.copy(
+                    phase = if (advanced.envelope.state == V7LabRunState.RUNNING) SessionPhase.RECEIVING else SessionPhase.QR_LOCKED,
+                    trackingState = Phase1TrackingState.TRACKING, sourceTransform = frame.sourceTransform,
+                    profileName = advanced.profile.name, cameraFps = frame.cameraFps, analysisFps = analysisFps,
+                    pipelineMs = advanced.pipelineMs, analyzedFrames = observedFrames,
+                    hasObservations = advancedRecorder.hasLines || recorder.hasLines || shapeGridRecorder.hasLines,
+                    campaignId = recorder.campaignId, error = advanced.failure,
+                    campaignProgress = it.campaignProgress.stabilizedWith(observedProgress),
+                )
+            }
         }
     }
 
@@ -576,8 +564,9 @@ class DiagnosticSession(private val context: Context) {
 
     fun snapshot(): Phase1RunSnapshot {
         val s = recorder.snapshot()
-        val gaps = recorder.missedGaps()
-        _sessionState.value = _sessionState.value.copy(missedGaps = gaps)
+        _sessionState.value = _sessionState.value.copy(
+            missedGaps = recorder.missedGaps(),
+        )
         return s
     }
 
@@ -773,6 +762,7 @@ class DiagnosticSession(private val context: Context) {
     }
 
     companion object {
+        private const val MAX_LOCK_MISSES = 15
         private const val MAX_CAPTURED_QR_FRAMES = 3
         private const val QR_CAPTURE_MIN_GAP_FRAMES = 8
     }

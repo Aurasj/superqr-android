@@ -57,6 +57,8 @@ class Phase1ObservationRecorder {
     private var runEndedNs = 0L
     private var validFrames = 0
     private var innerFecFrames = 0
+    val currentUniqueFrames: Int get() = uniqueFrames
+    val currentExpectedFrames: Int get() = expectedFrames
     private var uniqueFrames = 0
     private var innovativeBytes = 0L
     private var pipelineMsTotal = 0.0
@@ -301,10 +303,11 @@ class Phase1ObservationRecorder {
     }
 
     @Synchronized
-    fun missedGaps(maxFrame: Int = 255): String {
+    fun missedGaps(): String {
+        val maxInclusive = expectedFrames - 1
         val ranges = mutableListOf<String>()
         var start = -1
-        for (i in 0..maxFrame) {
+        for (i in 0..maxInclusive) {
             if (!seenFrames[i]) {
                 if (start < 0) start = i
             } else {
@@ -314,7 +317,7 @@ class Phase1ObservationRecorder {
                 }
             }
         }
-        if (start >= 0) ranges += if (start == maxFrame) "$start" else "$start–$maxFrame"
+        if (start >= 0) ranges += if (start == maxInclusive) "$start" else "$start–$maxInclusive"
         return ranges.joinToString(", ").ifEmpty { "none" }
     }
 

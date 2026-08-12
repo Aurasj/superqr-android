@@ -41,8 +41,8 @@ class ZxingCppCameraQrReader {
         BarcodeReader.Options(
             formats = setOf(BarcodeReader.Format.QR_CODE),
             tryHarder = true,
-            tryRotate = true,
-            tryInvert = true,
+            tryRotate = false,
+            tryInvert = false,
             tryDownscale = false,
             tryDenoise = true,
             maxNumberOfSymbols = 4,

@@ -7,6 +7,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.transform.OutputTransform
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +17,8 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -62,6 +65,7 @@ import com.superqr.android.phase1.Phase1FramingMode
 import com.superqr.android.phase1.Phase1RunSnapshot
 import com.superqr.android.session.CampaignProgress
 import com.superqr.android.session.DiagnosticSession
+import com.superqr.android.session.ReceiverMode
 import com.superqr.android.session.SessionPhase
 import com.superqr.android.session.SessionState
 import java.util.concurrent.ExecutorService
@@ -277,6 +281,26 @@ fun MainScreen(
                 }
             }
 
+            if (isRunning) {
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                ) {
+                    ReceiverMode.entries.forEach { mode ->
+                        val active = sessionState.receiverMode == mode
+                        val bg = if (active) Color(0xFF1976D2) else Color.White.copy(alpha = 0.08f)
+                        Button(
+                            onClick = { session.setReceiverMode(mode) },
+                            colors = ButtonDefaults.buttonColors(containerColor = bg),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp),
+                        ) {
+                            Text(mode.label, fontSize = 11.sp, color = if (active) Color.White else Color.White.copy(alpha = 0.6f))
+                        }
+                    }
+                }
+            }
+
             Spacer(Modifier.height(12.dp))
             TextButton(onClick = { showDiagnostics = !showDiagnostics }) {
                 Text(
@@ -430,11 +454,17 @@ private fun CampaignProgressBar(
             )
         }
         if (missedGaps.isNotEmpty() && missedGaps != "none") {
-            Text(
-                "Missed: $missedGaps",
-                color = Color(0xFFFF8A80).copy(alpha = 0.7f),
-                fontSize = 10.sp,
-            )
+            Box(Modifier.fillMaxWidth().heightIn(max = 28.dp)) {
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    Text(
+                        "Missed: $missedGaps",
+                        color = Color(0xFFFF8A80).copy(alpha = 0.7f),
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
+            }
         }
     }
 }

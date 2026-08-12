@@ -17,6 +17,12 @@ enum class SessionPhase(val label: String) {
     COMPLETE("Complete"),
 }
 
+enum class ReceiverMode(val label: String) {
+    QR_ONLY("QR Only"),
+    SHAPEGRID_ONLY("ShapeGrid Only"),
+    AUTO("Auto"),
+}
+
 data class CampaignProgress(
     val runToken: Int = -1,
     val state: String = "",
@@ -44,6 +50,7 @@ data class SessionState(
     val hasObservations: Boolean = false,
     val campaignId: String = "",
     val error: String? = null,
+    val receiverMode: ReceiverMode = ReceiverMode.AUTO,
     val campaignProgress: CampaignProgress = CampaignProgress(),
     val receiverUniqueFrames: Int = 0,
     val receiverExpectedFrames: Int = 256,
