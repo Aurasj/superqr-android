@@ -77,11 +77,13 @@ object ReceivedFileStore {
         }
     }
 
-    private fun safeName(value: String): String {
+    internal fun safeName(value: String): String {
         val leaf = value.substringAfterLast('/').substringAfterLast('\\')
             .replace(Regex("[\\u0000-\\u001F]"), "_")
             .trim()
-        return leaf.ifBlank { "superqr_file" }.take(180)
+            .take(180)
+        if (leaf.isBlank() || leaf == "." || leaf == "..") return "superqr_file"
+        return leaf
     }
 
     private fun uniqueFile(dir: File, name: String): File {
