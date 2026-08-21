@@ -2,14 +2,22 @@ name: Android CI
 
 on:
   push:
-    branches: [ main, rebuild/v7 ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, rebuild/v7 ]
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    name: Test & Compile
+    name: Test, Lint & Build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -33,5 +41,8 @@ jobs:
       - name: App unit tests
         run: ./gradlew :app:testDebugUnitTest
 
-      - name: Build benchmark APK
+      - name: Android lint
+        run: ./gradlew :vision:lintDebug :app:lintDebug
+
+      - name: Build optimized benchmark APK
         run: ./gradlew :app:assembleBenchmark
