@@ -25,7 +25,7 @@ android {
         }
         release {
             optimization {
-                enable = false
+                enable = true
             }
         }
         create("benchmark") {
