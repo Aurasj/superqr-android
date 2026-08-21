@@ -49,6 +49,26 @@ class V7TransportTest {
     }
 
     @Test
+    fun qrParserRejectsCrcValidPayloadLengthPastFrameBoundary() {
+        val frame = V7Transport.buildFrame(5, 0, 1, byteArrayOf(1, 2, 3)).copyOf()
+        // Declare a payload far larger than the bytes available before the CRC.
+        // Recompute CRC so this specifically exercises structural length checking.
+        frame[14] = 0x7F
+        frame[15] = 0xFF.toByte()
+        val crcOffset = frame.size - V7Transport.CRC_SIZE
+        val crc = CRC32().apply { update(frame, 0, crcOffset) }.value
+        ByteBuffer.wrap(frame, crcOffset, V7Transport.CRC_SIZE).putInt(crc.toInt())
+
+        var failed = false
+        try {
+            V7Transport.parseQrFrame(frame)
+        } catch (_: V7TransportError) {
+            failed = true
+        }
+        assertEquals(true, failed)
+    }
+
+    @Test
     fun accumulatorCompletesOutOfOrderPackage() {
         val filename = "hello.txt".toByteArray()
         val mime = "text/plain".toByteArray()
