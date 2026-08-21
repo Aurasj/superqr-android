@@ -1,5 +1,6 @@
 package com.superqr.android.transfer
 
+import android.annotation.TargetApi
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
@@ -30,6 +31,7 @@ object ReceivedFileStore {
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.Q)
     private fun saveMediaStore(context: Context, completion: TransferCompletion, name: String): SavedTransfer {
         val resolver = context.contentResolver
         val values = ContentValues().apply {
