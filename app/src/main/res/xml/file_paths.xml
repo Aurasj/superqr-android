@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <cache-path name="cache" path="." />
-    <external-cache-path name="external_cache" path="." />
-    <external-files-path name="external_files" path="." />
+    <!-- Diagnostic ZIPs are currently emitted directly into cacheDir. -->
+    <cache-path name="diagnostics" path="." />
+
+    <!-- Pre-Android-10 received files. Keep grants scoped to SuperQR only. -->
+    <files-path name="received_internal" path="SuperQR/" />
+    <external-files-path name="received_downloads" path="Download/SuperQR/" />
 </paths>
