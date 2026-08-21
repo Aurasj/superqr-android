@@ -4,6 +4,7 @@
 local.properties
 /.idea/
 .DS_Store
+Thumbs.db
 /build
 /captures
 .externalNativeBuild
@@ -14,3 +15,18 @@ local.properties
 v6_full_diagnostic_*.zip
 
 **/build/
+
+# Local configuration and logs
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+*.bak
+secrets.properties
+keystore.properties
+*.jks
+*.keystore
+*.pem
+*.p12
+*.pfx
