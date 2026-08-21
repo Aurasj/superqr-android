@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="verified_transfers" path="superqr-transfer/" />
+    <files-path name="internal_downloads" path="SuperQR/" />
+    <external-files-path name="external_downloads" path="Download/SuperQR/" />
+</paths>

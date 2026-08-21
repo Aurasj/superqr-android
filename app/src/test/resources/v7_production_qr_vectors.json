@@ -1,0 +1,18 @@
+{
+  "schema": "superqr-v7-production-qr-v1",
+  "frame_vector": {
+    "profile_id": 0,
+    "session_id": 4660,
+    "frame_id": 7,
+    "total_frames": 19,
+    "payload_hex": "537570657251522070726F64756374696F6E2051343020766563746F72",
+    "frame_sha256": "731618F899AACD6B2FEF3C38E20A40CE2A0735DAFAEB3998A39439A1B637A709"
+  },
+  "package_vector": {
+    "filename": "hello.txt",
+    "mime_type": "text/plain",
+    "file_hex": "48656C6C6F2066726F6D2053757065725152210A00010203FF",
+    "package_sha256": "941967B9C4FF45DE42E92978DB5AC308860C061EC759C4CAE1D70415C0DFA5F4",
+    "file_sha256": "69A72BA65CFD6648AAE1A69B7499308539CF156B82D8D3C3F18C888B580904DE"
+  }
+}

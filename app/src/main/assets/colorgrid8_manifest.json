@@ -1,0 +1,176 @@
+{
+  "schema": "superqr.colorgrid8.lab.v1",
+  "lab_only": true,
+  "description": "ColorGrid8 LAB carrier: 1 luminance bit + 2 chroma bits per cell.",
+  "bits_per_cell": 3,
+  "header": {
+    "rows": 2,
+    "payload_bits": 51,
+    "crc_bits": 5,
+    "repetition": 2,
+    "cells": 112,
+    "luma_only": true
+  },
+  "pilots": {
+    "period": 25,
+    "nominal_fraction": 0.04,
+    "symbol_rule": "(pilot_ordinal + frame_index) mod 8"
+  },
+  "palette": [
+    {
+      "symbol": 0,
+      "luma_bit": 0,
+      "chroma_bits": 0,
+      "rgb": "#107201"
+    },
+    {
+      "symbol": 1,
+      "luma_bit": 0,
+      "chroma_bits": 1,
+      "rgb": "#803901"
+    },
+    {
+      "symbol": 2,
+      "luma_bit": 0,
+      "chroma_bits": 2,
+      "rgb": "#10578F"
+    },
+    {
+      "symbol": 3,
+      "luma_bit": 0,
+      "chroma_bits": 3,
+      "rgb": "#801E8F"
+    },
+    {
+      "symbol": 4,
+      "luma_bit": 1,
+      "chroma_bits": 0,
+      "rgb": "#84E675"
+    },
+    {
+      "symbol": 5,
+      "luma_bit": 1,
+      "chroma_bits": 1,
+      "rgb": "#F4AD75"
+    },
+    {
+      "symbol": 6,
+      "luma_bit": 1,
+      "chroma_bits": 2,
+      "rgb": "#84CBFF"
+    },
+    {
+      "symbol": 7,
+      "luma_bit": 1,
+      "chroma_bits": 3,
+      "rgb": "#F492FF"
+    }
+  ],
+  "grid_sweep": [
+    {
+      "profile_id": 0,
+      "cols": 128,
+      "rows": 96
+    },
+    {
+      "profile_id": 1,
+      "cols": 144,
+      "rows": 112
+    },
+    {
+      "profile_id": 2,
+      "cols": 160,
+      "rows": 136
+    },
+    {
+      "profile_id": 3,
+      "cols": 168,
+      "rows": 144
+    },
+    {
+      "profile_id": 4,
+      "cols": 176,
+      "rows": 144
+    }
+  ],
+  "fps_sweep": [
+    15,
+    20,
+    24,
+    30
+  ],
+  "fec_fractions": [
+    0.1,
+    0.2
+  ],
+  "default": {
+    "cols": 168,
+    "rows": 144,
+    "fps": 30,
+    "seed": 19770
+  },
+  "targets": {
+    "post_fec_kib_s": 200.0,
+    "pipeline_p95_ms": 25.0
+  },
+  "golden_frames_168x144_30fps": [
+    {
+      "frame_index": 0,
+      "symbol_crc32": "94A6DBA5"
+    },
+    {
+      "frame_index": 1,
+      "symbol_crc32": "BADE60B7"
+    },
+    {
+      "frame_index": 7,
+      "symbol_crc32": "276C602C"
+    },
+    {
+      "frame_index": 4660,
+      "symbol_crc32": "25ACD68E"
+    }
+  ],
+  "capacity_30fps_20pct_fec": [
+    {
+      "cols": 128,
+      "rows": 96,
+      "raw_kib_s": 135.0,
+      "pilot_fraction": 0.03922526,
+      "payload_kib_s": 126.892089844,
+      "post_fec_kib_s": 101.513671875
+    },
+    {
+      "cols": 144,
+      "rows": 112,
+      "raw_kib_s": 177.1875,
+      "pilot_fraction": 0.039310516,
+      "payload_kib_s": 167.058105469,
+      "post_fec_kib_s": 133.646484375
+    },
+    {
+      "cols": 160,
+      "rows": 136,
+      "raw_kib_s": 239.0625,
+      "pilot_fraction": 0.039430147,
+      "payload_kib_s": 226.120605469,
+      "post_fec_kib_s": 180.896484375
+    },
+    {
+      "cols": 168,
+      "rows": 144,
+      "raw_kib_s": 265.78125,
+      "pilot_fraction": 0.03947586,
+      "payload_kib_s": 251.597900391,
+      "post_fec_kib_s": 201.278320312
+    },
+    {
+      "cols": 176,
+      "rows": 144,
+      "raw_kib_s": 278.4375,
+      "pilot_fraction": 0.039457071,
+      "payload_kib_s": 263.583984375,
+      "post_fec_kib_s": 210.8671875
+    }
+  ]
+}

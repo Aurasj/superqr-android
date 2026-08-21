@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "protocol_version": 7,
+  "status": "PRODUCTION_COMPATIBILITY_FROZEN",
+  "scope": "Current interoperable Desktop/Android V40 QR carousel. Changes must remain backward compatible unless a separately versioned wire is introduced.",
+  "separation": {
+    "production": true,
+    "experimental_custom_carrier": false
+  },
+  "optical": {
+    "carrier": "ISO_QR_VERSION_40",
+    "quiet_zone_modules": 4,
+    "mask_pattern": 4,
+    "rendering": "integer nearest-neighbor modules with no antialiasing"
+  },
+  "frame": {
+    "magic_ascii": "SQ",
+    "version": 7,
+    "header_bytes": 16,
+    "crc_bytes": 4,
+    "profile_id_offset": 3,
+    "endianness": "big",
+    "fields": [
+      ["magic", "2 bytes"],
+      ["version", "uint8"],
+      ["profile_id", "uint8"],
+      ["session_id", "uint16"],
+      ["frame_id", "uint32"],
+      ["total_frames", "uint32"],
+      ["payload_len", "uint16"],
+      ["payload_and_zero_padding", "profile dependent"],
+      ["crc32", "uint32"]
+    ],
+    "crc32": "IEEE CRC-32 over every frame byte except the final four CRC bytes"
+  },
+  "profiles": [
+    {"id": 0, "key": "v40_l_15fps", "qr_version": 40, "qr_ecc": "L", "sender_fps": 15, "frame_bytes": 2953, "payload_bytes": 2933, "role": "SAFE_DEFAULT"},
+    {"id": 1, "key": "v40_m_15fps", "qr_version": 40, "qr_ecc": "M", "sender_fps": 15, "frame_bytes": 2331, "payload_bytes": 2311, "role": "EXTRA_QR_ECC"},
+    {"id": 2, "key": "v40_l_20fps", "qr_version": 40, "qr_ecc": "L", "sender_fps": 20, "frame_bytes": 2953, "payload_bytes": 2933, "role": "FASTER_EXPERIMENT"},
+    {"id": 3, "key": "v40_m_20fps", "qr_version": 40, "qr_ecc": "M", "sender_fps": 20, "frame_bytes": 2331, "payload_bytes": 2311, "role": "FASTER_ECC_EXPERIMENT"},
+    {"id": 4, "key": "v40_l_30fps", "qr_version": 40, "qr_ecc": "L", "sender_fps": 30, "frame_bytes": 2953, "payload_bytes": 2933, "role": "STRESS_EXPERIMENT"},
+    {"id": 5, "key": "v40_m_30fps", "qr_version": 40, "qr_ecc": "M", "sender_fps": 30, "frame_bytes": 2331, "payload_bytes": 2311, "role": "STRESS_ECC_EXPERIMENT"}
+  ],
+  "package": {
+    "magic_ascii": "SQP7",
+    "header_bytes": 20,
+    "endianness": "big",
+    "fields": [["magic", "4 bytes"], ["filename_len", "uint16"], ["mime_len", "uint16"], ["file_size", "uint64"], ["file_crc32", "uint32"], ["filename_utf8", "filename_len bytes"], ["mime_utf8", "mime_len bytes"], ["file_data", "file_size bytes"]],
+    "max_filename_bytes": 1024,
+    "max_mime_bytes": 255,
+    "integrity": "CRC32 of original file bytes; receivers also report SHA-256 after verification without changing the wire"
+  },
+  "recovery": {
+    "mode": "out_of_order_exact_frame_carousel",
+    "duplicate_policy": "ignore identical repeats after frame CRC validation",
+    "later_pass_policy": "bijective frame-order permutation per pass to avoid fixed camera/display phase loss"
+  },
+  "default_profile_id": 0
+}
