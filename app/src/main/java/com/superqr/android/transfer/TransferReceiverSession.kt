@@ -39,11 +39,12 @@ class TransferReceiverSession(context: Context) {
     val state: StateFlow<TransferReceiveState> = _state.asStateFlow()
 
     @Volatile private var finalizing = false
+    @Volatile private var closed = false
     private var activeSession = -1
     private var startedNs = 0L
 
     fun onQrDecoded(bytes: ByteArray, decodeMs: Double) {
-        if (finalizing || _state.value.status == TransferReceiveStatus.COMPLETE) return
+        if (closed || finalizing || _state.value.status == TransferReceiveStatus.COMPLETE) return
         if (!ProductionQrContract.looksLikeProductionFrame(bytes)) return
         try {
             val snap = accumulator.accept(bytes)
@@ -78,7 +79,7 @@ class TransferReceiverSession(context: Context) {
     }
 
     private fun finalizeAsync() {
-        if (finalizing) return
+        if (closed || finalizing) return
         finalizing = true
         ioExecutor.execute {
             try {
@@ -95,6 +96,9 @@ class TransferReceiverSession(context: Context) {
                     error = null,
                 )
             } catch (t: Throwable) {
+                // A failed verification/save must not leave a potentially large
+                // sparse package in cache indefinitely.
+                accumulator.discardTemporaryFile()
                 _state.value = _state.value.copy(
                     status = TransferReceiveStatus.ERROR,
                     error = t.message ?: t.javaClass.simpleName,
@@ -106,7 +110,7 @@ class TransferReceiverSession(context: Context) {
     }
 
     fun reset() {
-        if (finalizing) return
+        if (closed || finalizing) return
         accumulator.reset()
         activeSession = -1
         startedNs = 0L
@@ -114,7 +118,16 @@ class TransferReceiverSession(context: Context) {
     }
 
     fun close() {
-        accumulator.reset()
-        ioExecutor.shutdownNow()
+        if (closed) return
+        closed = true
+        if (finalizing) {
+            // The complete package is already on disk. Let the single queued
+            // verification/save finish even if its Compose screen disappears;
+            // deleting the temp file here races verifyFileCrc/ReceivedFileStore.
+            ioExecutor.shutdown()
+        } else {
+            accumulator.reset()
+            ioExecutor.shutdownNow()
+        }
     }
 }
