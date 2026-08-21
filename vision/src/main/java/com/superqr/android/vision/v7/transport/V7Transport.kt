@@ -161,23 +161,31 @@ object V7Transport {
         if (bytes[0] != FRAME_MAGIC[0] || bytes[1] != FRAME_MAGIC[1]) throw V7TransportError("invalid V7 frame magic")
         if ((bytes[2].toInt() and 0xFF) != VERSION) throw V7TransportError("invalid V7 version")
 
-        val expectedCrc = ByteBuffer.wrap(bytes, bytes.size - 4, 4).int.toLong() and 0xFFFFFFFFL
-        val crc = CRC32().apply { update(bytes, 0, bytes.size - 4) }.value and 0xFFFFFFFFL
+        val expectedCrc = ByteBuffer.wrap(bytes, bytes.size - CRC_SIZE, CRC_SIZE).int.toLong() and 0xFFFFFFFFL
+        val crc = CRC32().apply { update(bytes, 0, bytes.size - CRC_SIZE) }.value and 0xFFFFFFFFL
         if (crc != expectedCrc) throw V7TransportError("frame CRC32 mismatch")
 
         val buf = ByteBuffer.wrap(bytes)
         buf.position(4)
         val sessionId = buf.short.toInt() and 0xFFFF
-        val frameId = buf.int.toLong().toInt()
-        val totalFrames = buf.int.toLong().toInt()
+        val frameIdLong = buf.int.toLong() and 0xFFFFFFFFL
+        val totalFramesLong = buf.int.toLong() and 0xFFFFFFFFL
         val payloadLen = buf.short.toInt() and 0xFFFF
         if (sessionId == 0) throw V7TransportError("session_id 0 is invalid")
-        if (totalFrames < 1 || frameId < 0 || frameId >= totalFrames) throw V7TransportError("invalid frame numbering")
+        if (totalFramesLong < 1 || totalFramesLong > Int.MAX_VALUE) throw V7TransportError("unsupported total frame count")
+        if (frameIdLong >= totalFramesLong || frameIdLong > Int.MAX_VALUE) throw V7TransportError("invalid frame numbering")
+
+        // Unlike fixed optical profiles, QR payload length is derived from the
+        // decoder output. Never let copyOfRange synthesize zero-padded bytes past
+        // the CRC boundary when a malformed but CRC-consistent header declares a
+        // payload longer than the frame actually contains.
+        val availablePayload = bytes.size - HEADER_SIZE - CRC_SIZE
+        if (payloadLen > availablePayload) throw V7TransportError("invalid payload length")
 
         return V7TransportFrame(
             sessionId,
-            frameId,
-            totalFrames,
+            frameIdLong.toInt(),
+            totalFramesLong.toInt(),
             bytes.copyOfRange(HEADER_SIZE, HEADER_SIZE + payloadLen),
             bytes[3].toInt() and 0xFF,
         )
