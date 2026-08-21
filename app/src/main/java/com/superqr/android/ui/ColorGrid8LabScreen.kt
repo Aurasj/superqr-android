@@ -41,7 +41,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -52,9 +51,12 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.superqr.android.colorgrid8.ColorGrid8FrameContinuity
 import com.superqr.android.colorgrid8.ColorGrid8LabCameraManager
 import com.superqr.android.colorgrid8.ColorGrid8RunEstimator
+import com.superqr.android.colorgrid8.ColorGrid8TransferReceiverSession
+import com.superqr.android.transfer.TransferReceiveStatus
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8AnalysisResult
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8Profile
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8Spec
+import com.superqr.android.vision.lab.colorgrid8.ColorGrid8TransferCodec
 import java.util.concurrent.ExecutorService
 import kotlinx.coroutines.launch
 import kotlin.math.min
@@ -72,6 +74,7 @@ fun ColorGrid8LabScreen(
     }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permission = it }
     val manager = remember { ColorGrid8LabCameraManager(context, analysisExecutor) }
+    val transferReceiver = remember { ColorGrid8TransferReceiverSession(context) }
     val status by manager.status.collectAsState()
     val cameraFps by manager.cameraFps.collectAsState()
     val pipelineMs by manager.pipelineMs.collectAsState()
@@ -86,16 +89,21 @@ fun ColorGrid8LabScreen(
     val headerStatus by manager.headerStatus.collectAsState()
     val expectedProfile by manager.expectedProfile.collectAsState()
     val detectedProfile by manager.detectedProfile.collectAsState()
+    val transferState by transferReceiver.state.collectAsState()
+    val transferDiagnostics by transferReceiver.diagnostics.collectAsState()
 
-    var gridIndex by remember { mutableIntStateOf(3) } // 168x144
-    var fpsIndex by remember { mutableIntStateOf(3) } // 30 FPS
-    val dims = ColorGrid8Spec.grids[gridIndex]
-    val profile = ColorGrid8Profile(dims.first, dims.second, ColorGrid8Spec.fpsSweep[fpsIndex])
+    var gridIndex by remember { mutableIntStateOf(1) } // balanced 336x288
+    var fpsIndex by remember { mutableIntStateOf(2) } // 60 FPS
+    val dims = ColorGrid8Spec.transferGrids[gridIndex]
+    val profile = ColorGrid8Profile(
+        dims.first,
+        dims.second,
+        ColorGrid8Spec.transferFpsSweep[fpsIndex],
+        version = ColorGrid8Spec.TRANSFER_HEADER_VERSION,
+    )
 
     var uniqueFrames by remember { mutableIntStateOf(0) }
     var observations by remember { mutableIntStateOf(0) }
-    var sumSer by remember { mutableDoubleStateOf(0.0) }
-    var sumBer by remember { mutableDoubleStateOf(0.0) }
     var sumErasure by remember { mutableDoubleStateOf(0.0) }
     var sumFecLoad by remember { mutableDoubleStateOf(0.0) }
     var p50Ms by remember { mutableDoubleStateOf(0.0) }
@@ -113,8 +121,6 @@ fun ColorGrid8LabScreen(
     fun resetStats() {
         uniqueFrames = 0
         observations = 0
-        sumSer = 0.0
-        sumBer = 0.0
         sumErasure = 0.0
         sumFecLoad = 0.0
         p50Ms = 0.0
@@ -142,11 +148,15 @@ fun ColorGrid8LabScreen(
 
     LaunchedEffect(profile) {
         manager.setProfile(profile)
+        transferReceiver.reset()
         resetStats()
     }
 
-    DisposableEffect(manager) {
+    DisposableEffect(manager, profile) {
         manager.onSample = { sample ->
+            sample.result?.analysis?.let { analysis ->
+                transferReceiver.onAnalysis(profile, analysis, sample.totalWithPackMs)
+            }
             scope.launch {
                 val processResult = sample.result
                 // Ignore the balanced sender warm-up until the first real data frame
@@ -167,8 +177,6 @@ fun ColorGrid8LabScreen(
                     uniqueFrames++
                 }
                 observations++
-                sumSer += analysis.symbolErrorRate
-                sumBer += analysis.bitErrorRate
                 sumErasure += analysis.erasureRate
                 sumFecLoad += analysis.fecLoad
                 lastResult = analysis
@@ -176,7 +184,13 @@ fun ColorGrid8LabScreen(
         }
         onDispose {
             manager.onSample = null
+        }
+    }
+
+    DisposableEffect(manager) {
+        onDispose {
             manager.destroy()
+            transferReceiver.close()
         }
     }
 
@@ -192,14 +206,23 @@ fun ColorGrid8LabScreen(
         if (!permission) launcher.launch(Manifest.permission.CAMERA)
     }
 
+    LaunchedEffect(transferState.status) {
+        if (transferState.status in setOf(
+                TransferReceiveStatus.VERIFYING,
+                TransferReceiveStatus.PREVIEW,
+                TransferReceiveStatus.SAVING,
+                TransferReceiveStatus.SAVED,
+            )) manager.stop()
+    }
+
     val running = status == ColorGrid8LabCameraManager.Status.RUNNING ||
         status == ColorGrid8LabCameraManager.Status.STARTING
-    val avgSer = if (observations > 0) sumSer / observations else 0.0
-    val avgBer = if (observations > 0) sumBer / observations else 0.0
     val avgErasure = if (observations > 0) sumErasure / observations else 0.0
     val avgFecLoad = if (observations > 0) sumFecLoad / observations else 0.0
+    val protectedChannelBudget = ColorGrid8TransferCodec.logicalChunkCapacity(profile) *
+        profile.fps * 8.0 / 9.0 / 1024.0
     val runEstimate = ColorGrid8RunEstimator.estimate(
-        postFecBudgetKibS = profile.postFecKibS(),
+        postFecBudgetKibS = protectedChannelBudget,
         channelFecLoad = avgFecLoad,
         frameDeliveryRatio = frameDeliveryRatio,
     )
@@ -207,31 +230,31 @@ fun ColorGrid8LabScreen(
     // Do not declare victory from a handful of easy frames. Require at least
     // two sender-seconds of logical continuity in addition to the latency target.
     val enoughRun = observations >= 60 && sentTransitions >= (profile.fps * 2L)
-    val targetPass = enoughRun && estimatedGoodput >= 200.0 && p95Ms in 0.01..24.999
+    val targetPass = enoughRun && transferState.usefulKibPerSecond >= 1024.0 && p95Ms > 0.0
 
     Column(
         modifier.fillMaxSize().background(Color(0xFF090B10)).padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("ColorGrid8 PHY Lab", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text("8 symbols = Y:1 bit + UV:2 bits • YUV420 direct", color = Color(0xFF7CB7FF), fontSize = 11.sp)
+        Text("ColorGrid8 High-Speed Lab", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("Experimental file receiver • production V40 remains separate", color = Color(0xFF7CB7FF), fontSize = 11.sp)
         Spacer(Modifier.height(6.dp))
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
-                onClick = { gridIndex = (gridIndex + 1) % ColorGrid8Spec.grids.size },
-                enabled = !running,
+                onClick = { gridIndex = (gridIndex + 1) % ColorGrid8Spec.transferGrids.size },
+                enabled = !running && transferState.status !in setOf(TransferReceiveStatus.VERIFYING, TransferReceiveStatus.PREVIEW, TransferReceiveStatus.SAVING),
                 modifier = Modifier.weight(1f),
             ) { Text("GRID ${profile.cols}×${profile.rows}", fontSize = 11.sp) }
             OutlinedButton(
-                onClick = { fpsIndex = (fpsIndex + 1) % ColorGrid8Spec.fpsSweep.size },
-                enabled = !running,
+                onClick = { fpsIndex = (fpsIndex + 1) % ColorGrid8Spec.transferFpsSweep.size },
+                enabled = !running && transferState.status !in setOf(TransferReceiveStatus.VERIFYING, TransferReceiveStatus.PREVIEW, TransferReceiveStatus.SAVING),
                 modifier = Modifier.weight(1f),
             ) { Text("SENDER ${profile.fps} FPS", fontSize = 11.sp) }
         }
         Text(
-            "Budget: ${"%.1f".format(profile.rawKibS)} raw • ${"%.1f".format(profile.payloadKibS)} after header/pilots • ${"%.1f".format(profile.postFecKibS())} KiB/s after 20% FEC",
-            color = if (profile.postFecKibS() >= 200.0) Color(0xFF7EE787) else Color.White.copy(alpha = 0.55f),
+            "Channel budget: ${"%.1f".format(protectedChannelBudget)} KiB/s after 8+1 XOR • not a measured speed",
+            color = if (protectedChannelBudget >= 1024.0) Color(0xFF7EE787) else Color.White.copy(alpha = 0.55f),
             fontSize = 10.sp,
         )
         Spacer(Modifier.height(6.dp))
@@ -265,28 +288,103 @@ fun ColorGrid8LabScreen(
         ) {
             Card(
                 Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF11151D)),
+            ) {
+                Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    val transferTitle = when (transferState.status) {
+                        TransferReceiveStatus.WAITING -> "WAITING FOR COLORGRID8 V2"
+                        TransferReceiveStatus.RECEIVING -> "RECEIVING ${transferState.filename}"
+                        TransferReceiveStatus.VERIFYING -> "VERIFYING CRC32 + SHA-256"
+                        TransferReceiveStatus.PREVIEW -> "VERIFIED — REVIEW BEFORE SAVE"
+                        TransferReceiveStatus.SAVING -> "SAVING"
+                        TransferReceiveStatus.SAVED -> "FILE SAVED"
+                        TransferReceiveStatus.ERROR -> "TRANSFER ERROR"
+                    }
+                    Text(
+                        transferTitle,
+                        color = if (transferState.status in setOf(TransferReceiveStatus.PREVIEW, TransferReceiveStatus.SAVED)) Color(0xFF7EE787) else Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                    )
+                    if (transferState.totalFrames > 0) {
+                        val progress = transferState.progress.coerceIn(0f, 1f)
+                        Box(Modifier.fillMaxWidth().height(7.dp).background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(4.dp))) {
+                            Box(Modifier.fillMaxWidth(progress).height(7.dp).background(Color(0xFF1976D2), RoundedCornerShape(4.dp)))
+                        }
+                        Text(
+                            "${transferState.uniqueFrames}/${transferState.totalFrames} data frames • ${"%.1f".format(progress * 100)}% • ${"%.1f".format(transferState.usefulKibPerSecond)} KiB/s measured",
+                            color = Color.White.copy(alpha = 0.75f),
+                            fontSize = 11.sp,
+                        )
+                    }
+                    if (transferState.filename.isNotEmpty()) {
+                        Text(
+                            "${transferState.filename} • ${formatGrid8Bytes(transferState.fileSize)} • ${transferState.mimeType}",
+                            color = Color.White.copy(alpha = 0.58f),
+                            fontSize = 10.sp,
+                        )
+                    }
+                    Text(
+                        "XOR parity ${transferDiagnostics.parityFrames} • recovered ${transferDiagnostics.recoveredFrames} • rejected ${transferDiagnostics.rejectedFrames} • duplicates ${transferState.duplicates}",
+                        color = Color.White.copy(alpha = 0.58f),
+                        fontSize = 10.sp,
+                    )
+                    if (transferState.status == TransferReceiveStatus.PREVIEW) {
+                        ReceivedContentPreview(transferState)
+                        Text("SHA-256 ${transferState.sha256Hex}", color = Color.White.copy(alpha = 0.48f), fontSize = 9.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { transferReceiver.save() }) { Text("SAVE") }
+                            OutlinedButton(onClick = {
+                                val uri = transferState.previewUri ?: return@OutlinedButton
+                                context.startActivity(
+                                    Intent.createChooser(
+                                        Intent(Intent.ACTION_SEND).apply {
+                                            type = transferState.mimeType.ifBlank { "application/octet-stream" }
+                                            putExtra(Intent.EXTRA_STREAM, uri)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        },
+                                        "Share verified ColorGrid8 file",
+                                    )
+                                )
+                            }) { Text("SHARE") }
+                            OutlinedButton(onClick = { transferReceiver.discard() }) { Text("DISCARD") }
+                        }
+                    }
+                    if (transferState.status == TransferReceiveStatus.SAVED) {
+                        Text("Saved to ${transferState.savedLocation}", color = Color.White.copy(alpha = 0.58f), fontSize = 10.sp)
+                        OutlinedButton(onClick = { transferReceiver.reset() }) { Text("RECEIVE ANOTHER") }
+                    }
+                    if (transferState.status == TransferReceiveStatus.ERROR) {
+                        Text(transferState.error.orEmpty(), color = Color(0xFFFF8A80), fontSize = 10.sp)
+                        OutlinedButton(onClick = { transferReceiver.reset() }) { Text("TRY AGAIN") }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Card(
+                Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.06f)),
             ) {
                 Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text(
-                        if (targetPass) "TARGET PASS ≥200 KiB/s / p95<25ms" else "LIVE CHANNEL",
+                        if (targetPass) "LIVE TRANSFER ≥1 MiB/s" else "LIVE OPTICAL CHANNEL",
                         color = if (targetPass) Color(0xFF7EE787) else Color(0xFFF2CC60),
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp,
                     )
                     Text(
-                        "SER ${"%.3f".format(avgSer * 100)}% • BER ${"%.3f".format(avgBer * 100)}% • erasures ${"%.2f".format(avgErasure * 100)}%",
+                        "Erasures ${"%.2f".format(avgErasure * 100)}% • valid transport frames require CRC32",
                         color = Color.White,
                         fontSize = 12.sp,
                     )
                     Text(
-                        "Cell FEC ${"%.2f".format(avgFecLoad * 100)}% • frame loss ${"%.2f".format(runEstimate.frameLossRate * 100)}% • total ${"%.2f".format(runEstimate.totalFecLoad * 100)}% / 20%",
+                        "Frame loss estimate ${"%.2f".format(runEstimate.frameLossRate * 100)}% • optical delivery ${"%.2f".format(frameDeliveryRatio * 100)}%",
                         color = Color.White.copy(alpha = 0.78f),
                         fontSize = 11.sp,
                     )
                     Text(
-                        "Estimated recoverable goodput ${"%.1f".format(estimatedGoodput)} KiB/s • unique $uniqueFrames",
-                        color = if (estimatedGoodput >= 200.0) Color(0xFF7EE787) else Color.White.copy(alpha = 0.78f),
+                        "Estimated channel ${"%.1f".format(estimatedGoodput)} KiB/s • measured file ${"%.1f".format(transferState.usefulKibPerSecond)} KiB/s",
+                        color = if (transferState.usefulKibPerSecond >= 1024.0) Color(0xFF7EE787) else Color.White.copy(alpha = 0.78f),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -322,14 +420,6 @@ fun ColorGrid8LabScreen(
                             color = Color.White.copy(alpha = 0.45f),
                             fontSize = 10.sp,
                         )
-                        Spacer(Modifier.height(4.dp))
-                        Text("CONFUSION MATRIX rows=expected cols=observed", color = Color.White.copy(alpha = 0.5f), fontSize = 9.sp)
-                        Text(
-                            confusionText(result.confusionMatrix),
-                            color = Color.White.copy(alpha = 0.62f),
-                            fontSize = 8.sp,
-                            fontFamily = FontFamily.Monospace,
-                        )
                     }
                 }
             }
@@ -338,22 +428,37 @@ fun ColorGrid8LabScreen(
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = { if (running) manager.stop() else manager.start(lifecycleOwner) },
+                onClick = {
+                    if (running) {
+                        manager.stop()
+                    } else {
+                        if (transferState.status in setOf(TransferReceiveStatus.SAVED, TransferReceiveStatus.ERROR)) {
+                            transferReceiver.reset()
+                        }
+                        manager.start(lifecycleOwner)
+                    }
+                },
+                enabled = transferState.status !in setOf(
+                    TransferReceiveStatus.VERIFYING,
+                    TransferReceiveStatus.PREVIEW,
+                    TransferReceiveStatus.SAVING,
+                ),
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (running) Color(0xFFE53935) else Color(0xFF43A047)
                 ),
-            ) { Text(if (running) "STOP" else "START GRID8 LAB", fontWeight = FontWeight.Bold) }
+            ) { Text(if (running) "STOP" else "START GRID8 RECEIVE", fontWeight = FontWeight.Bold) }
             OutlinedButton(
                 onClick = {
                     val text = buildString {
-                        appendLine("SuperQR ColorGrid8 PHY Lab")
+                        appendLine("SuperQR ColorGrid8 high-speed LAB")
                         appendLine("profile=${profile.cols}x${profile.rows}@${profile.fps}")
                         appendLine("observations=$observations uniqueFrames=$uniqueFrames sentTransitions=$sentTransitions")
                         appendLine("frameDelivery=${"%.3f".format(frameDeliveryRatio * 100)}% frameLoss=${"%.3f".format(runEstimate.frameLossRate * 100)}%")
-                        appendLine("SER=${"%.4f".format(avgSer * 100)}% BER=${"%.4f".format(avgBer * 100)}% erasures=${"%.3f".format(avgErasure * 100)}%")
-                        appendLine("cellFecLoad=${"%.3f".format(avgFecLoad * 100)}% totalFecLoad=${"%.3f".format(runEstimate.totalFecLoad * 100)}%")
-                        appendLine("estimated recoverable goodput=${"%.2f".format(estimatedGoodput)} KiB/s")
+                        appendLine("erasures=${"%.3f".format(avgErasure * 100)}% rejected=${transferDiagnostics.rejectedFrames}")
+                        appendLine("parity=${transferDiagnostics.parityFrames} recovered=${transferDiagnostics.recoveredFrames}")
+                        appendLine("estimated channel=${"%.2f".format(estimatedGoodput)} KiB/s")
+                        appendLine("measured file goodput=${"%.2f".format(transferState.usefulKibPerSecond)} KiB/s")
                         appendLine("pipeline p50=${"%.2f".format(p50Ms)} ms p95=${"%.2f".format(p95Ms)} ms")
                         appendLine("capture=$resolution acquisition=$acquisitionMode")
                         appendLine("pipelineStage=$stage failure=$failure finders=$finderCandidates geometryLocked=$geometryLocked header=$headerStatus")
@@ -375,11 +480,11 @@ fun ColorGrid8LabScreen(
     }
 }
 
-private fun confusionText(matrix: IntArray): String {
-    if (matrix.size < 64) return "—"
-    return (0 until 8).joinToString("\n") { row ->
-        (0 until 8).joinToString(" ") { col -> "%4d".format(matrix[row * 8 + col]) }
-    }
+private fun formatGrid8Bytes(value: Long): String = when {
+    value >= 1024L * 1024L * 1024L -> "%.2f GiB".format(value / (1024.0 * 1024.0 * 1024.0))
+    value >= 1024L * 1024L -> "%.2f MiB".format(value / (1024.0 * 1024.0))
+    value >= 1024L -> "%.1f KiB".format(value / 1024.0)
+    else -> "$value B"
 }
 
 @Composable

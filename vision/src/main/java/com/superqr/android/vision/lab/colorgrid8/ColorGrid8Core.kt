@@ -10,7 +10,9 @@ object ColorGrid8Spec {
     const val BITS_PER_CELL = 3
     const val CHROMA_BITS = 2
     const val HEADER_MAGIC = 0xC8D
-    const val HEADER_VERSION = 1
+    const val DIAGNOSTIC_HEADER_VERSION = 1
+    const val TRANSFER_HEADER_VERSION = 2
+    const val HEADER_VERSION = DIAGNOSTIC_HEADER_VERSION
     const val HEADER_PAYLOAD_BITS = 51
     const val HEADER_BITS = 56
     const val HEADER_CELLS = 112
@@ -23,21 +25,37 @@ object ColorGrid8Spec {
     private const val GOLDEN_STEP: Int = -1640531535 // 0x9E3779B1
     private const val PAYLOAD_SALT: Int = -1072166259 // 0xC0180A8D
 
-    val grids: List<Pair<Int, Int>> = listOf(
+    val diagnosticGrids: List<Pair<Int, Int>> = listOf(
         128 to 96,
         144 to 112,
         160 to 136,
         168 to 144,
         176 to 144,
     )
+    val transferGrids: List<Pair<Int, Int>> = listOf(
+        240 to 216,
+        336 to 288,
+        384 to 336,
+    )
+    val grids: List<Pair<Int, Int>> = diagnosticGrids + transferGrids
     val fpsSweep: List<Int> = listOf(15, 20, 24, 30)
+    val transferFpsSweep: List<Int> = listOf(30, 45, 60, 90)
 
     fun profileId(cols: Int, rows: Int): Int = grids.indexOf(cols to rows)
-    fun fpsCode(fps: Int): Int = fpsSweep.indexOf(fps)
+    fun fpsCode(fps: Int, version: Int = HEADER_VERSION): Int =
+        (if (version == TRANSFER_HEADER_VERSION) transferFpsSweep else fpsSweep).indexOf(fps)
 
-    fun profileForId(profileId: Int, fps: Int, seed: Int = DEFAULT_SEED): ColorGrid8Profile? {
+    fun fpsForCode(code: Int, version: Int): Int? =
+        (if (version == TRANSFER_HEADER_VERSION) transferFpsSweep else fpsSweep).getOrNull(code)
+
+    fun profileForId(
+        profileId: Int,
+        fps: Int,
+        seed: Int = DEFAULT_SEED,
+        version: Int = HEADER_VERSION,
+    ): ColorGrid8Profile? {
         val dims = grids.getOrNull(profileId) ?: return null
-        return runCatching { ColorGrid8Profile(dims.first, dims.second, fps, seed) }.getOrNull()
+        return runCatching { ColorGrid8Profile(dims.first, dims.second, fps, seed, version) }.getOrNull()
     }
 
     internal fun payloadSeed(profile: ColorGrid8Profile, frameIndex: Int): Int =
@@ -50,10 +68,20 @@ data class ColorGrid8Profile(
     val rows: Int,
     val fps: Int = 30,
     val seed: Int = ColorGrid8Spec.DEFAULT_SEED,
+    val version: Int = ColorGrid8Spec.HEADER_VERSION,
 ) {
     init {
         require(ColorGrid8Spec.profileId(cols, rows) >= 0) { "unsupported ColorGrid8 grid: ${cols}x${rows}" }
-        require(ColorGrid8Spec.fpsCode(fps) >= 0) { "unsupported ColorGrid8 FPS: $fps" }
+        require(version in setOf(ColorGrid8Spec.DIAGNOSTIC_HEADER_VERSION, ColorGrid8Spec.TRANSFER_HEADER_VERSION)) {
+            "unsupported ColorGrid8 version: $version"
+        }
+        val allowedGrids = if (version == ColorGrid8Spec.TRANSFER_HEADER_VERSION) {
+            ColorGrid8Spec.transferGrids
+        } else {
+            ColorGrid8Spec.diagnosticGrids
+        }
+        require(cols to rows in allowedGrids) { "grid ${cols}x${rows} is not valid for ColorGrid8 v$version" }
+        require(ColorGrid8Spec.fpsCode(fps, version) >= 0) { "unsupported ColorGrid8 FPS: $fps" }
         require(cols >= ColorGrid8Spec.HEADER_CELLS) { "grid is too narrow for header" }
         require(seed in 0..0xFFFF) { "seed must fit 16 bits" }
     }
@@ -65,6 +93,7 @@ data class ColorGrid8Profile(
         return (usable + ColorGrid8Spec.PILOT_PERIOD - 1) / ColorGrid8Spec.PILOT_PERIOD
     }
     val payloadCells: Int get() = totalCells - cols * ColorGrid8Spec.HEADER_ROWS - pilotCells
+    val byteCapacity: Int get() = payloadCells * ColorGrid8Spec.BITS_PER_CELL / 8
     val rawKibS: Double get() = totalCells * 3.0 * fps / 8.0 / 1024.0
     val payloadKibS: Double get() = payloadCells * 3.0 * fps / 8.0 / 1024.0
     fun postFecKibS(fecFraction: Double = 0.20): Double = payloadKibS * (1.0 - fecFraction)
@@ -106,6 +135,7 @@ data class ColorGrid8AnalysisResult(
     val centroids: List<ColorGrid8Centroid>,
     val confusionMatrix: IntArray,
     val analysisMs: Double,
+    val payloadSymbols: ByteArray? = null,
 )
 
 enum class ColorGrid8Stage {
@@ -187,9 +217,9 @@ object ColorGrid8Codec {
         val bits = IntArray(ColorGrid8Spec.HEADER_BITS)
         var cursor = 0
         cursor = appendBits(bits, cursor, ColorGrid8Spec.HEADER_MAGIC, 12)
-        cursor = appendBits(bits, cursor, ColorGrid8Spec.HEADER_VERSION, 2)
+        cursor = appendBits(bits, cursor, profile.version, 2)
         cursor = appendBits(bits, cursor, profile.profileId, 3)
-        cursor = appendBits(bits, cursor, ColorGrid8Spec.fpsCode(profile.fps), 2)
+        cursor = appendBits(bits, cursor, ColorGrid8Spec.fpsCode(profile.fps, profile.version), 2)
         cursor = appendBits(bits, cursor, frameIndex and 0xFFFF, 16)
         cursor = appendBits(bits, cursor, profile.seed, 16)
         check(cursor == ColorGrid8Spec.HEADER_PAYLOAD_BITS)
@@ -229,8 +259,11 @@ object ColorGrid8Codec {
         val fpsCode = take(2)
         val frameIndex = take(16)
         val seed = take(16)
-        if (magic != ColorGrid8Spec.HEADER_MAGIC || version != ColorGrid8Spec.HEADER_VERSION) return null
-        val fps = ColorGrid8Spec.fpsSweep.getOrNull(fpsCode) ?: return null
+        if (magic != ColorGrid8Spec.HEADER_MAGIC || version !in setOf(
+                ColorGrid8Spec.DIAGNOSTIC_HEADER_VERSION,
+                ColorGrid8Spec.TRANSFER_HEADER_VERSION,
+            )) return null
+        val fps = ColorGrid8Spec.fpsForCode(fpsCode, version) ?: return null
         if (profileId !in ColorGrid8Spec.grids.indices) return null
         return ColorGrid8Header(profileId, fps, frameIndex, seed, version)
     }
@@ -307,7 +340,11 @@ class ColorGrid8Analyzer(
                 rawHeaderMagic = headerProbe.rawMagic,
                 headerScore = headerProbe.score,
             )
-        if (header.profileId != expectedProfile.profileId || header.fps != expectedProfile.fps) {
+        if (
+            header.profileId != expectedProfile.profileId ||
+            header.fps != expectedProfile.fps ||
+            header.version != expectedProfile.version
+        ) {
             return ColorGrid8AnalysisAttempt(
                 null,
                 ColorGrid8Stage.PROFILE,
@@ -318,7 +355,13 @@ class ColorGrid8Analyzer(
                 headerProbe.score,
             )
         }
-        val profile = ColorGrid8Profile(expectedProfile.cols, expectedProfile.rows, header.fps, header.seed)
+        val profile = ColorGrid8Profile(
+            expectedProfile.cols,
+            expectedProfile.rows,
+            header.fps,
+            header.seed,
+            header.version,
+        )
         val centroids = calibratePilots(profile, header.frameIndex, means)
             ?: return ColorGrid8AnalysisAttempt(
                 null,
@@ -336,7 +379,10 @@ class ColorGrid8Analyzer(
         val lumaHalfGap = max(1.0, abs(lightMean - darkMean) * 0.5)
         val pilotMinUvDistance = minimumPilotUvDistance(centroids)
 
-        val prng = Xorshift32(ColorGrid8Spec.payloadSeed(profile, header.frameIndex))
+        val diagnostic = header.version == ColorGrid8Spec.DIAGNOSTIC_HEADER_VERSION
+        val prng = if (diagnostic) Xorshift32(ColorGrid8Spec.payloadSeed(profile, header.frameIndex)) else null
+        val payloadSymbols = if (diagnostic) null else ByteArray(profile.payloadCells)
+        var payloadCursor = 0
         val confusion = IntArray(64)
         var classified = 0
         var symbolErrors = 0
@@ -347,7 +393,7 @@ class ColorGrid8Analyzer(
             val base = row * profile.cols
             for (col in 0 until profile.cols) {
                 if (ColorGrid8Codec.isPilot(profile, row, col)) continue
-                val expected = prng.next() and 7
+                val expected = prng?.next()?.and(7) ?: 0
                 val index = base + col
                 val y = means.y[index].toInt() and 0xFF
                 val u = means.u[index].toInt() and 0xFF
@@ -355,11 +401,15 @@ class ColorGrid8Analyzer(
                 val observed = classify(y, u, v, centroids, lumaThreshold, lumaHalfGap)
                 if (observed < 0) {
                     erasures++
+                    payloadSymbols?.set(payloadCursor, 0)
+                    payloadCursor++
                     continue
                 }
+                payloadSymbols?.set(payloadCursor, observed.toByte())
+                payloadCursor++
                 classified++
-                confusion[expected * 8 + observed]++
-                if (observed != expected) {
+                if (diagnostic) confusion[expected * 8 + observed]++
+                if (diagnostic && observed != expected) {
                     symbolErrors++
                     bitErrors += Integer.bitCount(observed xor expected)
                 }
@@ -367,8 +417,8 @@ class ColorGrid8Analyzer(
         }
 
         val payload = profile.payloadCells.coerceAtLeast(1)
-        val symbolErrorRate = if (classified > 0) symbolErrors.toDouble() / classified else 1.0
-        val bitErrorRate = if (classified > 0) bitErrors.toDouble() / (classified * 3.0) else 1.0
+        val symbolErrorRate = if (!diagnostic) 0.0 else if (classified > 0) symbolErrors.toDouble() / classified else 1.0
+        val bitErrorRate = if (!diagnostic) 0.0 else if (classified > 0) bitErrors.toDouble() / (classified * 3.0) else 1.0
         val erasureRate = erasures.toDouble() / payload
         // Conservative parity-load estimate: error ~= 2 parity symbols, erasure ~= 1.
         val fecLoad = (2.0 * symbolErrors + erasures) / payload
@@ -392,6 +442,7 @@ class ColorGrid8Analyzer(
             centroids = centroids,
             confusionMatrix = confusion,
             analysisMs = elapsedMs,
+            payloadSymbols = payloadSymbols,
         )
         return ColorGrid8AnalysisAttempt(
             result,

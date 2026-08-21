@@ -219,11 +219,12 @@ class ColorGrid8FrameProcessor(
         offset: Int,
     ): OrientationAttempt? {
         val warpStart = System.nanoTime()
+        val transferMode = profile.version == ColorGrid8Spec.TRANSFER_HEADER_VERSION
         val yMeans = warpPlaneToCellMeans(
             source = gray,
             sourceQuad = sourceQuad,
             profile = profile,
-            samplesPerCell = 4,
+            samplesPerCell = if (transferMode) 2 else 4,
             warped = warpedY,
             resized = meansY,
         ) ?: return null
@@ -232,7 +233,7 @@ class ColorGrid8FrameProcessor(
             source = chromaU,
             sourceQuad = chromaQuad,
             profile = profile,
-            samplesPerCell = 2,
+            samplesPerCell = if (transferMode) 1 else 2,
             warped = warpedU,
             resized = meansU,
         ) ?: return null
@@ -240,7 +241,7 @@ class ColorGrid8FrameProcessor(
             source = chromaV,
             sourceQuad = chromaQuad,
             profile = profile,
-            samplesPerCell = 2,
+            samplesPerCell = if (transferMode) 1 else 2,
             warped = warpedV,
             resized = meansV,
         ) ?: return null

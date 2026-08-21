@@ -264,7 +264,7 @@ fun TransferScreen(
 }
 
 @Composable
-private fun ReceivedContentPreview(state: com.superqr.android.transfer.TransferReceiveState) {
+internal fun ReceivedContentPreview(state: com.superqr.android.transfer.TransferReceiveState) {
     val context = LocalContext.current
     val uri = state.previewUri ?: return
     when {

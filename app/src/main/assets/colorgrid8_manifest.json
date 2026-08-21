@@ -99,6 +99,59 @@
     24,
     30
   ],
+  "transfer_v2": {
+    "schema": "superqr.colorgrid8.transfer.v2",
+    "header_version": 2,
+    "magic": "SQG2",
+    "transport_header_bytes": 32,
+    "block_data_bytes": 512,
+    "block_crc_bytes": 4,
+    "max_data_frames": 2000000,
+    "xor_group": {
+      "data_frames": 8,
+      "parity_frames": 1
+    },
+    "fps_codes": [
+      30,
+      45,
+      60,
+      90
+    ],
+    "profiles_60fps": [
+      {
+        "profile_id": 5,
+        "cols": 240,
+        "rows": 216,
+        "chunk_bytes": 18313,
+        "channel_kib_s": 1073.02734375,
+        "xor8_kib_s": 953.802083333
+      },
+      {
+        "profile_id": 6,
+        "cols": 336,
+        "rows": 288,
+        "chunk_bytes": 34294,
+        "channel_kib_s": 2009.4140625,
+        "xor8_kib_s": 1786.145833333
+      },
+      {
+        "profile_id": 7,
+        "cols": 384,
+        "rows": 336,
+        "chunk_bytes": 45779,
+        "channel_kib_s": 2682.36328125,
+        "xor8_kib_s": 2384.322916667
+      }
+    ],
+    "package_envelope": "SQP7",
+    "integrity": [
+      "header_crc32",
+      "block_crc32",
+      "file_crc32",
+      "file_sha256"
+    ],
+    "measured_speed_required": true
+  },
   "fec_fractions": [
     0.1,
     0.2

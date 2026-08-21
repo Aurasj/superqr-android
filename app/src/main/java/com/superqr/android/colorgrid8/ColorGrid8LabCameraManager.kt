@@ -79,10 +79,15 @@ class ColorGrid8LabCameraManager(
     var onSample: ((Sample) -> Unit)? = null
 
     @Volatile
-    private var profile = ColorGrid8Profile(168, 144, 30)
+    private var profile = ColorGrid8Profile(
+        336,
+        288,
+        60,
+        version = com.superqr.android.vision.lab.colorgrid8.ColorGrid8Spec.TRANSFER_HEADER_VERSION,
+    )
     private val generation = AtomicInteger(0)
     private val deliveredRate = AnalysisRateAccumulator(64)
-    private val processor = ColorGrid8FrameProcessor(redetectEveryFrames = 10)
+    private val processor = ColorGrid8FrameProcessor(redetectEveryFrames = 30)
     private var provider: ProcessCameraProvider? = null
     private var analysis: ImageAnalysis? = null
 
@@ -188,8 +193,11 @@ class ColorGrid8LabCameraManager(
             val info = cameraProvider.getCameraInfo(CameraSelector.DEFAULT_BACK_CAMERA)
             val baseConfig = SessionConfig.Builder(useCases).apply { setViewPort(viewPort) }.build()
             val ranges = try { info.getSupportedFrameRateRanges(baseConfig) } catch (_: Throwable) { emptySet() }
-            val chosen = ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
-                ?: ranges.filter { it.lower <= 30 && it.upper >= 30 }.minByOrNull { it.upper - it.lower }
+            val targetFps = profile.fps
+            val chosen = ranges.firstOrNull { it.lower == targetFps && it.upper == targetFps }
+                ?: ranges.filter { it.lower <= targetFps && it.upper >= targetFps }
+                    .minByOrNull { it.upper - it.lower }
+                ?: ranges.filter { it.upper <= targetFps }.maxByOrNull { it.upper }
             val config = SessionConfig.Builder(useCases).apply {
                 setViewPort(viewPort)
                 if (chosen != null) setFrameRateRange(chosen)

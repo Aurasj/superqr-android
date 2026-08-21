@@ -6,7 +6,7 @@ The Compose application has three separate areas:
 
 - **SEND** — production V40 QR sender.
 - **RECEIVE** — production camera receiver with exact verification and preview-before-save.
-- **LAB** — the retained ColorGrid8 experiment with camera, finder, geometry, warp, header, pilot, payload, timing, delivery, SER/BER, erasure, and goodput diagnostics.
+- **LAB** — ColorGrid8 v2 high-speed file receive with 8+1 XOR recovery, CRC32/SHA-256 verification, preview-before-save, and camera/finder/geometry/warp/header/pilot/payload diagnostics.
 
 No obsolete PHY generation is exposed in the product. Production V40 is isolated from LAB and uses the canonical packaged contract.
 
