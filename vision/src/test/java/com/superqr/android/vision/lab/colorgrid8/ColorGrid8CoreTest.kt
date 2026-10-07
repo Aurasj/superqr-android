@@ -7,6 +7,45 @@ import org.junit.Test
 
 class ColorGrid8CoreTest {
     @Test
+    fun baselineAndFastTransferUseCanonicalGeometryWithoutChangingOtherProfiles() {
+        assertTrue(ColorGrid8Profile(240, 216, 30, version = 2).hasCanonicalGpuGeometry)
+        assertTrue(ColorGrid8Profile(336, 288, 30, version = 2).hasCanonicalGpuGeometry)
+        assertEquals(false, ColorGrid8Profile(168, 144, 30, version = 1).hasCanonicalGpuGeometry)
+        assertEquals(false, ColorGrid8Profile(480, 388, 30, version = 2).hasCanonicalGpuGeometry)
+    }
+    private fun idealMeans(profile: ColorGrid8Profile, frame: Int): ColorGrid8CellMeans {
+        val symbols = ColorGrid8Codec.buildSymbols(profile, frame)
+        val y = ByteArray(symbols.size) { if (symbols[it].toInt() < 4) 60 else 190.toByte() }
+        val u = ByteArray(symbols.size) { if (symbols[it].toInt() and 2 == 0) 80 else 176.toByte() }
+        val v = ByteArray(symbols.size) { if (symbols[it].toInt() and 1 == 0) 80 else 176.toByte() }
+        return ColorGrid8CellMeans(y, u, v)
+    }
+
+    @Test
+    fun canonicalHeaderRequiresMatchingRowsAndExpectedProfile() {
+        val profile = ColorGrid8Profile(336, 288, 30, version = 2)
+        val analyzer = ColorGrid8Analyzer()
+        val means = idealMeans(profile, 0)
+        assertEquals(0, analyzer.analyzeDetailed(profile, means, true).result?.header?.frameIndex)
+        val other = idealMeans(profile, 16383)
+        other.y.copyInto(means.y, profile.cols, profile.cols, profile.cols * 2)
+        assertEquals(ColorGrid8Stage.HEADER, analyzer.analyzeDetailed(profile, means, true).stage)
+        assertEquals(ColorGrid8Stage.PROFILE,
+            analyzer.analyzeDetailed(profile.copy(fps = 60), other, true).stage)
+        assertEquals(ColorGrid8Stage.PROFILE,
+            analyzer.analyzeDetailed(profile.copy(seed = 1), other, true).stage)
+    }
+
+    @Test
+    fun canonicalDecoderRejectsOverlappingPilotColors() {
+        val profile = ColorGrid8Profile(336, 288, 30, version = 2)
+        val means = idealMeans(profile, 0)
+        means.u.fill(128.toByte())
+        means.v.fill(128.toByte())
+        assertEquals(ColorGrid8Stage.PILOTS, ColorGrid8Analyzer().analyzeDetailed(profile, means, true).stage)
+    }
+
+    @Test
     fun goldenFramesMatchProtocolAndDesktop() {
         val profile = ColorGrid8Profile(168, 144, 30)
         assertEquals(0x94A6DBA5L, ColorGrid8Codec.crc32(profile, 0))

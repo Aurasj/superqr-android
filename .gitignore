@@ -30,3 +30,7 @@ keystore.properties
 *.pem
 *.p12
 *.pfx
+
+# Locally compiled native research probes, not application sources.
+*.o
+/vision/src/main/cpp/test_*_arm64

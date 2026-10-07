@@ -29,7 +29,7 @@ data class ColorGrid8TransferDiagnostics(
     val observedErasures: Long = 0,
 )
 
-private data class Grid8AccumulatorSnapshot(
+internal data class Grid8AccumulatorSnapshot(
     val sessionId: Int,
     val profileLabel: String,
     val uniqueFrames: Int,
@@ -43,7 +43,7 @@ private data class Grid8AccumulatorSnapshot(
 )
 
 /** Disk-backed 8+1 XOR accumulator for the isolated ColorGrid8 v2 LAB. */
-private class ColorGrid8TransferAccumulator(private val cacheDir: File) {
+internal class ColorGrid8TransferAccumulator(private val cacheDir: File) {
     companion object {
         private val PACKAGE_MAGIC = byteArrayOf('S'.code.toByte(), 'Q'.code.toByte(), 'P'.code.toByte(), '7'.code.toByte())
         private const val PACKAGE_HEADER_SIZE = 20
@@ -57,6 +57,7 @@ private class ColorGrid8TransferAccumulator(private val cacheDir: File) {
     private var chunkCapacity = 0
     private var seen = BooleanArray(0)
     private var payloadLengths = IntArray(0)
+    private var recoveredData = BooleanArray(0)
     private var dataMaskLow = LongArray(0)
     private var dataMaskHigh = LongArray(0)
     private var paritySeen = BooleanArray(0)
@@ -84,6 +85,7 @@ private class ColorGrid8TransferAccumulator(private val cacheDir: File) {
         ) throw IllegalArgumentException("ColorGrid8 transfer parameters changed inside session")
 
         val groupStart = frame.frameId - frame.frameId % ColorGrid8TransferCodec.XOR_GROUP_SIZE
+        val hadMetadata = metadata != null
         if (frame.kind == ColorGrid8TransferCodec.KIND_DATA) {
             acceptData(frame)
         } else {
@@ -109,6 +111,10 @@ private class ColorGrid8TransferAccumulator(private val cacheDir: File) {
             }
         }
         tryRecover(groupStart)
+        // The last group may have arrived first, before SQP7 told us the
+        // unpadded length of its final frame.
+        val lastGroup = (totalFrames - 1) / ColorGrid8TransferCodec.XOR_GROUP_SIZE * ColorGrid8TransferCodec.XOR_GROUP_SIZE
+        if (!hadMetadata && metadata != null && lastGroup != groupStart) tryRecover(lastGroup)
         return snapshot()
     }
 
@@ -175,6 +181,7 @@ private class ColorGrid8TransferAccumulator(private val cacheDir: File) {
         chunkCapacity = 0
         seen = BooleanArray(0)
         payloadLengths = IntArray(0)
+        recoveredData = BooleanArray(0)
         dataMaskLow = LongArray(0)
         dataMaskHigh = LongArray(0)
         paritySeen = BooleanArray(0)
@@ -196,6 +203,7 @@ private class ColorGrid8TransferAccumulator(private val cacheDir: File) {
         chunkCapacity = frame.chunkCapacity
         seen = BooleanArray(totalFrames)
         payloadLengths = IntArray(totalFrames)
+        recoveredData = BooleanArray(totalFrames)
         dataMaskLow = LongArray(totalFrames)
         dataMaskHigh = LongArray(totalFrames)
         val groups = (totalFrames + ColorGrid8TransferCodec.XOR_GROUP_SIZE - 1) / ColorGrid8TransferCodec.XOR_GROUP_SIZE
@@ -222,6 +230,9 @@ private class ColorGrid8TransferAccumulator(private val cacheDir: File) {
         if (frame.payload.isEmpty() || frame.payload.size > chunkCapacity) {
             throw IllegalArgumentException("invalid ColorGrid8 payload length")
         }
+        if (frameId == totalFrames - 1 && metadata != null && frame.payload.size != expectedFinalLength()) {
+            throw IllegalArgumentException("final ColorGrid8 payload length does not match package")
+        }
         val previousLength = payloadLengths[frameId]
         if (previousLength != 0 && previousLength != frame.payload.size) {
             throw IllegalArgumentException("ColorGrid8 payload length changed across carousel passes")
@@ -238,59 +249,78 @@ private class ColorGrid8TransferAccumulator(private val cacheDir: File) {
         dataMaskLow[frameId] = merged.first
         dataMaskHigh[frameId] = merged.second
         if (!merged.third) duplicates++
-        if (hasAllBlocks(merged.first, merged.second, blockCount(frame.payload.size))) {
-            seen[frameId] = true
-            uniqueFrames++
-            receivedBytes += frame.payload.size
-            if (frameId == 0) metadata = readMetadataFrame()
-        }
+        completeDataIfReady(frameId)
     }
 
     private fun tryRecover(groupStart: Int) {
         val group = groupStart / ColorGrid8TransferCodec.XOR_GROUP_SIZE
-        if (!paritySeen[group]) return
         val end = minOf(groupStart + ColorGrid8TransferCodec.XOR_GROUP_SIZE, totalFrames)
-        var missing = -1
-        for (frameId in groupStart until end) {
-            if (!seen[frameId]) {
-                if (missing >= 0) return
-                missing = frameId
+        val data = packageRaf ?: return
+        val parity = parityRaf ?: return
+        // XOR is independent for every CRC-protected block. Several damaged
+        // frames are recoverable if at most one is missing in each column.
+        val recovered = ByteArray(ColorGrid8TransferCodec.BLOCK_DATA_BYTES)
+        val scratch = ByteArray(ColorGrid8TransferCodec.BLOCK_DATA_BYTES)
+        for (block in 0 until blockCount(chunkCapacity)) {
+            if (!blockIsSet(parityMaskLow[group], parityMaskHigh[group], block)) continue
+            val offset = block * ColorGrid8TransferCodec.BLOCK_DATA_BYTES
+            var missing = -1
+            var missingCount = 0
+            for (frameId in groupStart until end) {
+                if (offset >= effectiveLength(frameId)) continue // Zero-padded final frame.
+                if (!blockIsSet(dataMaskLow[frameId], dataMaskHigh[frameId], block)) {
+                    missing = frameId
+                    missingCount++
+                }
             }
+            if (missingCount != 1) continue
+            val blockLength = minOf(recovered.size, chunkCapacity - offset)
+            parity.seek(group.toLong() * chunkCapacity + offset)
+            parity.readFully(recovered, 0, blockLength)
+            for (frameId in groupStart until end) {
+                if (frameId == missing) continue
+                val length = minOf(blockLength, (effectiveLength(frameId) - offset).coerceAtLeast(0))
+                if (length == 0) continue
+                data.seek(frameId.toLong() * chunkCapacity + offset)
+                data.readFully(scratch, 0, length)
+                for (i in 0 until length) recovered[i] = (recovered[i].toInt() xor scratch[i].toInt()).toByte()
+            }
+            val length = minOf(blockLength, effectiveLength(missing) - offset)
+            data.seek(missing.toLong() * chunkCapacity + offset)
+            data.write(recovered, 0, length)
+            if (block < 64) dataMaskLow[missing] = dataMaskLow[missing] or (1L shl block)
+            else dataMaskHigh[missing] = dataMaskHigh[missing] or (1L shl (block - 64))
+            recoveredData[missing] = true
+            if (missing == 0) readMetadataIfReady()
         }
-        if (missing < 0) return
-
-        val recovered = ByteArray(chunkCapacity)
-        parityRaf?.seek(group.toLong() * chunkCapacity)
-        parityRaf?.readFully(recovered)
-        val scratch = ByteArray(chunkCapacity)
-        for (frameId in groupStart until end) {
-            if (frameId == missing) continue
-            scratch.fill(0)
-            packageRaf?.seek(frameId.toLong() * chunkCapacity)
-            packageRaf?.readFully(scratch, 0, payloadLengths[frameId])
-            for (index in scratch.indices) recovered[index] = (recovered[index].toInt() xor scratch[index].toInt()).toByte()
-        }
-        val recoveredLength = if (missing == totalFrames - 1 && metadata != null) {
-            (metadata!!.packageBytes - missing.toLong() * chunkCapacity).toInt()
-        } else {
-            chunkCapacity
-        }
-        acceptRecoveredData(missing, recovered.copyOf(recoveredLength))
+        for (frameId in groupStart until end) completeDataIfReady(frameId)
     }
 
-    private fun acceptRecoveredData(frameId: Int, payload: ByteArray) {
+    private fun expectedFinalLength(): Int =
+        (requireNotNull(metadata).packageBytes - (totalFrames - 1L) * chunkCapacity).toInt()
+
+    private fun effectiveLength(frameId: Int): Int = when {
+        payloadLengths[frameId] > 0 -> payloadLengths[frameId]
+        frameId == totalFrames - 1 && metadata != null -> expectedFinalLength()
+        else -> chunkCapacity
+    }
+
+    private fun completeDataIfReady(frameId: Int) {
         if (seen[frameId]) return
-        packageRaf?.seek(frameId.toLong() * chunkCapacity)
-        packageRaf?.write(payload)
-        payloadLengths[frameId] = payload.size
-        val masks = fullBlockMasks(blockCount(payload.size))
-        dataMaskLow[frameId] = masks.first
-        dataMaskHigh[frameId] = masks.second
+        if (frameId == 0) readMetadataIfReady()
+        var length = effectiveLength(frameId)
+        if (!hasAllBlocks(dataMaskLow[frameId], dataMaskHigh[frameId], blockCount(length))) return
+        if (frameId == totalFrames - 1) {
+            // Parity contains zero padding, not the original final length.
+            // Do not count padded bytes as received data while metadata is absent.
+            if (metadata == null && payloadLengths[frameId] == 0) return
+            length = effectiveLength(frameId)
+        }
+        payloadLengths[frameId] = length
         seen[frameId] = true
         uniqueFrames++
-        recoveredFrames++
-        receivedBytes += payload.size
-        if (frameId == 0) metadata = parseMetadata(payload)
+        if (recoveredData[frameId]) recoveredFrames++
+        receivedBytes += length
     }
 
     private fun mergeValidBlocks(
@@ -318,12 +348,33 @@ private class ColorGrid8TransferAccumulator(private val cacheDir: File) {
         return Triple(low, high, added)
     }
 
-    private fun readMetadataFrame(): IncomingPackageMetadata {
-        val length = payloadLengths[0]
+    private fun readMetadataIfReady() {
+        if (metadata != null || !blockIsSet(dataMaskLow[0], dataMaskHigh[0], 0)) return
+        val data = packageRaf ?: return
+        val header = ByteArray(PACKAGE_HEADER_SIZE)
+        data.seek(0)
+        data.readFully(header)
+        val buffer = ByteBuffer.wrap(header)
+        val filenameLength = buffer.getShort(4).toInt() and 0xFFFF
+        val mimeLength = buffer.getShort(6).toInt() and 0xFFFF
+        if (filenameLength !in 1..MAX_FILENAME_BYTES || mimeLength !in 0..MAX_MIME_BYTES) {
+            throw IllegalArgumentException("invalid SQP7 metadata")
+        }
+        val length = PACKAGE_HEADER_SIZE + filenameLength + mimeLength
+        if (length > effectiveLength(0)) throw IllegalArgumentException("truncated SQP7 metadata")
+        // Only the CRC-verified blocks containing metadata are required, not
+        // every file-data block (or parity padding) in the first frame.
+        if (!hasAllBlocks(dataMaskLow[0], dataMaskHigh[0], blockCount(length))) return
         val payload = ByteArray(length)
-        packageRaf?.seek(0)
-        packageRaf?.readFully(payload)
-        return parseMetadata(payload)
+        data.seek(0)
+        data.readFully(payload)
+        val candidate = parseMetadata(payload)
+        val finalLength = (candidate.packageBytes - (totalFrames - 1L) * chunkCapacity).toInt()
+        val declaredFinalLength = payloadLengths[totalFrames - 1]
+        if (declaredFinalLength != 0 && declaredFinalLength != finalLength) {
+            throw IllegalArgumentException("final ColorGrid8 payload length does not match package")
+        }
+        metadata = candidate
     }
 
     private fun blockCount(payloadLength: Int): Int =
@@ -410,11 +461,113 @@ class ColorGrid8TransferReceiverSession(context: Context) {
     private var activeSession = 0
     private var startedNs = 0L
     private var stagedTransfer: StagedTransfer? = null
+    private var macroSession: com.superqr.android.vision.lab.colorgrid8.MacrochromaCodec.MacrochromaTransferSession? = null
 
     @Synchronized
     fun onAnalysis(profile: ColorGrid8Profile, analysis: ColorGrid8AnalysisResult, decodeMs: Double) {
-        if (closed || finalizing || analysis.header.version != ColorGrid8Spec.TRANSFER_HEADER_VERSION) return
+        if (closed || finalizing) return
         if (_state.value.status in setOf(TransferReceiveStatus.PREVIEW, TransferReceiveStatus.SAVING, TransferReceiveStatus.SAVED)) return
+
+        if (analysis.header.version == com.superqr.android.vision.lab.colorgrid8.MacrochromaCodec.VERSION || analysis.macrochromaTiles != null) {
+            val tiles = analysis.macrochromaTiles ?: return
+            if (tiles.isEmpty()) return
+            if (macroSession == null) {
+                macroSession = com.superqr.android.vision.lab.colorgrid8.MacrochromaCodec.MacrochromaTransferSession(
+                    dataTilesPerFrame = 300,
+                    parityTilesPerFrame = 20,
+                    totalDataFrames = 1,
+                )
+                startedNs = System.nanoTime()
+            }
+            macroSession?.acceptFrameTiles(tiles)
+            val session = macroSession!!
+            val meta = session.metadata
+            val totalFrames = session.totalDataFrames
+            val completedFrames = (0 until totalFrames).count { session.isFrameComplete(it) }
+            val isComplete = session.isComplete()
+            val totalBytes = meta?.fileSize ?: (totalFrames * session.dataTilesPerFrame * com.superqr.android.vision.lab.colorgrid8.MacrochromaCodec.TILE_PAYLOAD_BYTES.toLong())
+            val receivedBytes = session.totalValidTilesReceived * com.superqr.android.vision.lab.colorgrid8.MacrochromaCodec.TILE_PAYLOAD_BYTES.toLong()
+            val elapsed = (System.nanoTime() - startedNs).coerceAtLeast(1L) / 1_000_000_000.0
+
+            _diagnostics.value = _diagnostics.value.copy(
+                parityFrames = session.spatialRecoveriesCount + session.carouselRecoveriesCount,
+                recoveredFrames = session.spatialRecoveriesCount + session.carouselRecoveriesCount,
+                observedErasures = _diagnostics.value.observedErasures + analysis.erasures,
+            )
+
+            if (isComplete && _state.value.status != TransferReceiveStatus.PREVIEW && !finalizing) {
+                finalizing = true
+                val verified = session.getVerifiedFile()
+                if (verified != null) {
+                    val (fileBytes, sha256Hex) = verified
+                    val filename = meta?.filename ?: "macrochroma_payload.bin"
+                    val mimeType = meta?.mimeType ?: "application/octet-stream"
+                    val rawStream = session.reassembleBytes() ?: fileBytes
+                    val tempFile = File(appContext.cacheDir, "verified_$filename").apply {
+                        writeBytes(rawStream)
+                    }
+                    val incMeta = IncomingPackageMetadata(
+                        filename = filename,
+                        mimeType = mimeType,
+                        fileSize = meta?.fileSize ?: fileBytes.size.toLong(),
+                        fileCrc32 = meta?.fileCrc32 ?: 0L,
+                        dataOffset = meta?.dataOffset?.toLong() ?: 0L,
+                        packageBytes = meta?.packageBytes ?: rawStream.size.toLong(),
+                    )
+                    val completion = TransferCompletion(
+                        sessionId = analysis.header.seed,
+                        metadata = incMeta,
+                        tempFile = tempFile,
+                    )
+                    val staged = ReceivedFileStore.stageVerified(appContext, completion, tempFile, sha256Hex)
+                    stagedTransfer = staged
+                    _state.value = TransferReceiveState(
+                        status = TransferReceiveStatus.PREVIEW,
+                        sessionId = analysis.header.seed,
+                        profileLabel = "Macrochroma C1 480×388 @${profile.fps}",
+                        filename = filename,
+                        mimeType = mimeType,
+                        fileSize = fileBytes.size.toLong(),
+                        uniqueFrames = totalFrames,
+                        totalFrames = totalFrames,
+                        duplicates = 0,
+                        receivedBytes = receivedBytes,
+                        progress = 1.0f,
+                        usefulKibPerSecond = fileBytes.size.toLong() / elapsed / 1024.0,
+                        decodeMs = decodeMs,
+                        sha256Hex = sha256Hex,
+                        previewUri = staged.uri,
+                    )
+                } else {
+                    _state.value = _state.value.copy(
+                        status = TransferReceiveStatus.ERROR,
+                        error = "CRC32 verification failed",
+                    )
+                }
+                finalizing = false
+                return
+            }
+
+            val progress = if (totalFrames > 0) completedFrames.toFloat() / totalFrames.toFloat() else 0f
+            _state.value = TransferReceiveState(
+                status = TransferReceiveStatus.RECEIVING,
+                sessionId = analysis.header.seed,
+                profileLabel = "Macrochroma C1 480×388 @${profile.fps}",
+                filename = meta?.filename ?: "macrochroma_payload.bin",
+                mimeType = meta?.mimeType ?: "application/octet-stream",
+                fileSize = totalBytes,
+                uniqueFrames = completedFrames,
+                totalFrames = totalFrames,
+                duplicates = 0,
+                receivedBytes = receivedBytes,
+                progress = progress,
+                usefulKibPerSecond = (completedFrames * session.dataTilesPerFrame * com.superqr.android.vision.lab.colorgrid8.MacrochromaCodec.TILE_PAYLOAD_BYTES.toLong()) / elapsed / 1024.0,
+                decodeMs = decodeMs,
+            )
+            return
+        }
+
+        if (analysis.header.version != ColorGrid8Spec.TRANSFER_HEADER_VERSION) return
         val symbols = analysis.payloadSymbols ?: return
         val frame = ColorGrid8TransferCodec.parse(profile, symbols)
         if (frame == null) {
@@ -527,6 +680,7 @@ class ColorGrid8TransferReceiverSession(context: Context) {
         ReceivedFileStore.discard(stagedTransfer)
         stagedTransfer = null
         accumulator.reset()
+        macroSession = null
         activeSession = 0
         startedNs = 0L
         _state.value = TransferReceiveState()

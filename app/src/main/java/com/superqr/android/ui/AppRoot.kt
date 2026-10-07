@@ -26,6 +26,7 @@ import java.util.concurrent.ExecutorService
 private enum class AppSection(val label: String) {
     SEND("SEND"),
     RECEIVE("RECEIVE"),
+    COLORGRID("COLORGRID"),
     LAB("LAB"),
 }
 
@@ -47,7 +48,7 @@ fun AppRoot(analysisExecutor: ExecutorService) {
                     ),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text(candidate.label, fontSize = 10.sp)
+                    Text(candidate.label, fontSize = 9.sp)
                 }
             }
         }
@@ -55,6 +56,7 @@ fun AppRoot(analysisExecutor: ExecutorService) {
             when (section) {
                 AppSection.RECEIVE -> TransferScreen(analysisExecutor = analysisExecutor)
                 AppSection.SEND -> SendScreen()
+                AppSection.COLORGRID -> ColorGrid8TransferScreen(analysisExecutor = analysisExecutor)
                 AppSection.LAB -> LabScreen(analysisExecutor = analysisExecutor)
             }
         }

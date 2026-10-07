@@ -19,7 +19,7 @@ object ColorGrid8Spec {
     const val HEADER_ROWS = 2
     const val PILOT_PERIOD = 25
     const val DEFAULT_SEED = 0x4D3A
-    const val FIDUCIAL_OFFSET_CELLS = 4
+    const val FIDUCIAL_OFFSET_CELLS = 8
     const val TARGET_POST_FEC_KIB_S = 200.0
     const val TARGET_PIPELINE_P95_MS = 25.0
     private const val GOLDEN_STEP: Int = -1640531535 // 0x9E3779B1
@@ -36,6 +36,7 @@ object ColorGrid8Spec {
         240 to 216,
         336 to 288,
         384 to 336,
+        480 to 388,
     )
     val grids: List<Pair<Int, Int>> = diagnosticGrids + transferGrids
     val fpsSweep: List<Int> = listOf(15, 20, 24, 30)
@@ -72,16 +73,16 @@ data class ColorGrid8Profile(
 ) {
     init {
         require(ColorGrid8Spec.profileId(cols, rows) >= 0) { "unsupported ColorGrid8 grid: ${cols}x${rows}" }
-        require(version in setOf(ColorGrid8Spec.DIAGNOSTIC_HEADER_VERSION, ColorGrid8Spec.TRANSFER_HEADER_VERSION)) {
+        require(version in setOf(ColorGrid8Spec.DIAGNOSTIC_HEADER_VERSION, ColorGrid8Spec.TRANSFER_HEADER_VERSION, MacrochromaCodec.VERSION)) {
             "unsupported ColorGrid8 version: $version"
         }
-        val allowedGrids = if (version == ColorGrid8Spec.TRANSFER_HEADER_VERSION) {
+        val allowedGrids = if (version == ColorGrid8Spec.TRANSFER_HEADER_VERSION || version == MacrochromaCodec.VERSION) {
             ColorGrid8Spec.transferGrids
         } else {
             ColorGrid8Spec.diagnosticGrids
         }
         require(cols to rows in allowedGrids) { "grid ${cols}x${rows} is not valid for ColorGrid8 v$version" }
-        require(ColorGrid8Spec.fpsCode(fps, version) >= 0) { "unsupported ColorGrid8 FPS: $fps" }
+        require(if (version == MacrochromaCodec.VERSION) fps in setOf(15, 20, 24, 30, 60) else ColorGrid8Spec.fpsCode(fps, version) >= 0) { "unsupported ColorGrid8 FPS: $fps" }
         require(cols >= ColorGrid8Spec.HEADER_CELLS) { "grid is too narrow for header" }
         require(seed in 0..0xFFFF) { "seed must fit 16 bits" }
     }
@@ -93,6 +94,10 @@ data class ColorGrid8Profile(
         return (usable + ColorGrid8Spec.PILOT_PERIOD - 1) / ColorGrid8Spec.PILOT_PERIOD
     }
     val payloadCells: Int get() = totalCells - cols * ColorGrid8Spec.HEADER_ROWS - pilotCells
+
+    /** Sender finder centres surround these v2 grids with an eight-cell border. */
+    val hasCanonicalGpuGeometry: Boolean get() = version == ColorGrid8Spec.TRANSFER_HEADER_VERSION &&
+        ((cols == 240 && rows == 216) || (cols == 336 && rows == 288))
     val byteCapacity: Int get() = payloadCells * ColorGrid8Spec.BITS_PER_CELL / 8
     val rawKibS: Double get() = totalCells * 3.0 * fps / 8.0 / 1024.0
     val payloadKibS: Double get() = payloadCells * 3.0 * fps / 8.0 / 1024.0
@@ -136,17 +141,23 @@ data class ColorGrid8AnalysisResult(
     val confusionMatrix: IntArray,
     val analysisMs: Double,
     val payloadSymbols: ByteArray? = null,
+    val pilotMs: Double = 0.0,
+    val payloadMs: Double = 0.0,
+    val macrochromaTiles: List<MacrochromaTile>? = null,
 )
 
 enum class ColorGrid8Stage {
     CAMERA,
+    FINDER_ROI,
     FINDERS,
     GEOMETRY,
+    ORIENTATION,
     WARP,
     HEADER,
     PROFILE,
     PILOTS,
     PAYLOAD,
+    TRANSPORT,
 }
 
 data class ColorGrid8AnalysisAttempt(
@@ -157,6 +168,9 @@ data class ColorGrid8AnalysisAttempt(
     val headerContrast: Double = 0.0,
     val rawHeaderMagic: Int? = null,
     val headerScore: Int = Int.MAX_VALUE,
+    val headerMs: Double = 0.0,
+    val pilotMs: Double = 0.0,
+    val payloadMs: Double = 0.0,
 )
 
 /** Dense one-byte-per-cell Y/U/V means after perspective warp and block averaging. */
@@ -295,15 +309,16 @@ class ColorGrid8Analyzer(
     private val lumaErasureFraction: Double = 0.08,
     private val chromaMarginThreshold: Double = 0.10,
 ) {
-    private data class HeaderLocation(val row: Int, val shift: Int, val reversed: Boolean)
+    data class HeaderLocation(val row: Int, val shift: Int, val reversed: Boolean)
 
-    private data class HeaderProbe(
+    data class HeaderProbe(
         val header: ColorGrid8Header?,
         val contrast: Double,
         val rawMagic: Int,
         val score: Int,
         val location: String,
         val headerLocation: HeaderLocation,
+        val minimumBitMargin: Double = 0.0,
     )
 
     private var lockedHeaderLocation: HeaderLocation? = null
@@ -312,11 +327,26 @@ class ColorGrid8Analyzer(
         lockedHeaderLocation = null
     }
 
+    fun probeHeader(y: ByteArray, cols: Int, rows: Int): HeaderProbe = decodeHeaderFromLuma(y, cols, rows)
+
+    /** Probe just the two canonical rows, including a packed GPU header atlas. */
+    fun probeCanonicalHeader(y: ByteArray, rowStride: Int, offset: Int = 0): HeaderProbe {
+        require(rowStride >= ColorGrid8Spec.HEADER_CELLS)
+        require(offset >= 0 && offset.toLong() + rowStride + ColorGrid8Spec.HEADER_CELLS <= y.size)
+        val first = probeLocation(y, rowStride, HeaderLocation(0, 0, false), offset)
+        val second = probeLocation(y, rowStride, HeaderLocation(1, 0, false), offset)
+        return first.copy(
+            header = first.header?.takeIf { it == second.header },
+            contrast = minOf(first.contrast, second.contrast),
+            minimumBitMargin = minOf(first.minimumBitMargin, second.minimumBitMargin),
+        )
+    }
+
     fun analyze(expectedProfile: ColorGrid8Profile, means: ColorGrid8CellMeans): ColorGrid8AnalysisResult? {
         return analyzeDetailed(expectedProfile, means).result
     }
 
-    fun analyzeDetailed(expectedProfile: ColorGrid8Profile, means: ColorGrid8CellMeans): ColorGrid8AnalysisAttempt {
+    fun analyzeDetailed(expectedProfile: ColorGrid8Profile, means: ColorGrid8CellMeans, canonicalHeader: Boolean = false): ColorGrid8AnalysisAttempt {
         if (
             means.y.size != expectedProfile.totalCells ||
             means.u.size != expectedProfile.totalCells ||
@@ -325,7 +355,9 @@ class ColorGrid8Analyzer(
             return ColorGrid8AnalysisAttempt(null, ColorGrid8Stage.WARP, "cell-mean dimensions do not match expected grid")
         }
         val started = System.nanoTime()
-        val headerProbe = decodeHeaderFromLuma(means.y, expectedProfile.cols, expectedProfile.rows)
+        val headerProbe = if (canonicalHeader) {
+            probeCanonicalHeader(means.y, expectedProfile.cols)
+        } else decodeHeaderFromLuma(means.y, expectedProfile.cols, expectedProfile.rows)
         val header = headerProbe.header
             ?: return ColorGrid8AnalysisAttempt(
                 null,
@@ -343,7 +375,8 @@ class ColorGrid8Analyzer(
         if (
             header.profileId != expectedProfile.profileId ||
             header.fps != expectedProfile.fps ||
-            header.version != expectedProfile.version
+            header.version != expectedProfile.version ||
+            (canonicalHeader && header.seed != expectedProfile.seed)
         ) {
             return ColorGrid8AnalysisAttempt(
                 null,
@@ -378,6 +411,10 @@ class ColorGrid8Analyzer(
         val lumaThreshold = (darkMean + lightMean) * 0.5
         val lumaHalfGap = max(1.0, abs(lightMean - darkMean) * 0.5)
         val pilotMinUvDistance = minimumPilotUvDistance(centroids)
+        if (canonicalHeader && (lightMean - darkMean < 12.0 || pilotMinUvDistance < 8.0)) {
+            return ColorGrid8AnalysisAttempt(null, ColorGrid8Stage.PILOTS,
+                "Pilot colors overlap or luma contrast is too low", header)
+        }
 
         val diagnostic = header.version == ColorGrid8Spec.DIAGNOSTIC_HEADER_VERSION
         val prng = if (diagnostic) Xorshift32(ColorGrid8Spec.payloadSeed(profile, header.frameIndex)) else null
@@ -490,11 +527,11 @@ class ColorGrid8Analyzer(
         )
     }
 
-    private fun probeLocation(y: ByteArray, cols: Int, location: HeaderLocation): HeaderProbe {
+    private fun probeLocation(y: ByteArray, cols: Int, location: HeaderLocation, offset: Int = 0): HeaderProbe {
         val cells = ByteArray(ColorGrid8Spec.HEADER_CELLS)
         for (index in cells.indices) {
             val col = if (location.reversed) cols - 1 - location.shift - index else location.shift + index
-            cells[index] = y[location.row * cols + col]
+            cells[index] = y[offset + location.row * cols + col]
         }
         val label = "row=${location.row} shift=${location.shift} ${if (location.reversed) "reverse" else "forward"}"
         return decodeHeaderCells(cells, label, location)
@@ -536,7 +573,8 @@ class ColorGrid8Analyzer(
         var rawMagic = 0
         for (index in 0 until 12) rawMagic = (rawMagic shl 1) or bits[index]
         val score = Integer.bitCount(rawMagic xor ColorGrid8Spec.HEADER_MAGIC)
-        return HeaderProbe(ColorGrid8Codec.decodeHeaderBits(bits), contrast, rawMagic, score, label, location)
+        return HeaderProbe(ColorGrid8Codec.decodeHeaderBits(bits), contrast, rawMagic, score, label, location,
+            pairMeans.minOf { abs(it - threshold) })
     }
 
     private fun calibratePilots(

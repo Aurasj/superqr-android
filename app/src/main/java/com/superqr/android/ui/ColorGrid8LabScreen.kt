@@ -48,7 +48,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.superqr.android.colorgrid8.ColorGrid8Camera2Manager
 import com.superqr.android.colorgrid8.ColorGrid8FrameContinuity
+import com.superqr.android.colorgrid8.ColorGrid8GlPipeline
 import com.superqr.android.colorgrid8.ColorGrid8LabCameraManager
 import com.superqr.android.colorgrid8.ColorGrid8RunEstimator
 import com.superqr.android.colorgrid8.ColorGrid8TransferReceiverSession
@@ -57,6 +59,7 @@ import com.superqr.android.vision.lab.colorgrid8.ColorGrid8AnalysisResult
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8Profile
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8Spec
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8TransferCodec
+import com.superqr.android.vision.lab.colorgrid8.gl.ColorGrid8GlThread
 import java.util.concurrent.ExecutorService
 import kotlinx.coroutines.launch
 import kotlin.math.min
@@ -74,7 +77,15 @@ fun ColorGrid8LabScreen(
     }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permission = it }
     val manager = remember { ColorGrid8LabCameraManager(context, analysisExecutor) }
+    val glThread = remember { ColorGrid8GlThread() }
+    val camera2Manager = remember { ColorGrid8Camera2Manager(context, glThread) }
+    val glPipeline = remember { ColorGrid8GlPipeline(glThread, analysisExecutor) }
     val transferReceiver = remember { ColorGrid8TransferReceiverSession(context) }
+
+    var cameraPathMode by remember { mutableStateOf("CAMERA2_GL") } // "CAMERA2_GL" or "CAMERAX_NATIVE"
+    var sampleModeIndex by remember { mutableIntStateOf(1) } // 0: 1x, 1: 2x2, 2: 3x3
+    val sampleModes = listOf("1x", "2x2", "3x3")
+
     val status by manager.status.collectAsState()
     val cameraFps by manager.cameraFps.collectAsState()
     val pipelineMs by manager.pipelineMs.collectAsState()
@@ -89,6 +100,16 @@ fun ColorGrid8LabScreen(
     val headerStatus by manager.headerStatus.collectAsState()
     val expectedProfile by manager.expectedProfile.collectAsState()
     val detectedProfile by manager.detectedProfile.collectAsState()
+
+    val camera2Status by camera2Manager.status.collectAsState()
+    val camera2Fps by camera2Manager.cameraFps.collectAsState()
+    val camera2Resolution by camera2Manager.resolution.collectAsState()
+    val camera2Iso by camera2Manager.iso.collectAsState()
+    val camera2Exp by camera2Manager.exposureTime.collectAsState()
+    val camera2Awb by camera2Manager.awbState.collectAsState()
+    val camera2Ae by camera2Manager.aeState.collectAsState()
+    val camera2Focus by camera2Manager.focusState.collectAsState()
+
     val transferState by transferReceiver.state.collectAsState()
     val transferDiagnostics by transferReceiver.diagnostics.collectAsState()
 
@@ -148,8 +169,50 @@ fun ColorGrid8LabScreen(
 
     LaunchedEffect(profile) {
         manager.setProfile(profile)
+        glPipeline.profile = profile
         transferReceiver.reset()
         resetStats()
+    }
+
+    LaunchedEffect(sampleModeIndex) {
+        glPipeline.sampleMode = sampleModeIndex
+    }
+
+    DisposableEffect(glPipeline, profile, sampleModeIndex, camera2Manager) {
+        glPipeline.profile = profile
+        glPipeline.sampleMode = sampleModeIndex
+        camera2Manager.onResolutionChanged = { w, h ->
+            glPipeline.setResolution(w, h)
+        }
+        glPipeline.onResult = { glResult ->
+            glResult.processResult?.analysis?.let { analysis ->
+                transferReceiver.onAnalysis(profile, analysis, glResult.fullPipelineMs)
+            }
+            scope.launch {
+                val processResult = glResult.processResult
+                if (!dataPhaseStarted) {
+                    if (processResult?.analysis == null) return@launch
+                    dataPhaseStarted = true
+                }
+                recordLatency(glResult.fullPipelineMs)
+                val analysis = processResult?.analysis ?: return@launch
+                val frameIndex = analysis.header.frameIndex and 0xFFFF
+                continuity.observe(frameIndex)
+                frameDeliveryRatio = continuity.deliveryRatio
+                sentTransitions = continuity.sentTransitions
+                if (!seen[frameIndex]) {
+                    seen[frameIndex] = true
+                    uniqueFrames++
+                }
+                observations++
+                sumErasure += analysis.erasureRate
+                sumFecLoad += analysis.fecLoad
+                lastResult = analysis
+            }
+        }
+        onDispose {
+            glPipeline.onResult = null
+        }
     }
 
     DisposableEffect(manager, profile) {
@@ -187,16 +250,22 @@ fun ColorGrid8LabScreen(
         }
     }
 
-    DisposableEffect(manager) {
+    DisposableEffect(manager, camera2Manager, glThread, glPipeline) {
         onDispose {
             manager.destroy()
+            camera2Manager.destroy()
+            glPipeline.release()
+            glThread.release()
             transferReceiver.close()
         }
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) manager.stop()
+            if (event == Lifecycle.Event.ON_STOP) {
+                manager.stop()
+                camera2Manager.stop()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -212,11 +281,19 @@ fun ColorGrid8LabScreen(
                 TransferReceiveStatus.PREVIEW,
                 TransferReceiveStatus.SAVING,
                 TransferReceiveStatus.SAVED,
-            )) manager.stop()
+            )) {
+            manager.stop()
+            camera2Manager.stop()
+        }
     }
 
-    val running = status == ColorGrid8LabCameraManager.Status.RUNNING ||
-        status == ColorGrid8LabCameraManager.Status.STARTING
+    val running = if (cameraPathMode == "CAMERA2_GL") {
+        camera2Status == ColorGrid8Camera2Manager.Status.RUNNING || camera2Status == ColorGrid8Camera2Manager.Status.STARTING
+    } else {
+        status == ColorGrid8LabCameraManager.Status.RUNNING || status == ColorGrid8LabCameraManager.Status.STARTING
+    }
+    val effectiveCameraFps = if (cameraPathMode == "CAMERA2_GL") camera2Fps else cameraFps
+    val effectiveResolution = if (cameraPathMode == "CAMERA2_GL") camera2Resolution else resolution
     val avgErasure = if (observations > 0) sumErasure / observations else 0.0
     val avgFecLoad = if (observations > 0) sumFecLoad / observations else 0.0
     val protectedChannelBudget = ColorGrid8TransferCodec.logicalChunkCapacity(profile) *
@@ -227,10 +304,9 @@ fun ColorGrid8LabScreen(
         frameDeliveryRatio = frameDeliveryRatio,
     )
     val estimatedGoodput = if (observations > 0) runEstimate.estimatedPostFecKibS else 0.0
-    // Do not declare victory from a handful of easy frames. Require at least
-    // two sender-seconds of logical continuity in addition to the latency target.
-    val enoughRun = observations >= 60 && sentTransitions >= (profile.fps * 2L)
-    val targetPass = enoughRun && transferState.usefulKibPerSecond >= 1024.0 && p95Ms > 0.0
+    val fileVerified = transferState.status in setOf(
+        TransferReceiveStatus.PREVIEW, TransferReceiveStatus.SAVING, TransferReceiveStatus.SAVED,
+    )
 
     Column(
         modifier.fillMaxSize().background(Color(0xFF090B10)).padding(horizontal = 16.dp, vertical = 8.dp),
@@ -251,6 +327,21 @@ fun ColorGrid8LabScreen(
                 enabled = !running && transferState.status !in setOf(TransferReceiveStatus.VERIFYING, TransferReceiveStatus.PREVIEW, TransferReceiveStatus.SAVING),
                 modifier = Modifier.weight(1f),
             ) { Text("SENDER ${profile.fps} FPS", fontSize = 11.sp) }
+        }
+        Spacer(Modifier.height(4.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = {
+                    cameraPathMode = if (cameraPathMode == "CAMERA2_GL") "CAMERAX_NATIVE" else "CAMERA2_GL"
+                },
+                enabled = !running,
+                modifier = Modifier.weight(1f),
+            ) { Text(if (cameraPathMode == "CAMERA2_GL") "PATH: CAMERA2_GL" else "PATH: CAMERAX_NATIVE", fontSize = 11.sp) }
+            OutlinedButton(
+                onClick = { sampleModeIndex = (sampleModeIndex + 1) % sampleModes.size },
+                enabled = !running,
+                modifier = Modifier.weight(1f),
+            ) { Text("SAMPLING: ${sampleModes[sampleModeIndex]}", fontSize = 11.sp) }
         }
         Text(
             "Channel budget: ${"%.1f".format(protectedChannelBudget)} KiB/s after 8+1 XOR • not a measured speed",
@@ -276,7 +367,7 @@ fun ColorGrid8LabScreen(
         Spacer(Modifier.height(6.dp))
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            Grid8Metric("Camera", "%.1f fps".format(cameraFps))
+            Grid8Metric("Camera", "%.1f fps".format(effectiveCameraFps))
             Grid8Metric("p50", if (p50Ms > 0) "%.1f ms".format(p50Ms) else "—")
             Grid8Metric("p95", if (p95Ms > 0) "%.1f ms".format(p95Ms) else "—")
             Grid8Metric("Delivery", if (sentTransitions > 0) "%.1f%%".format(frameDeliveryRatio * 100) else "—")
@@ -367,8 +458,8 @@ fun ColorGrid8LabScreen(
             ) {
                 Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text(
-                        if (targetPass) "LIVE TRANSFER ≥1 MiB/s" else "LIVE OPTICAL CHANNEL",
-                        color = if (targetPass) Color(0xFF7EE787) else Color(0xFFF2CC60),
+                        if (fileVerified) "FILE VERIFIED" else "EXPERIMENTAL OPTICAL CHANNEL",
+                        color = if (fileVerified) Color(0xFF7EE787) else Color(0xFFF2CC60),
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp,
                     )
@@ -431,11 +522,16 @@ fun ColorGrid8LabScreen(
                 onClick = {
                     if (running) {
                         manager.stop()
+                        camera2Manager.stop()
                     } else {
                         if (transferState.status in setOf(TransferReceiveStatus.SAVED, TransferReceiveStatus.ERROR)) {
                             transferReceiver.reset()
                         }
-                        manager.start(lifecycleOwner)
+                        if (cameraPathMode == "CAMERA2_GL") {
+                            camera2Manager.start()
+                        } else {
+                            manager.start(lifecycleOwner)
+                        }
                     }
                 },
                 enabled = transferState.status !in setOf(
@@ -476,6 +572,24 @@ fun ColorGrid8LabScreen(
                 },
                 modifier = Modifier.weight(1f),
             ) { Text("SHARE RESULTS") }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        var benchSummary by remember { mutableStateOf<String?>(null) }
+        Button(
+            onClick = {
+                analysisExecutor.execute {
+                    val report = com.superqr.android.vision.lab.colorgrid8.MacrochromaNativeBenchRunner.runOnDeviceBenchmark()
+                    benchSummary = "Native: ${if (report.realJniInvoked) "YES" else "NO"} (${report.framesExecutedNative} frames) | Clean: ${if (report.cleanFrameParity) "PASS" else "FAIL"} | RS: ${if (report.rs1ByteParity && report.rs2ByteParity && report.rs3ByteRejection) "PASS" else "FAIL"} | 10MB SHA: ${if (report.fullSha256Match) "PASS" else "FAIL"} | p50: ${"%.2f".format(report.nativeP50Ms)}ms"
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2))
+        ) {
+            Text("RUN NATIVE SYNTHETIC BENCHMARK", fontWeight = FontWeight.Bold)
+        }
+        benchSummary?.let { summary ->
+            Text(summary, color = Color(0xFF4CAF50), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }

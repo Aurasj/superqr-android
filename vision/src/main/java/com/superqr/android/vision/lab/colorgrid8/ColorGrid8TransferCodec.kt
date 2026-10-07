@@ -99,7 +99,7 @@ object ColorGrid8TransferCodec {
         )
     }
 
-    internal fun symbolsToBytes(symbols: ByteArray): ByteArray {
+    fun symbolsToBytes(symbols: ByteArray): ByteArray {
         val output = ByteArray(symbols.size * ColorGrid8Spec.BITS_PER_CELL / 8)
         var accumulator = 0
         var bitCount = 0

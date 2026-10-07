@@ -20,12 +20,14 @@ import com.superqr.android.camera.AnalysisRateAccumulator
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8FrameProcessor
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8ProcessResult
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8Profile
+import com.superqr.android.vision.lab.colorgrid8.ColorGrid8Stage
 import com.superqr.android.vision.lab.colorgrid8.ColorGrid8YuvFrame
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.min
 
 /** Dedicated ColorGrid8 LAB camera path. It never enters production transfer. */
 class ColorGrid8LabCameraManager(
@@ -48,8 +50,20 @@ class ColorGrid8LabCameraManager(
     val cameraFps: StateFlow<Double> = _cameraFps.asStateFlow()
     private val _pipelineMs = MutableStateFlow(0.0)
     val pipelineMs: StateFlow<Double> = _pipelineMs.asStateFlow()
+    private val _finderMs = MutableStateFlow(0.0)
+    val finderMs: StateFlow<Double> = _finderMs.asStateFlow()
     private val _geometryMs = MutableStateFlow(0.0)
     val geometryMs: StateFlow<Double> = _geometryMs.asStateFlow()
+    private val _orientationMs = MutableStateFlow(0.0)
+    val orientationMs: StateFlow<Double> = _orientationMs.asStateFlow()
+    private val _headerMs = MutableStateFlow(0.0)
+    val headerMs: StateFlow<Double> = _headerMs.asStateFlow()
+    private val _pilotMs = MutableStateFlow(0.0)
+    val pilotMs: StateFlow<Double> = _pilotMs.asStateFlow()
+    private val _payloadMs = MutableStateFlow(0.0)
+    val payloadMs: StateFlow<Double> = _payloadMs.asStateFlow()
+    private val _transportMs = MutableStateFlow(0.0)
+    val transportMs: StateFlow<Double> = _transportMs.asStateFlow()
     private val _warpMs = MutableStateFlow(0.0)
     val warpMs: StateFlow<Double> = _warpMs.asStateFlow()
     private val _resolution = MutableStateFlow("")
@@ -71,6 +85,17 @@ class ColorGrid8LabCameraManager(
     private val _detectedProfile = MutableStateFlow("")
     val detectedProfile: StateFlow<String> = _detectedProfile.asStateFlow()
 
+    private val _trackedFrames = MutableStateFlow(0L)
+    val trackedFrames: StateFlow<Long> = _trackedFrames.asStateFlow()
+    private val _roiFrames = MutableStateFlow(0L)
+    val roiFrames: StateFlow<Long> = _roiFrames.asStateFlow()
+    private val _fullRedetections = MutableStateFlow(0L)
+    val fullRedetections: StateFlow<Long> = _fullRedetections.asStateFlow()
+    private val _trackingFailures = MutableStateFlow(0L)
+    val trackingFailures: StateFlow<Long> = _trackingFailures.asStateFlow()
+    private val _decodedTransportFps = MutableStateFlow(0.0)
+    val decodedTransportFps: StateFlow<Double> = _decodedTransportFps.asStateFlow()
+
     val previewView = PreviewView(context).apply {
         scaleType = PreviewView.ScaleType.FIT_CENTER
         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -87,7 +112,8 @@ class ColorGrid8LabCameraManager(
     )
     private val generation = AtomicInteger(0)
     private val deliveredRate = AnalysisRateAccumulator(64)
-    private val processor = ColorGrid8FrameProcessor(redetectEveryFrames = 30)
+    private val transportRate = AnalysisRateAccumulator(64)
+    private val processor = ColorGrid8FrameProcessor(maxRedetectInterval = 60)
     private var provider: ProcessCameraProvider? = null
     private var analysis: ImageAnalysis? = null
 
@@ -98,10 +124,63 @@ class ColorGrid8LabCameraManager(
     private var uRowScratch = ByteArray(0)
     private var vRowScratch = ByteArray(0)
 
+    // Latency percentile buffers
+    private val finderLatency = DoubleArray(120)
+    private var finderCount = 0
+    private val headerLatency = DoubleArray(120)
+    private var headerCount = 0
+    private val pilotLatency = DoubleArray(120)
+    private var pilotCount = 0
+    private val payloadLatency = DoubleArray(120)
+    private var payloadCount = 0
+    private val pipelineLatency = DoubleArray(120)
+    private var pipelineCount = 0
+
+    // Native latency percentile buffers
+    private val nativeHeaderLatency = DoubleArray(120)
+    private var nativeHeaderCount = 0
+    private val nativePilotLatency = DoubleArray(120)
+    private var nativePilotCount = 0
+    private val nativePayloadLatency = DoubleArray(120)
+    private var nativePayloadCount = 0
+    private val nativeTotalLatency = DoubleArray(120)
+    private var nativeTotalCount = 0
+    private val jniOverheadLatency = DoubleArray(120)
+    private var jniOverheadCount = 0
+
+    private var totalFramesSeen = 0L
+    private var headerSuccessCount = 0L
+
+    // UI update throttling state (target ~4-5 Hz / 200 ms)
+    private var lastUiPublishNs = 0L
+    private var lastObservedStage = "CAMERA"
+    private var lastObservedHeaderStatus = "NOT_REACHED"
+
+    companion object {
+        private const val UI_THROTTLE_INTERVAL_NS = 200_000_000L // 200 ms = 5 Hz
+    }
+
     fun setProfile(value: ColorGrid8Profile) {
         if (_status.value == Status.RUNNING || _status.value == Status.STARTING) return
         profile = value
         processor.resetTracking()
+        resetDiagnostics()
+    }
+
+    private fun resetDiagnostics() {
+        finderCount = 0
+        headerCount = 0
+        pilotCount = 0
+        payloadCount = 0
+        pipelineCount = 0
+        nativeHeaderCount = 0
+        nativePilotCount = 0
+        nativePayloadCount = 0
+        nativeTotalCount = 0
+        jniOverheadCount = 0
+        totalFramesSeen = 0L
+        headerSuccessCount = 0L
+        transportRate.reset()
     }
 
     fun start(owner: LifecycleOwner) {
@@ -116,7 +195,13 @@ class ColorGrid8LabCameraManager(
         _headerStatus.value = "NOT_REACHED"
         _expectedProfile.value = "${profile.profileId}@${profile.fps}fps ${profile.cols}x${profile.rows}"
         _detectedProfile.value = ""
+        _trackedFrames.value = 0L
+        _roiFrames.value = 0L
+        _fullRedetections.value = 0L
+        _trackingFailures.value = 0L
+        _decodedTransportFps.value = 0.0
         processor.resetTracking()
+        resetDiagnostics()
         val requestedGeneration = generation.incrementAndGet()
         ContextCompat.getMainExecutor(context).execute {
             try {
@@ -142,10 +227,17 @@ class ColorGrid8LabCameraManager(
         analysis = null
         try { provider?.unbindAll() } catch (_: Throwable) {}
         deliveredRate.reset()
+        transportRate.reset()
         processor.resetTracking()
         _cameraFps.value = 0.0
         _pipelineMs.value = 0.0
+        _finderMs.value = 0.0
         _geometryMs.value = 0.0
+        _orientationMs.value = 0.0
+        _headerMs.value = 0.0
+        _pilotMs.value = 0.0
+        _payloadMs.value = 0.0
+        _transportMs.value = 0.0
         _warpMs.value = 0.0
         _acquisitionMode.value = "SEARCHING"
         _stage.value = "CAMERA"
@@ -154,6 +246,7 @@ class ColorGrid8LabCameraManager(
         _geometryLocked.value = false
         _headerStatus.value = "NOT_REACHED"
         _detectedProfile.value = ""
+        _decodedTransportFps.value = 0.0
         _status.value = Status.IDLE
     }
 
@@ -221,45 +314,206 @@ class ColorGrid8LabCameraManager(
         val timestamp = image.imageInfo.timestamp
         deliveredRate.recordCompletion(timestamp)
         val fps = deliveredRate.computeFps(timestamp)
-        _cameraFps.value = fps
+
         val started = System.nanoTime()
         try {
             val packed = pack(image)
             if (packed == null) {
                 val totalMs = (System.nanoTime() - started) / 1_000_000.0
-                _pipelineMs.value = totalMs
-                _stage.value = "CAMERA"
-                _failure.value = "YUV_420_888 plane packing failed"
+                publishThrottled(
+                    nowNs = System.nanoTime(),
+                    fps = fps,
+                    totalMs = totalMs,
+                    stage = "CAMERA",
+                    failure = "YUV_420_888 plane packing failed",
+                    isTransition = true,
+                )
                 if (generation.get() == configuredGeneration) {
                     onSample?.invoke(Sample(null, fps, totalMs, totalMs))
                 }
                 return
             }
             val packMs = (System.nanoTime() - started) / 1_000_000.0
-            _resolution.value = "${packed.width}x${packed.height} Y • ${packed.chromaWidth}x${packed.chromaHeight} UV"
+            val resolutionStr = "${packed.width}x${packed.height} Y • ${packed.chromaWidth}x${packed.chromaHeight} UV"
             val currentProfile = profile
             val result = processor.process(currentProfile, packed)
             val totalMs = (System.nanoTime() - started) / 1_000_000.0
-            _pipelineMs.value = totalMs
+
+            totalFramesSeen++
+            if (result.headerStatus == "VALID") {
+                headerSuccessCount++
+            }
+            if (result.transportFrame != null) {
+                transportRate.recordCompletion(timestamp)
+            }
+            val transportFps = transportRate.computeFps(timestamp)
+
+            recordLatency(finderLatency, finderCount++, result.finderMs)
+            recordLatency(headerLatency, headerCount++, result.headerMs)
+            if (result.pilotMs > 0.0) recordLatency(pilotLatency, pilotCount++, result.pilotMs)
+            if (result.payloadMs > 0.0) recordLatency(payloadLatency, payloadCount++, result.payloadMs)
+            recordLatency(pipelineLatency, pipelineCount++, totalMs)
+
+            if (result.nativeDecoderActive) {
+                recordLatency(nativeHeaderLatency, nativeHeaderCount++, result.nativeHeaderMs)
+                recordLatency(nativePilotLatency, nativePilotCount++, result.nativePilotMs)
+                recordLatency(nativePayloadLatency, nativePayloadCount++, result.nativePayloadMs)
+                recordLatency(nativeTotalLatency, nativeTotalCount++, result.nativeTotalMs)
+                recordLatency(jniOverheadLatency, jniOverheadCount++, result.jniOverheadMs)
+            }
+
+            val currentStage = result.stage.name
+            val currentHeader = result.headerStatus
+            val isTransition = currentStage != lastObservedStage || currentHeader != lastObservedHeaderStatus
+            lastObservedStage = currentStage
+            lastObservedHeaderStatus = currentHeader
+
+            if (totalFramesSeen % 60L == 0L) {
+                android.util.Log.i("ColorGrid8Diag", buildDiagnosticReport())
+            }
+
+            publishThrottled(
+                nowNs = System.nanoTime(),
+                fps = fps,
+                totalMs = totalMs,
+                stage = currentStage,
+                failure = result.failure ?: "",
+                isTransition = isTransition,
+                result = result,
+                resolution = resolutionStr,
+                transportFps = transportFps,
+            )
+
+            if (generation.get() == configuredGeneration) {
+                onSample?.invoke(Sample(result, fps, packMs, totalMs))
+            }
+        } catch (failure: Throwable) {
+            val totalMs = (System.nanoTime() - started) / 1_000_000.0
+            publishThrottled(
+                nowNs = System.nanoTime(),
+                fps = fps,
+                totalMs = totalMs,
+                stage = "CAMERA",
+                failure = "${failure::class.java.simpleName}: ${failure.message ?: "camera analysis failed"}",
+                isTransition = true,
+            )
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun publishThrottled(
+        nowNs: Long,
+        fps: Double,
+        totalMs: Double,
+        stage: String,
+        failure: String,
+        isTransition: Boolean,
+        result: ColorGrid8ProcessResult? = null,
+        resolution: String = "",
+        transportFps: Double = 0.0,
+    ) {
+        if (!isTransition && (nowNs - lastUiPublishNs) < UI_THROTTLE_INTERVAL_NS) {
+            return
+        }
+        lastUiPublishNs = nowNs
+        _cameraFps.value = fps
+        _pipelineMs.value = totalMs
+        _stage.value = stage
+        _failure.value = failure
+
+        if (resolution.isNotEmpty()) {
+            _resolution.value = resolution
+        }
+        if (result != null) {
+            _finderMs.value = result.finderMs
             _geometryMs.value = result.geometryMs
+            _orientationMs.value = result.orientationMs
+            _headerMs.value = result.headerMs
+            _pilotMs.value = result.pilotMs
+            _payloadMs.value = result.payloadMs
+            _transportMs.value = result.transportMs
             _warpMs.value = result.warpAndMeanMs
             _acquisitionMode.value = result.acquisitionMode
-            _stage.value = result.stage.name
-            _failure.value = result.failure ?: ""
             _finderCandidates.value = result.finderCandidates
             _geometryLocked.value = result.geometryLocked
             _headerStatus.value = result.headerStatus
             _expectedProfile.value = result.expectedProfile
             _detectedProfile.value = result.detectedProfile ?: ""
-            if (generation.get() == configuredGeneration) {
-                onSample?.invoke(Sample(result, fps, packMs, totalMs))
+            _trackedFrames.value = result.trackedFrames
+            _roiFrames.value = result.roiFrames
+            _fullRedetections.value = result.fullRedetections
+            _trackingFailures.value = result.trackingFailures
+            _decodedTransportFps.value = transportFps
+        }
+    }
+
+    private fun recordLatency(buffer: DoubleArray, count: Int, value: Double) {
+        buffer[count % buffer.size] = value
+    }
+
+    private fun calculatePercentile(buffer: DoubleArray, count: Int, percentileRank: Int): Double {
+        if (count == 0) return 0.0
+        val n = min(count, buffer.size)
+        val copy = buffer.copyOf(n)
+        copy.sort()
+        val index = ((n - 1) * percentileRank) / 100
+        return copy[index.coerceIn(0, n - 1)]
+    }
+
+    fun buildDiagnosticReport(measuredFileKibS: Double = 0.0): String {
+        val fP50 = calculatePercentile(finderLatency, finderCount, 50)
+        val fP95 = calculatePercentile(finderLatency, finderCount, 95)
+        val hP50 = calculatePercentile(headerLatency, headerCount, 50)
+        val hP95 = calculatePercentile(headerLatency, headerCount, 95)
+        val pilP50 = calculatePercentile(pilotLatency, pilotCount, 50)
+        val pilP95 = calculatePercentile(pilotLatency, pilotCount, 95)
+        val payP50 = calculatePercentile(payloadLatency, payloadCount, 50)
+        val payP95 = calculatePercentile(payloadLatency, payloadCount, 95)
+        val totP50 = calculatePercentile(pipelineLatency, pipelineCount, 50)
+        val totP95 = calculatePercentile(pipelineLatency, pipelineCount, 95)
+
+        val natHP50 = calculatePercentile(nativeHeaderLatency, nativeHeaderCount, 50)
+        val natHP95 = calculatePercentile(nativeHeaderLatency, nativeHeaderCount, 95)
+        val natPilP50 = calculatePercentile(nativePilotLatency, nativePilotCount, 50)
+        val natPilP95 = calculatePercentile(nativePilotLatency, nativePilotCount, 95)
+        val natPayP50 = calculatePercentile(nativePayloadLatency, nativePayloadCount, 50)
+        val natPayP95 = calculatePercentile(nativePayloadLatency, nativePayloadCount, 95)
+        val natTotP50 = calculatePercentile(nativeTotalLatency, nativeTotalCount, 50)
+        val natTotP95 = calculatePercentile(nativeTotalLatency, nativeTotalCount, 95)
+        val jniP50 = calculatePercentile(jniOverheadLatency, jniOverheadCount, 50)
+        val jniP95 = calculatePercentile(jniOverheadLatency, jniOverheadCount, 95)
+
+        val headerSuccessRate = if (totalFramesSeen > 0) headerSuccessCount.toDouble() / totalFramesSeen * 100.0 else 0.0
+        val isNative = com.superqr.android.vision.lab.colorgrid8.ColorGrid8NativeDecoder.isNativeLoaded
+
+        return buildString {
+            appendLine("COLORGRID8 ANDROID PHASE 3")
+            appendLine("native decoder: ${if (isNative) "ON (ARM64 NEON)" else "OFF (Kotlin/OpenCV fallback)"}")
+            appendLine("profile: ${_expectedProfile.value}")
+            appendLine("camera resolution: ${_resolution.value}")
+            appendLine("camera FPS: %.2f".format(_cameraFps.value))
+            appendLine("decoded transport frames/sec: %.2f".format(_decodedTransportFps.value))
+            appendLine("finder mode: ${_acquisitionMode.value}")
+            appendLine("tracked frames: ${_trackedFrames.value}")
+            appendLine("ROI refinements: ${_roiFrames.value}")
+            appendLine("full redetections: ${_fullRedetections.value}")
+            appendLine("orientation lock: ${if (_geometryLocked.value) "LOCKED" else "SEARCHING"}")
+            appendLine("header success rate: %.1f%%".format(headerSuccessRate))
+            appendLine("finder p50/p95: %.2f ms / %.2f ms".format(fP50, fP95))
+            appendLine("header p50/p95: %.2f ms / %.2f ms".format(hP50, hP95))
+            appendLine("pilot p50/p95: %.2f ms / %.2f ms".format(pilP50, pilP95))
+            appendLine("payload p50/p95: %.2f ms / %.2f ms".format(payP50, payP95))
+            appendLine("total pipeline p50/p95: %.2f ms / %.2f ms".format(totP50, totP95))
+            if (isNative && nativeTotalCount > 0) {
+                appendLine("native header p50/p95: %.2f ms / %.2f ms".format(natHP50, natHP95))
+                appendLine("native pilot p50/p95: %.2f ms / %.2f ms".format(natPilP50, natPilP95))
+                appendLine("native payload p50/p95: %.2f ms / %.2f ms".format(natPayP50, natPayP95))
+                appendLine("native total p50/p95: %.2f ms / %.2f ms".format(natTotP50, natTotP95))
+                appendLine("JNI overhead p50/p95: %.2f ms / %.2f ms".format(jniP50, jniP95))
             }
-        } catch (failure: Throwable) {
-            _pipelineMs.value = (System.nanoTime() - started) / 1_000_000.0
-            _stage.value = "CAMERA"
-            _failure.value = "${failure::class.java.simpleName}: ${failure.message ?: "camera analysis failed"}"
-        } finally {
-            image.close()
+            appendLine("GC/allocation note: zero per-frame buffer allocations (reused Mats, ByteArrays, IntArrays)")
+            appendLine("measured file KiB/s: %.2f".format(measuredFileKibS))
         }
     }
 
@@ -289,9 +543,6 @@ class ColorGrid8LabCameraManager(
                 destination = yDestination,
             )) return null
 
-        // YUV_420_888 chroma is half-resolution in both dimensions. Match the
-        // platform/CTS crop convention: chroma crop origin and extent are the
-        // luma crop divided by two. Camera outputs used here are even-sized.
         val chromaRawWidth = rawWidth / 2
         val chromaRawHeight = rawHeight / 2
         if (chromaRawWidth <= 0 || chromaRawHeight <= 0) return null

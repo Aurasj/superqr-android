@@ -10,9 +10,20 @@ plugins {
 android {
     namespace = "com.superqr.android.vision"
     compileSdk = 37
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         minSdk = 26
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     compileOptions {
@@ -22,7 +33,7 @@ android {
 }
 
 dependencies {
-    implementation(libs.open.cv)
+    api(libs.open.cv)
     testImplementation(libs.junit)
 }
 

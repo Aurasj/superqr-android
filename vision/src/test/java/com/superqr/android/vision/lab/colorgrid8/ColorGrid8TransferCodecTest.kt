@@ -38,6 +38,22 @@ class ColorGrid8TransferCodecTest {
         assertFalse(decoded.validBlocks.single())
     }
 
+    @Test
+    fun opticalHeaderAloneMustNotReportVerifiedTransport() {
+        val headerOnly = ColorGrid8ProcessResult(
+            analysis = null, stage = ColorGrid8Stage.PAYLOAD, failure = null,
+            quad = emptyList(), acquisitionMode = "GPU_CELL_MEANS", finderCandidates = 4,
+            geometryLocked = true, headerStatus = "VALID", expectedProfile = "test", detectedProfile = "test",
+        )
+        assertFalse(headerOnly.hasVerifiedTransport)
+        val raw = frameBytes(ByteArray(128) { it.toByte() })
+        val valid = ColorGrid8TransferCodec.parse(profile, bytesToSymbols(raw))
+        assertTrue(headerOnly.copy(transportFrame = valid).hasVerifiedTransport)
+        raw[raw.lastIndex] = (raw.last().toInt() xor 1).toByte()
+        val corrupt = ColorGrid8TransferCodec.parse(profile, bytesToSymbols(raw))
+        assertFalse(headerOnly.copy(transportFrame = corrupt).hasVerifiedTransport)
+    }
+
     private fun frameBytes(payload: ByteArray): ByteArray {
         val header = ByteBuffer.allocate(ColorGrid8TransferCodec.HEADER_SIZE)
             .put(byteArrayOf('S'.code.toByte(), 'Q'.code.toByte(), 'G'.code.toByte(), '2'.code.toByte()))
